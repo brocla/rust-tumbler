@@ -1,56 +1,16 @@
-import { open } from "@tauri-apps/plugin-dialog";
-import { invoke } from "@tauri-apps/api/core";
-import { FileText, ChevronLeft, ChevronRight, ZoomIn, ZoomOut } from "lucide-react";
+import { ChevronLeft, ChevronRight, ZoomIn, ZoomOut } from "lucide-react";
 import { usePdfStore } from "../store/usePdfStore";
-import type { PageDimension } from "../store/usePdfStore";
 import { ZOOM_PRESETS } from "../utils/zoomConstants";
 
-interface DocInfo {
-  docId: string;
-  pageCount: number;
-  pageDimensions: PageDimension[];
+interface ToolbarProps {
+  onOpenFile: () => void;
 }
 
-export function Toolbar() {
+export function Toolbar({ onOpenFile }: ToolbarProps) {
   const activeTab = usePdfStore((s) =>
     s.tabs.find((t) => t.id === s.activeTabId),
   );
-  const addTab = usePdfStore((s) => s.addTab);
   const updateTab = usePdfStore((s) => s.updateTab);
-
-  const handleOpen = async () => {
-    const selected = await open({
-      multiple: false,
-      filters: [{ name: "PDF Documents", extensions: ["pdf"] }],
-    });
-    if (!selected) return;
-
-    const path = typeof selected === "string" ? selected : selected;
-
-    try {
-      const info = await invoke<DocInfo>("open_document", { path });
-      const tabId = crypto.randomUUID();
-      addTab({
-        id: tabId,
-        docId: info.docId,
-        fileName: path.split(/[\\/]/).pop() ?? "Untitled",
-        pageCount: info.pageCount,
-        pageDimensions: info.pageDimensions,
-        currentPage: 1,
-        scrollTop: 0,
-        zoom: 100,
-        zoomMode: "numeric",
-        displayMode: "normal",
-        searchQuery: "",
-        searchResults: [],
-        searchResultIndex: -1,
-        metadataDirty: false,
-        loading: false,
-      });
-    } catch (err) {
-      console.error("Failed to open document:", err);
-    }
-  };
 
   const handlePrevPage = () => {
     if (!activeTab || activeTab.currentPage <= 1) return;
@@ -94,17 +54,17 @@ export function Toolbar() {
     <div className="toolbar">
       <div className="toolbar-group">
         <button
-          className="toolbar-button"
-          onClick={handleOpen}
+          className="toolbar-button toolbar-button-text"
+          onClick={onOpenFile}
           title="Open PDF (Ctrl+O)"
         >
-          <FileText size={18} />
+          <strong>Open PDF</strong>
         </button>
       </div>
 
       {activeTab && (
         <>
-          <div className="toolbar-separator" />
+          <div className="toolbar-spacer" />
           <div className="toolbar-group">
             <button
               className="toolbar-button"

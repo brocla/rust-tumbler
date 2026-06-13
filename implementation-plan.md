@@ -537,9 +537,26 @@ Icon rail with toggle buttons, resizable sidebar with three panels (Thumbnails, 
 
 3. **Thumbnail panel:** Grid of page thumbnails. Each is rendered by calling `render_page` at 18% scale. Click to jump. Active page has accent border.
 
-4. **Search panel:** Search input + paginated result list + Prev/Next navigation. Wired to the search commands from Phase 4. Enter/Shift+Enter for navigation. Ctrl+F to focus.
+4. **Search panel:** Search input + paginated result list + Prev/Next navigation. Wired to the search commands from Phase 4. Enter/Shift+Enter for navigation.
 
-5. **Metadata panel:** Read-only display for now (Phase 7 adds editing). Show title, author, subject, etc. from a `get_metadata` Rust command.
+5. **Ctrl+F handler:** Register a global `keydown` listener in `App.tsx` (the app root, always mounted) with `{ capture: true }`. On Ctrl+F, call `e.preventDefault()` and `e.stopImmediatePropagation()` to suppress WebView2's built-in find dialog. Then open the search sidebar (if not already open) and, after a short delay for the panel to mount, focus the search input and select its text. The handler **must not** live inside the `SearchPanel` component — that component is only mounted when the panel is open, so a handler there would not fire when the panel is closed, allowing WebView2's native find to intercept the keystroke.
+
+   ```typescript
+   // In App.tsx — always mounted
+   useEffect(() => {
+     const handleCtrlF = (e: KeyboardEvent) => {
+       if (e.ctrlKey && e.key === "f") {
+         e.preventDefault();
+         e.stopImmediatePropagation();
+         // Open search panel, focus + select input
+       }
+     };
+     window.addEventListener("keydown", handleCtrlF, { capture: true });
+     return () => window.removeEventListener("keydown", handleCtrlF, { capture: true });
+   }, []);
+   ```
+
+6. **Metadata panel:** Read-only display for now (Phase 7 adds editing). Show title, author, subject, etc. from a `get_metadata` Rust command.
 
 ### Grid layout for the app shell:
 ```css

@@ -31,6 +31,9 @@ pub fn run() {
             commands::document::open_document,
             commands::document::close_document,
             commands::render::render_page,
+            commands::text::extract_page_text,
+            commands::text::search_document,
+            commands::metadata::get_metadata,
         ])
         .setup(|app| {
             #[cfg(debug_assertions)]

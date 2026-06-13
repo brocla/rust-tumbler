@@ -8,6 +8,7 @@ pub fn render_page(
     doc_id: String,
     page: u32,
     width: u32,
+    #[allow(unused)]
     height: u32,
 ) -> Result<tauri::ipc::Response, String> {
     let docs = state
@@ -26,8 +27,7 @@ pub fn render_page(
         .map_err(|e| format!("Failed to get page {page}: {e}"))?;
 
     let config = PdfRenderConfig::new()
-        .set_target_width(width as Pixels)
-        .set_maximum_height(height as Pixels);
+        .set_target_width(width as Pixels);
 
     let bitmap = pdf_page
         .render_with_config(&config)

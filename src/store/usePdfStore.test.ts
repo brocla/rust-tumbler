@@ -204,4 +204,74 @@ describe("usePdfStore", () => {
       expect(usePdfStore.getState().sidebarWidth).toBe(400);
     });
   });
+
+  describe("search navigation", () => {
+    it("nextSearchResult advances through results and wraps around", () => {
+      const tab = makeTab({
+        id: "tab-1",
+        searchResults: [
+          { page: 1, rects: [{ x: 0, y: 0, width: 10, height: 10 }] },
+          {
+            page: 3,
+            rects: [
+              { x: 0, y: 0, width: 10, height: 10 },
+              { x: 0, y: 20, width: 10, height: 10 },
+            ],
+          },
+        ],
+        searchResultIndex: -1,
+      });
+      usePdfStore.getState().addTab(tab);
+
+      // First next → index 0 (page 1)
+      usePdfStore.getState().nextSearchResult();
+      let state = usePdfStore.getState().tabs[0];
+      expect(state.searchResultIndex).toBe(0);
+      expect(state.currentPage).toBe(1);
+
+      // Second next → index 1 (page 3, first rect)
+      usePdfStore.getState().nextSearchResult();
+      state = usePdfStore.getState().tabs[0];
+      expect(state.searchResultIndex).toBe(1);
+      expect(state.currentPage).toBe(3);
+
+      // Third next → index 2 (page 3, second rect)
+      usePdfStore.getState().nextSearchResult();
+      state = usePdfStore.getState().tabs[0];
+      expect(state.searchResultIndex).toBe(2);
+      expect(state.currentPage).toBe(3);
+
+      // Fourth next → wraps to index 0 (page 1)
+      usePdfStore.getState().nextSearchResult();
+      state = usePdfStore.getState().tabs[0];
+      expect(state.searchResultIndex).toBe(0);
+      expect(state.currentPage).toBe(1);
+    });
+
+    it("prevSearchResult goes backward and wraps around", () => {
+      const tab = makeTab({
+        id: "tab-1",
+        searchResults: [
+          { page: 1, rects: [{ x: 0, y: 0, width: 10, height: 10 }] },
+          { page: 2, rects: [{ x: 0, y: 0, width: 10, height: 10 }] },
+        ],
+        searchResultIndex: 0,
+      });
+      usePdfStore.getState().addTab(tab);
+
+      // Prev from 0 → wraps to last (index 1, page 2)
+      usePdfStore.getState().prevSearchResult();
+      const state = usePdfStore.getState().tabs[0];
+      expect(state.searchResultIndex).toBe(1);
+      expect(state.currentPage).toBe(2);
+    });
+
+    it("does nothing when there are no search results", () => {
+      const tab = makeTab({ id: "tab-1", searchResults: [] });
+      usePdfStore.getState().addTab(tab);
+
+      usePdfStore.getState().nextSearchResult();
+      expect(usePdfStore.getState().tabs[0].searchResultIndex).toBe(-1);
+    });
+  });
 });

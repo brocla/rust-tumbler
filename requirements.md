@@ -175,7 +175,7 @@ Three zoom modes:
 - **Results:** List of page numbers containing matches, displayed in a paginated sidebar list (20 per page).
 - **Navigation:** Prev/Next buttons, Enter/Shift+Enter in the input, or click a result to jump.
 - **Highlighting:** Yellow rectangles (rgba(255, 210, 0, 0.35)) overlaid on matching text spans. Highlights span across text item boundaries where a match crosses items.
-- **Focus:** Ctrl+F opens the search panel and selects all text in the input field.
+- **Focus:** Ctrl+F opens the search panel (if not already open), puts keyboard focus in the search input, and selects all existing text so the user can immediately type a new query. If the panel is already open, Ctrl+F still focuses and selects. The handler must intercept Ctrl+F in the capture phase (`capture: true`) with `preventDefault()` and `stopImmediatePropagation()` to suppress WebView2's built-in find dialog, which would otherwise steal the keystroke. The handler must be registered at the application root (not inside the search panel component) so it is active regardless of whether the search panel is currently mounted.
 
 ### 4.7 Thumbnails
 

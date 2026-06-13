@@ -50,12 +50,16 @@ interface PdfStore {
   updateTab: (id: string, updates: Partial<TabState>) => void;
 
   getActiveTab: () => TabState | undefined;
+
+  // Search navigation
+  nextSearchResult: () => void;
+  prevSearchResult: () => void;
 }
 
 export const usePdfStore = create<PdfStore>((set, get) => ({
   tabs: [],
   activeTabId: null,
-  activeSidebarTool: null,
+  activeSidebarTool: "thumbnails",
   sidebarWidth: 250,
 
   setActiveTab: (id) => set({ activeTabId: id }),
@@ -98,4 +102,71 @@ export const usePdfStore = create<PdfStore>((set, get) => ({
     const state = get();
     return state.tabs.find((t) => t.id === state.activeTabId);
   },
+
+  nextSearchResult: () =>
+    set((state) => {
+      const tab = state.tabs.find((t) => t.id === state.activeTabId);
+      if (!tab || tab.searchResults.length === 0) return state;
+
+      // Count total rects across all pages
+      const totalRects = tab.searchResults.reduce(
+        (sum, r) => sum + r.rects.length,
+        0,
+      );
+      if (totalRects === 0) return state;
+
+      const nextIndex = (tab.searchResultIndex + 1) % totalRects;
+
+      // Find which page this rect belongs to
+      let count = 0;
+      let targetPage = tab.currentPage;
+      for (const result of tab.searchResults) {
+        if (count + result.rects.length > nextIndex) {
+          targetPage = result.page;
+          break;
+        }
+        count += result.rects.length;
+      }
+
+      return {
+        tabs: state.tabs.map((t) =>
+          t.id === tab.id
+            ? { ...t, searchResultIndex: nextIndex, currentPage: targetPage }
+            : t,
+        ),
+      };
+    }),
+
+  prevSearchResult: () =>
+    set((state) => {
+      const tab = state.tabs.find((t) => t.id === state.activeTabId);
+      if (!tab || tab.searchResults.length === 0) return state;
+
+      const totalRects = tab.searchResults.reduce(
+        (sum, r) => sum + r.rects.length,
+        0,
+      );
+      if (totalRects === 0) return state;
+
+      const prevIndex =
+        (tab.searchResultIndex - 1 + totalRects) % totalRects;
+
+      let count = 0;
+      let targetPage = tab.currentPage;
+      for (const result of tab.searchResults) {
+        if (count + result.rects.length > prevIndex) {
+          targetPage = result.page;
+          break;
+        }
+        count += result.rects.length;
+      }
+
+      return {
+        tabs: state.tabs.map((t) =>
+          t.id === tab.id
+            ? { ...t, searchResultIndex: prevIndex, currentPage: targetPage }
+            : t,
+        ),
+      };
+    }),
 }));
