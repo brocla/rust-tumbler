@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { bgraToRgba } from "../utils/bgraConvert";
 import { getCached, putCached } from "../utils/renderCache";
 import { TextLayer } from "./TextLayer";
 import { HighlightLayer } from "./HighlightLayer";
@@ -90,7 +89,7 @@ export function PageSlot({
 
         if (cancelled || renderId !== renderIdRef.current) return;
 
-        const rgba = bgraToRgba(buffer);
+        const rgba = new Uint8ClampedArray(buffer);
         // pdfium may return slightly different height than requested
         const actualHeight = rgba.byteLength / (4 * pixelWidth);
         const imageData = new ImageData(rgba, pixelWidth, actualHeight);

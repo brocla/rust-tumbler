@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { bgraToRgba } from "../utils/bgraConvert";
 import { usePdfStore } from "../store/usePdfStore";
 
 const THUMBNAIL_SCALE = 0.18;
@@ -17,7 +16,7 @@ export function ThumbnailPanel() {
     <div className="thumbnail-panel">
       {activeTab.pageDimensions.map((dim, i) => (
         <Thumbnail
-          key={i + 1}
+          key={`${activeTab.docId}-${i + 1}`}
           docId={activeTab.docId}
           pageNumber={i + 1}
           pageWidth={dim.width}
@@ -70,7 +69,7 @@ function Thumbnail({
         height: renderHeight,
       });
 
-      const rgba = bgraToRgba(buffer);
+      const rgba = new Uint8ClampedArray(buffer);
       // pdfium may return a bitmap with height slightly different from requested
       // (set_target_width is exact, set_maximum_height is a cap)
       const actualHeight = rgba.byteLength / (4 * renderWidth);

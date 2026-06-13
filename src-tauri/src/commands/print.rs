@@ -1,0 +1,351 @@
+use crate::state::AppState;
+use serde::Serialize;
+use std::ffi::c_void;
+use std::os::raw::c_int;
+use tauri::{Emitter, State};
+
+#[derive(Serialize, Clone)]
+pub struct PrintResult {
+    pub printed: bool,
+    pub pages_printed: u32,
+}
+
+#[derive(Serialize, Clone)]
+pub struct PrintProgress {
+    pub page: u32,
+    pub total: u32,
+}
+
+// Raw pdfium function signatures loaded via libloading
+#[allow(non_camel_case_types)]
+type FnLoadDocument =
+    unsafe extern "C" fn(file_path: *const u8, password: *const u8) -> *mut c_void;
+#[allow(non_camel_case_types)]
+type FnGetPageCount = unsafe extern "C" fn(document: *mut c_void) -> c_int;
+#[allow(non_camel_case_types)]
+type FnLoadPage = unsafe extern "C" fn(document: *mut c_void, page_index: c_int) -> *mut c_void;
+#[allow(non_camel_case_types)]
+type FnGetPageWidth = unsafe extern "C" fn(page: *mut c_void) -> f64;
+#[allow(non_camel_case_types)]
+type FnGetPageHeight = unsafe extern "C" fn(page: *mut c_void) -> f64;
+#[allow(non_camel_case_types)]
+type FnRenderPage = unsafe extern "C" fn(
+    dc: *mut c_void,
+    page: *mut c_void,
+    start_x: c_int,
+    start_y: c_int,
+    size_x: c_int,
+    size_y: c_int,
+    rotate: c_int,
+    flags: c_int,
+);
+#[allow(non_camel_case_types)]
+type FnClosePage = unsafe extern "C" fn(page: *mut c_void);
+#[allow(non_camel_case_types)]
+type FnCloseDocument = unsafe extern "C" fn(document: *mut c_void);
+
+const FPDF_PRINTING: c_int = 0x800;
+const FPDF_ANNOT: c_int = 0x01;
+
+#[tauri::command]
+pub async fn print_document(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    doc_id: String,
+) -> Result<PrintResult, String> {
+    // Look up the file path for this document
+    let file_path = {
+        let docs = state
+            .documents
+            .lock()
+            .map_err(|e| format!("Lock error: {e}"))?;
+        let entry = docs
+            .get(&doc_id)
+            .ok_or_else(|| format!("Document not found: {doc_id}"))?;
+        entry.file_path.clone()
+    };
+
+    // Resolve pdfium.dll path (same logic as lib.rs)
+    let pdfium_path = crate::resolve_pdfium_path();
+
+    let hwnd_raw =
+        window.hwnd().map_err(|e| format!("hwnd() failed: {e}"))?.0 as isize;
+
+    let (tx, rx) = std::sync::mpsc::channel();
+
+    std::thread::spawn(move || {
+        let result = print_on_sta_thread(hwnd_raw, &pdfium_path, &file_path, &window);
+        tx.send(result).ok();
+    });
+
+    rx.recv().map_err(|e| format!("channel recv failed: {e}"))?
+}
+
+fn print_on_sta_thread(
+    hwnd_raw: isize,
+    pdfium_path: &str,
+    pdf_path: &str,
+    window: &tauri::WebviewWindow,
+) -> Result<PrintResult, String> {
+    use windows::Win32::System::Com::*;
+
+    // Initialize COM as STA — must be first call on this thread
+    let hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+    if hr.is_err() {
+        return Err(format!("CoInitializeEx failed: HRESULT 0x{:08x}", hr.0));
+    }
+
+    let result = print_impl(hwnd_raw, pdfium_path, pdf_path, window);
+
+    unsafe { CoUninitialize() };
+    result
+}
+
+fn print_impl(
+    hwnd_raw: isize,
+    pdfium_path: &str,
+    pdf_path: &str,
+    window: &tauri::WebviewWindow,
+) -> Result<PrintResult, String> {
+    use windows::Win32::Foundation::*;
+    use windows::Win32::Graphics::Gdi::*;
+    use windows::Win32::Storage::Xps::*;
+    use windows::Win32::System::Memory::*;
+    use windows::Win32::UI::Controls::Dialogs::*;
+
+    // Load pdfium to get page count for the dialog
+    let lib = unsafe { libloading::Library::new(pdfium_path) }
+        .map_err(|e| format!("Failed to load pdfium.dll: {e}"))?;
+
+    let fpdf_load_document: libloading::Symbol<FnLoadDocument> =
+        unsafe { lib.get(b"FPDF_LoadDocument\0") }
+            .map_err(|e| format!("Failed to find FPDF_LoadDocument: {e}"))?;
+    let fpdf_get_page_count: libloading::Symbol<FnGetPageCount> =
+        unsafe { lib.get(b"FPDF_GetPageCount\0") }
+            .map_err(|e| format!("Failed to find FPDF_GetPageCount: {e}"))?;
+    let fpdf_load_page: libloading::Symbol<FnLoadPage> =
+        unsafe { lib.get(b"FPDF_LoadPage\0") }
+            .map_err(|e| format!("Failed to find FPDF_LoadPage: {e}"))?;
+    let fpdf_get_page_width: libloading::Symbol<FnGetPageWidth> =
+        unsafe { lib.get(b"FPDF_GetPageWidth\0") }
+            .map_err(|e| format!("Failed to find FPDF_GetPageWidth: {e}"))?;
+    let fpdf_get_page_height: libloading::Symbol<FnGetPageHeight> =
+        unsafe { lib.get(b"FPDF_GetPageHeight\0") }
+            .map_err(|e| format!("Failed to find FPDF_GetPageHeight: {e}"))?;
+    let fpdf_render_page: libloading::Symbol<FnRenderPage> =
+        unsafe { lib.get(b"FPDF_RenderPage\0") }
+            .map_err(|e| format!("Failed to find FPDF_RenderPage: {e}"))?;
+    let fpdf_close_page: libloading::Symbol<FnClosePage> =
+        unsafe { lib.get(b"FPDF_ClosePage\0") }
+            .map_err(|e| format!("Failed to find FPDF_ClosePage: {e}"))?;
+    let fpdf_close_document: libloading::Symbol<FnCloseDocument> =
+        unsafe { lib.get(b"FPDF_CloseDocument\0") }
+            .map_err(|e| format!("Failed to find FPDF_CloseDocument: {e}"))?;
+
+    // Load the PDF document (pdfium is already initialized by the main thread)
+    let pdf_path_cstr = std::ffi::CString::new(pdf_path)
+        .map_err(|_| "Invalid PDF path".to_string())?;
+    let doc = unsafe { fpdf_load_document(pdf_path_cstr.as_ptr() as *const u8, std::ptr::null()) };
+    if doc.is_null() {
+        return Err("Failed to load PDF for printing".to_string());
+    }
+
+    let page_count = unsafe { fpdf_get_page_count(doc) } as u32;
+
+    // Set up PrintDlgExW
+    let mut page_range = PRINTPAGERANGE {
+        nFromPage: 1,
+        nToPage: page_count,
+    };
+
+    let hwnd = HWND(hwnd_raw as *mut c_void);
+
+    let mut pdx = PRINTDLGEXW {
+        lStructSize: std::mem::size_of::<PRINTDLGEXW>() as u32,
+        hwndOwner: hwnd,
+        Flags: PD_ALLPAGES | PD_NOSELECTION | PD_NOCURRENTPAGE | PD_USEDEVMODECOPIESANDCOLLATE,
+        nPageRanges: 0,
+        nMaxPageRanges: 1,
+        lpPageRanges: &mut page_range,
+        nMinPage: 1,
+        nMaxPage: page_count,
+        nCopies: 1,
+        nStartPage: START_PAGE_GENERAL,
+        ..Default::default()
+    };
+
+    let dialog_result = unsafe { PrintDlgExW(&mut pdx) };
+    if dialog_result.is_err() {
+        unsafe { fpdf_close_document(doc) };
+        return Err(format!("PrintDlgExW failed: {dialog_result:?}"));
+    }
+
+    if pdx.dwResultAction != PD_RESULT_PRINT {
+        // User cancelled
+        unsafe { fpdf_close_document(doc) };
+        // Clean up global handles if they were allocated
+        if !pdx.hDevMode.is_invalid() {
+            let _ = unsafe { GlobalFree(Some(pdx.hDevMode)) };
+        }
+        if !pdx.hDevNames.is_invalid() {
+            let _ = unsafe { GlobalFree(Some(pdx.hDevNames)) };
+        }
+        return Ok(PrintResult {
+            printed: false,
+            pages_printed: 0,
+        });
+    }
+
+    // Extract printer name from DEVNAMES
+    let printer_name = unsafe {
+        let devnames_ptr = GlobalLock(pdx.hDevNames) as *const DEVNAMES;
+        let devnames = &*devnames_ptr;
+        let base = devnames_ptr as *const u8;
+        let device_ptr =
+            (base.add(devnames.wDeviceOffset as usize * 2)) as *const u16;
+        let name = read_wide_string(device_ptr);
+        let _ = GlobalUnlock(pdx.hDevNames);
+        name
+    };
+
+    // Extract DEVMODE and create printer DC
+    let hdc = unsafe {
+        let devmode_ptr = GlobalLock(pdx.hDevMode) as *const DEVMODEW;
+        let printer_wide: Vec<u16> = printer_name.encode_utf16().chain(std::iter::once(0)).collect();
+        let hdc = CreateDCW(
+            None,
+            windows::core::PCWSTR(printer_wide.as_ptr()),
+            None,
+            Some(devmode_ptr),
+        );
+        let _ = GlobalUnlock(pdx.hDevMode);
+        hdc
+    };
+
+    if hdc.is_invalid() {
+        unsafe {
+            fpdf_close_document(doc);
+            let _ = GlobalFree(Some(pdx.hDevMode));
+            let _ = GlobalFree(Some(pdx.hDevNames));
+        }
+        return Err("Failed to create printer DC".to_string());
+    }
+
+    // Determine which pages to print
+    let pages_to_print: Vec<u32> = if pdx.Flags.contains(PD_PAGENUMS) && pdx.nPageRanges > 0 {
+        let range = unsafe { &*pdx.lpPageRanges };
+        (range.nFromPage..=range.nToPage).collect()
+    } else {
+        (1..=page_count).collect()
+    };
+
+    // Get printable area
+    let print_width = unsafe { GetDeviceCaps(Some(hdc), HORZRES) };
+    let print_height = unsafe { GetDeviceCaps(Some(hdc), VERTRES) };
+
+    // Start the print job
+    let doc_name: Vec<u16> = "Tumbler PDF Print"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let doc_info = DOCINFOW {
+        cbSize: std::mem::size_of::<DOCINFOW>() as i32,
+        lpszDocName: windows::core::PCWSTR(doc_name.as_ptr()),
+        ..Default::default()
+    };
+
+    let start_result = unsafe { StartDocW(hdc, &doc_info) };
+    if start_result <= 0 {
+        unsafe {
+            let _ = DeleteDC(hdc);
+            fpdf_close_document(doc);
+            let _ = GlobalFree(Some(pdx.hDevMode));
+            let _ = GlobalFree(Some(pdx.hDevNames));
+        }
+        return Err("StartDoc failed".to_string());
+    }
+
+    let total = pages_to_print.len() as u32;
+    let mut pages_printed = 0u32;
+
+    for &page_num in &pages_to_print {
+        // Emit progress
+        let _ = window.emit(
+            "print-progress",
+            PrintProgress {
+                page: page_num,
+                total,
+            },
+        );
+
+        if unsafe { StartPage(hdc) } <= 0 {
+            let _ = unsafe { AbortDoc(hdc) };
+            break;
+        }
+
+        let page = unsafe { fpdf_load_page(doc, (page_num - 1) as c_int) };
+        if page.is_null() {
+            let _ = unsafe { EndPage(hdc) };
+            continue;
+        }
+
+        // Get PDF page dimensions and scale to fit printable area
+        let pdf_width = unsafe { fpdf_get_page_width(page) };
+        let pdf_height = unsafe { fpdf_get_page_height(page) };
+
+        let scale_x = print_width as f64 / pdf_width;
+        let scale_y = print_height as f64 / pdf_height;
+        let scale = scale_x.min(scale_y);
+
+        let render_width = (pdf_width * scale) as c_int;
+        let render_height = (pdf_height * scale) as c_int;
+
+        // Center on the page
+        let start_x = (print_width - render_width) / 2;
+        let start_y = (print_height - render_height) / 2;
+
+        unsafe {
+            fpdf_render_page(
+                hdc.0 as *mut c_void,
+                page,
+                start_x,
+                start_y,
+                render_width,
+                render_height,
+                0,
+                FPDF_PRINTING | FPDF_ANNOT,
+            );
+            fpdf_close_page(page);
+        }
+
+        if unsafe { EndPage(hdc) } <= 0 {
+            let _ = unsafe { AbortDoc(hdc) };
+            break;
+        }
+
+        pages_printed += 1;
+    }
+
+    unsafe {
+        EndDoc(hdc);
+        let _ = DeleteDC(hdc);
+        fpdf_close_document(doc);
+        let _ = GlobalFree(Some(pdx.hDevMode));
+        let _ = GlobalFree(Some(pdx.hDevNames));
+    }
+
+    Ok(PrintResult {
+        printed: true,
+        pages_printed,
+    })
+}
+
+/// Read a null-terminated UTF-16 string from a raw pointer.
+unsafe fn read_wide_string(ptr: *const u16) -> String {
+    let mut len = 0;
+    while *ptr.add(len) != 0 {
+        len += 1;
+    }
+    let slice = std::slice::from_raw_parts(ptr, len);
+    String::from_utf16_lossy(slice)
+}

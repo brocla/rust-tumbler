@@ -1,12 +1,13 @@
-import { ChevronLeft, ChevronRight, ZoomIn, ZoomOut } from "lucide-react";
+import { ChevronLeft, ChevronRight, Printer, ZoomIn, ZoomOut } from "lucide-react";
 import { usePdfStore } from "../store/usePdfStore";
 import { ZOOM_PRESETS } from "../utils/zoomConstants";
 
 interface ToolbarProps {
   onOpenFile: () => void;
+  onPrint: () => void;
 }
 
-export function Toolbar({ onOpenFile }: ToolbarProps) {
+export function Toolbar({ onOpenFile, onPrint }: ToolbarProps) {
   const activeTab = usePdfStore((s) =>
     s.tabs.find((t) => t.id === s.activeTabId),
   );
@@ -123,6 +124,15 @@ export function Toolbar({ onOpenFile }: ToolbarProps) {
               <ZoomIn size={18} />
             </button>
           </div>
+
+          <div className="toolbar-separator" />
+          <button
+            className="toolbar-button"
+            onClick={onPrint}
+            title="Print (Ctrl+P)"
+          >
+            <Printer size={18} />
+          </button>
         </>
       )}
     </div>

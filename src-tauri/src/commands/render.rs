@@ -33,7 +33,7 @@ pub fn render_page(
         .render_with_config(&config)
         .map_err(|e| format!("Failed to render page {page}: {e}"))?;
 
-    let bgra_bytes = bitmap.as_raw_bytes().to_vec();
+    let rgba_bytes = bitmap.as_rgba_bytes();
 
-    Ok(tauri::ipc::Response::new(bgra_bytes))
+    Ok(tauri::ipc::Response::new(rgba_bytes))
 }

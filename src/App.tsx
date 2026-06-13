@@ -1,6 +1,7 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { Toolbar } from "./components/Toolbar";
 import { IconRail } from "./components/IconRail";
 import { Sidebar } from "./components/Sidebar";
@@ -17,6 +18,8 @@ interface DocInfo {
 function App() {
   const addTab = usePdfStore((s) => s.addTab);
   const openFileRef = useRef<() => Promise<void>>();
+  const printRef = useRef<() => Promise<void>>();
+  const [printProgress, setPrintProgress] = useState<{ page: number; total: number } | null>(null);
 
   // Shared file-open logic used by both Ctrl+O and toolbar button
   openFileRef.current = async () => {
@@ -53,6 +56,20 @@ function App() {
     }
   };
 
+  // Shared print logic
+  printRef.current = async () => {
+    const tab = usePdfStore.getState().getActiveTab();
+    if (!tab) return;
+    try {
+      setPrintProgress({ page: 0, total: tab.pageCount });
+      await invoke("print_document", { docId: tab.docId });
+    } catch (err) {
+      console.error("Print failed:", err);
+    } finally {
+      setPrintProgress(null);
+    }
+  };
+
   // Ctrl+O shortcut
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -63,6 +80,26 @@ function App() {
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
+  }, []);
+
+  // Listen for print progress events from Rust
+  useEffect(() => {
+    const unlisten = listen<{ page: number; total: number }>("print-progress", (event) => {
+      setPrintProgress(event.payload);
+    });
+    return () => { unlisten.then((f) => f()); };
+  }, []);
+
+  // Ctrl+P shortcut
+  useEffect(() => {
+    const handleCtrlP = (e: KeyboardEvent) => {
+      if (e.ctrlKey && e.key === "p") {
+        e.preventDefault();
+        printRef.current?.();
+      }
+    };
+    window.addEventListener("keydown", handleCtrlP);
+    return () => window.removeEventListener("keydown", handleCtrlP);
   }, []);
 
   // Ctrl+F — open search panel, focus and select input
@@ -92,7 +129,7 @@ function App() {
 
   return (
     <div className="app-shell">
-      <Toolbar onOpenFile={() => openFileRef.current?.()} />
+      <Toolbar onOpenFile={() => openFileRef.current?.()} onPrint={() => printRef.current?.()} />
       <div className="app-body">
         <IconRail />
         <Sidebar />
@@ -100,6 +137,13 @@ function App() {
           <ViewerArea />
         </div>
       </div>
+      {printProgress && (
+        <div className="print-progress-overlay">
+          <div className="print-progress-dialog">
+            <p>Printing page {printProgress.page} of {printProgress.total}...</p>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

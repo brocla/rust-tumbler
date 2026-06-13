@@ -3700,6 +3700,7 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 name = "tumbler"
 version = "2.0.0"
 dependencies = [
+ "libloading",
  "pdfium-render",
  "serde",
  "serde_json",
@@ -3709,6 +3710,7 @@ dependencies = [
  "tauri-plugin-fs",
  "time",
  "uuid",
+ "windows",
 ]
 
 [[package]]

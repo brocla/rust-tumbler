@@ -34,6 +34,7 @@ pub fn run() {
             commands::text::extract_page_text,
             commands::text::search_document,
             commands::metadata::get_metadata,
+            commands::print::print_document,
         ])
         .setup(|app| {
             #[cfg(debug_assertions)]
@@ -52,7 +53,7 @@ pub fn run() {
 /// Resolve the path to pdfium.dll.
 /// In dev mode: look relative to the src-tauri directory.
 /// In production: look in the bundled resources directory.
-fn resolve_pdfium_path() -> String {
+pub fn resolve_pdfium_path() -> String {
     // In dev mode, the DLL is in src-tauri/resources/
     let dev_path = std::path::Path::new("resources/pdfium.dll");
     if dev_path.exists() {
