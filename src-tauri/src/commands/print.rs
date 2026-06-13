@@ -163,7 +163,7 @@ fn print_impl(
     let mut pdx = PRINTDLGEXW {
         lStructSize: std::mem::size_of::<PRINTDLGEXW>() as u32,
         hwndOwner: hwnd,
-        Flags: PD_ALLPAGES | PD_NOSELECTION | PD_NOCURRENTPAGE | PD_USEDEVMODECOPIESANDCOLLATE,
+        Flags: PD_ALLPAGES | PD_NOSELECTION | PD_NOCURRENTPAGE | PD_USEDEVMODECOPIESANDCOLLATE | PD_HIDEPRINTTOFILE,
         nPageRanges: 0,
         nMaxPageRanges: 1,
         lpPageRanges: &mut page_range,
