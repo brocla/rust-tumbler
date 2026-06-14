@@ -9,11 +9,17 @@ import { Sidebar } from "./components/Sidebar";
 import { ViewerArea } from "./components/ViewerArea";
 import { usePdfStore } from "./store/usePdfStore";
 import type { PageDimension } from "./store/usePdfStore";
+import { contrastTextColor } from "./utils/color";
 
 interface DocInfo {
   docId: string;
   pageCount: number;
   pageDimensions: PageDimension[];
+}
+
+interface AccentColors {
+  accent: string;
+  accentDim: string;
 }
 
 function App() {
@@ -75,6 +81,18 @@ function App() {
       setPrintProgress(null);
     }
   };
+
+  // Apply the Windows accent color to the theme on startup.
+  useEffect(() => {
+    invoke<AccentColors>("get_accent_color")
+      .then(({ accent, accentDim }) => {
+        const root = document.documentElement.style;
+        root.setProperty("--color-accent-dynamic", accent);
+        root.setProperty("--color-accent-dim-dynamic", accentDim);
+        root.setProperty("--color-on-accent-dynamic", contrastTextColor(accent));
+      })
+      .catch((err) => console.error("Failed to read accent color:", err));
+  }, []);
 
   // On startup, open a PDF passed via file association (Explorer double-click
   // or "Open with"), and listen for the same from a second app instance.

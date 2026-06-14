@@ -1,8 +1,12 @@
 /* Design tokens */
 :root {
-  --color-accent: #0078d4;
-  --color-accent-dim: #005a9e;
-  --color-on-accent: #ffffff;
+  /* Indirection lets the Windows accent color (set as an inline style on
+     the root element at startup) override the default, while still letting
+     the high-contrast media query below win by setting --color-accent etc.
+     directly. */
+  --color-accent: var(--color-accent-dynamic, #0078d4);
+  --color-accent-dim: var(--color-accent-dim-dynamic, #005a9e);
+  --color-on-accent: var(--color-on-accent-dynamic, #ffffff);
 
   --color-bg: #ffffff;
   --color-bg-secondary: #f3f3f3;

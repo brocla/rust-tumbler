@@ -1,11 +1,20 @@
-import { ChevronLeft, ChevronRight, Printer, ZoomIn, ZoomOut } from "lucide-react";
+import { BookOpen, ChevronLeft, ChevronRight, Moon, Printer, Sun, ZoomIn, ZoomOut } from "lucide-react";
 import { usePdfStore } from "../store/usePdfStore";
+import type { DisplayMode } from "../store/usePdfStore";
 import { ZOOM_PRESETS } from "../utils/zoomConstants";
 
 interface ToolbarProps {
   onOpenFile: () => void;
   onPrint: () => void;
 }
+
+const DISPLAY_MODE_ORDER: DisplayMode[] = ["normal", "invert", "sepia"];
+
+const DISPLAY_MODE_INFO: Record<DisplayMode, { label: string; icon: typeof Sun }> = {
+  normal: { label: "Normal", icon: Sun },
+  invert: { label: "Inverted", icon: Moon },
+  sepia: { label: "Sepia", icon: BookOpen },
+};
 
 export function Toolbar({ onOpenFile, onPrint }: ToolbarProps) {
   const activeTab = usePdfStore((s) =>
@@ -49,6 +58,13 @@ export function Toolbar({ onOpenFile, onPrint }: ToolbarProps) {
     if (!isNaN(val)) {
       updateTab(activeTab.id, { zoom: val, zoomMode: "numeric" });
     }
+  };
+
+  const handleCycleDisplayMode = () => {
+    if (!activeTab) return;
+    const idx = DISPLAY_MODE_ORDER.indexOf(activeTab.displayMode);
+    const next = DISPLAY_MODE_ORDER[(idx + 1) % DISPLAY_MODE_ORDER.length];
+    updateTab(activeTab.id, { displayMode: next });
   };
 
   return (
@@ -124,6 +140,20 @@ export function Toolbar({ onOpenFile, onPrint }: ToolbarProps) {
               <ZoomIn size={18} />
             </button>
           </div>
+
+          <div className="toolbar-separator" />
+          {(() => {
+            const { label, icon: DisplayModeIcon } = DISPLAY_MODE_INFO[activeTab.displayMode];
+            return (
+              <button
+                className="toolbar-button"
+                onClick={handleCycleDisplayMode}
+                title={`Display mode: ${label} (click to cycle)`}
+              >
+                <DisplayModeIcon size={18} />
+              </button>
+            );
+          })()}
 
           <div className="toolbar-separator" />
           <button

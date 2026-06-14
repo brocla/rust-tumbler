@@ -52,6 +52,7 @@ pub fn run() {
             commands::metadata::set_metadata,
             commands::print::print_document,
             commands::startup::take_startup_file,
+            commands::theme::get_accent_color,
         ])
         .setup(|app| {
             #[cfg(debug_assertions)]
