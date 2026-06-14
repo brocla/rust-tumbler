@@ -154,6 +154,76 @@ describe("usePdfStore", () => {
     });
   });
 
+  describe("reorderTabs", () => {
+    it("moves a tab from one index to another", () => {
+      const tab1 = makeTab({ id: "tab-1" });
+      const tab2 = makeTab({ id: "tab-2" });
+      const tab3 = makeTab({ id: "tab-3" });
+
+      usePdfStore.getState().addTab(tab1);
+      usePdfStore.getState().addTab(tab2);
+      usePdfStore.getState().addTab(tab3);
+
+      // Move tab-1 (index 0) to the end (index 2)
+      usePdfStore.getState().reorderTabs(0, 2);
+
+      expect(usePdfStore.getState().tabs.map((t) => t.id)).toEqual([
+        "tab-2",
+        "tab-3",
+        "tab-1",
+      ]);
+    });
+
+    it("moves a tab backward", () => {
+      const tab1 = makeTab({ id: "tab-1" });
+      const tab2 = makeTab({ id: "tab-2" });
+      const tab3 = makeTab({ id: "tab-3" });
+
+      usePdfStore.getState().addTab(tab1);
+      usePdfStore.getState().addTab(tab2);
+      usePdfStore.getState().addTab(tab3);
+
+      // Move tab-3 (index 2) to the front (index 0)
+      usePdfStore.getState().reorderTabs(2, 0);
+
+      expect(usePdfStore.getState().tabs.map((t) => t.id)).toEqual([
+        "tab-3",
+        "tab-1",
+        "tab-2",
+      ]);
+    });
+
+    it("does not change activeTabId", () => {
+      const tab1 = makeTab({ id: "tab-1" });
+      const tab2 = makeTab({ id: "tab-2" });
+
+      usePdfStore.getState().addTab(tab1);
+      usePdfStore.getState().addTab(tab2);
+      usePdfStore.getState().setActiveTab("tab-1");
+
+      usePdfStore.getState().reorderTabs(0, 1);
+
+      expect(usePdfStore.getState().activeTabId).toBe("tab-1");
+    });
+
+    it("does nothing when indices are equal or out of range", () => {
+      const tab1 = makeTab({ id: "tab-1" });
+      const tab2 = makeTab({ id: "tab-2" });
+
+      usePdfStore.getState().addTab(tab1);
+      usePdfStore.getState().addTab(tab2);
+
+      usePdfStore.getState().reorderTabs(0, 0);
+      usePdfStore.getState().reorderTabs(0, 5);
+      usePdfStore.getState().reorderTabs(-1, 1);
+
+      expect(usePdfStore.getState().tabs.map((t) => t.id)).toEqual([
+        "tab-1",
+        "tab-2",
+      ]);
+    });
+  });
+
   describe("setActiveTab", () => {
     it("switches the active tab", () => {
       const tab1 = makeTab({ id: "tab-1" });

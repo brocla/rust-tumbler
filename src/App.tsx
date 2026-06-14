@@ -3,6 +3,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Toolbar } from "./components/Toolbar";
+import { TabBar } from "./components/TabBar";
 import { IconRail } from "./components/IconRail";
 import { Sidebar } from "./components/Sidebar";
 import { ViewerArea } from "./components/ViewerArea";
@@ -148,6 +149,7 @@ function App() {
   return (
     <div className="app-shell">
       <Toolbar onOpenFile={() => openFileRef.current?.()} onPrint={() => printRef.current?.()} />
+      <TabBar onOpenFile={() => openFileRef.current?.()} />
       <div className="app-body">
         <IconRail />
         <Sidebar />

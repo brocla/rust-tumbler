@@ -48,6 +48,7 @@ interface PdfStore {
   addTab: (tab: TabState) => void;
   removeTab: (id: string) => void;
   updateTab: (id: string, updates: Partial<TabState>) => void;
+  reorderTabs: (fromIndex: number, toIndex: number) => void;
 
   getActiveTab: () => TabState | undefined;
 
@@ -97,6 +98,23 @@ export const usePdfStore = create<PdfStore>((set, get) => ({
     set((state) => ({
       tabs: state.tabs.map((t) => (t.id === id ? { ...t, ...updates } : t)),
     })),
+
+  reorderTabs: (fromIndex, toIndex) =>
+    set((state) => {
+      if (
+        fromIndex === toIndex ||
+        fromIndex < 0 ||
+        fromIndex >= state.tabs.length ||
+        toIndex < 0 ||
+        toIndex >= state.tabs.length
+      ) {
+        return state;
+      }
+      const tabs = [...state.tabs];
+      const [moved] = tabs.splice(fromIndex, 1);
+      tabs.splice(toIndex, 0, moved);
+      return { tabs };
+    }),
 
   getActiveTab: () => {
     const state = get();
