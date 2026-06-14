@@ -13,12 +13,36 @@ interface DocumentMetadata {
   modDate: string;
 }
 
+const EDITABLE_FIELDS = [
+  { field: "title", label: "Title" },
+  { field: "author", label: "Author" },
+  { field: "subject", label: "Subject" },
+  { field: "keywords", label: "Keywords" },
+  { field: "creator", label: "Creator" },
+] as const;
+
+type EditableField = (typeof EDITABLE_FIELDS)[number]["field"];
+type EditableValues = Record<EditableField, string>;
+
+function pickEditable(meta: DocumentMetadata): EditableValues {
+  return {
+    title: meta.title,
+    author: meta.author,
+    subject: meta.subject,
+    keywords: meta.keywords,
+    creator: meta.creator,
+  };
+}
+
 export function MetadataPanel() {
   const activeTab = usePdfStore((s) =>
     s.tabs.find((t) => t.id === s.activeTabId),
   );
+  const updateTab = usePdfStore((s) => s.updateTab);
   const [metadata, setMetadata] = useState<DocumentMetadata | null>(null);
+  const [edited, setEdited] = useState<EditableValues | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     if (!activeTab?.docId) return;
@@ -32,6 +56,7 @@ export function MetadataPanel() {
         });
         if (!cancelled) {
           setMetadata(meta);
+          setEdited(pickEditable(meta));
           setError(null);
         }
       } catch (err) {
@@ -50,29 +75,70 @@ export function MetadataPanel() {
     return <div className="metadata-panel"><div className="metadata-error">{error}</div></div>;
   }
 
-  if (!metadata) {
+  if (!metadata || !edited || !activeTab) {
     return <div className="metadata-panel"><div className="metadata-loading">Loading metadata...</div></div>;
   }
 
-  const fields = [
-    { label: "Title", value: metadata.title },
-    { label: "Author", value: metadata.author },
-    { label: "Subject", value: metadata.subject },
-    { label: "Keywords", value: metadata.keywords },
-    { label: "Creator", value: metadata.creator },
-    { label: "Producer", value: metadata.producer, readOnly: true },
-    { label: "Created", value: metadata.creationDate, readOnly: true },
-    { label: "Modified", value: metadata.modDate, readOnly: true },
+  const dirty = EDITABLE_FIELDS.some(({ field }) => edited[field] !== metadata[field]);
+
+  const handleChange = (field: EditableField, value: string) => {
+    const next = { ...edited, [field]: value };
+    setEdited(next);
+    const nowDirty = EDITABLE_FIELDS.some((f) => next[f.field] !== metadata[f.field]);
+    if (nowDirty !== activeTab.metadataDirty) {
+      updateTab(activeTab.id, { metadataDirty: nowDirty });
+    }
+  };
+
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      const updated = await invoke<DocumentMetadata>("set_metadata", {
+        docId: activeTab.docId,
+        metadata: edited,
+      });
+      setMetadata(updated);
+      setEdited(pickEditable(updated));
+      updateTab(activeTab.id, { metadataDirty: false });
+      setError(null);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const readOnlyFields = [
+    { label: "Producer", value: metadata.producer },
+    { label: "Created", value: metadata.creationDate },
+    { label: "Modified", value: metadata.modDate },
   ];
 
   return (
     <div className="metadata-panel">
-      {fields.map((field) => (
+      {EDITABLE_FIELDS.map(({ field, label }) => (
+        <div key={field} className="metadata-field">
+          <label className="metadata-label" htmlFor={`metadata-${field}`}>{label}</label>
+          <input
+            id={`metadata-${field}`}
+            className="metadata-input"
+            type="text"
+            value={edited[field]}
+            onChange={(e) => handleChange(field, e.target.value)}
+          />
+        </div>
+      ))}
+      {readOnlyFields.map((field) => (
         <div key={field.label} className="metadata-field">
           <label className="metadata-label">{field.label}</label>
           <div className="metadata-value">{field.value || "—"}</div>
         </div>
       ))}
+      {dirty && (
+        <button className="metadata-save-button" onClick={handleSave} disabled={saving}>
+          {saving ? "Saving..." : "Save"}
+        </button>
+      )}
     </div>
   );
 }

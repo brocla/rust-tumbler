@@ -5,7 +5,7 @@ use pdfium_render::prelude::*;
 use state::AppState;
 use std::collections::HashMap;
 use std::sync::Mutex;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -18,12 +18,27 @@ pub fn run() {
         Box::leak(Box::new(Pdfium::new(bindings)))
     };
 
+    let startup_file = pdf_path_from_args(&std::env::args().collect::<Vec<_>>());
+
     let app_state = AppState {
         pdfium,
         documents: Mutex::new(HashMap::new()),
+        startup_file: Mutex::new(startup_file),
     };
 
     tauri::Builder::default()
+        // Must be registered first: forwards the command line of a second
+        // launch (e.g. double-clicking another PDF) to this instance instead
+        // of starting a new process.
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+            if let Some(path) = pdf_path_from_args(&argv) {
+                let _ = app.emit("open-file", path);
+            }
+        }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .manage(app_state)
@@ -34,7 +49,9 @@ pub fn run() {
             commands::text::extract_page_text,
             commands::text::search_document,
             commands::metadata::get_metadata,
+            commands::metadata::set_metadata,
             commands::print::print_document,
+            commands::startup::take_startup_file,
         ])
         .setup(|app| {
             #[cfg(debug_assertions)]
@@ -48,6 +65,13 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+/// Extracts a file path passed on the command line, as set up by a Windows
+/// file-association launch (`Tumbler.exe "C:\path\to\file.pdf"`). `args[0]`
+/// is the executable path, so the file path (if any) is `args[1]`.
+fn pdf_path_from_args(args: &[String]) -> Option<String> {
+    args.get(1).filter(|p| !p.is_empty()).cloned()
 }
 
 /// Resolve the path to pdfium.dll.

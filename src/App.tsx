@@ -21,16 +21,9 @@ function App() {
   const printRef = useRef<() => Promise<void>>();
   const [printProgress, setPrintProgress] = useState<{ page: number; total: number } | null>(null);
 
-  // Shared file-open logic used by both Ctrl+O and toolbar button
-  openFileRef.current = async () => {
-    const selected = await open({
-      multiple: false,
-      filters: [{ name: "PDF Documents", extensions: ["pdf"] }],
-    });
-    if (!selected) return;
-
-    const path = typeof selected === "string" ? selected : selected;
-
+  // Open a PDF by path in a new tab. Used by the file picker, the startup
+  // file-association path, and "open-file" events from a second instance.
+  const openDocumentByPath = async (path: string) => {
     try {
       const info = await invoke<DocInfo>("open_document", { path });
       const tabId = crypto.randomUUID();
@@ -56,6 +49,18 @@ function App() {
     }
   };
 
+  // Shared file-open logic used by both Ctrl+O and toolbar button
+  openFileRef.current = async () => {
+    const selected = await open({
+      multiple: false,
+      filters: [{ name: "PDF Documents", extensions: ["pdf"] }],
+    });
+    if (!selected) return;
+
+    const path = typeof selected === "string" ? selected : selected;
+    await openDocumentByPath(path);
+  };
+
   // Shared print logic
   printRef.current = async () => {
     const tab = usePdfStore.getState().getActiveTab();
@@ -69,6 +74,19 @@ function App() {
       setPrintProgress(null);
     }
   };
+
+  // On startup, open a PDF passed via file association (Explorer double-click
+  // or "Open with"), and listen for the same from a second app instance.
+  useEffect(() => {
+    invoke<string | null>("take_startup_file").then((path) => {
+      if (path) openDocumentByPath(path);
+    });
+
+    const unlisten = listen<string>("open-file", (event) => {
+      openDocumentByPath(event.payload);
+    });
+    return () => { unlisten.then((f) => f()); };
+  }, []);
 
   // Ctrl+O shortcut
   useEffect(() => {

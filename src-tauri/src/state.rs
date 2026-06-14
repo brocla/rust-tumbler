@@ -10,4 +10,5 @@ pub struct DocEntry {
 pub struct AppState {
     pub pdfium: &'static Pdfium,
     pub documents: Mutex<HashMap<String, DocEntry>>,
+    pub startup_file: Mutex<Option<String>>,
 }
