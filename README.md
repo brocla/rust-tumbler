@@ -104,6 +104,7 @@ Planned enhancements:
   interactive overlays, and save filled forms.
 - **Text Extraction** — Export plain text from all pages to a `.txt` file via
   pdfium's text API.
+- **Print Cancel**
 
 
 

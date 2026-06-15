@@ -48,6 +48,10 @@
     "windows": {
       "nsis": {
         "installMode": "currentUser"
+      },
+      "wix": {
+        "fragmentPaths": ["wix/file-associations.wxs"],
+        "componentGroupRefs": ["TumblerFileAssociationGroup"]
       }
     }
   },

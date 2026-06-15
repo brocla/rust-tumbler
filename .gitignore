@@ -21,3 +21,6 @@ Desktop.ini
 # Pdfium binary (large, downloaded separately)
 src-tauri/resources/pdfium.dll
 node_modules
+
+# Project docs (planning/review notes, not part of the shipped product)
+/doc/

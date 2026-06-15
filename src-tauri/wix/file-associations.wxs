@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Registers Tumbler under HKLM\Software\RegisteredApplications so it shows up
+  as a selectable default app for .pdf in Windows Settings > Default Apps.
+  Tauri's generated main.wxs already creates the "Tumbler.pdf" ProgId and its
+  .pdf Extension association under HKLM\Software\Classes; this fragment only
+  adds the Capabilities/RegisteredApplications entries Windows needs to list
+  that ProgId in the default-apps picker (see tauri-apps/tauri#9803).
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Fragment>
+    <DirectoryRef Id="TARGETDIR">
+      <Component Id="TumblerFileAssociationCapabilities" Guid="72545816-3206-41B7-B941-299AF65B9881" Win64="yes">
+        <RegistryValue Root="HKLM" Key="Software\Tumbler\Capabilities" Name="ApplicationName" Value="Tumbler" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Tumbler\Capabilities" Name="ApplicationDescription" Value="A personal PDF viewer" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Tumbler\Capabilities\FileAssociations" Name=".pdf" Value="Tumbler.pdf" Type="string" KeyPath="yes" />
+        <RegistryValue Root="HKLM" Key="Software\RegisteredApplications" Name="Tumbler" Value="Software\Tumbler\Capabilities" Type="string" />
+      </Component>
+    </DirectoryRef>
+
+    <ComponentGroup Id="TumblerFileAssociationGroup">
+      <ComponentRef Id="TumblerFileAssociationCapabilities" />
+    </ComponentGroup>
+  </Fragment>
+</Wix>
