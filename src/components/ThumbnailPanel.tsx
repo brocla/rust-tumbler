@@ -61,19 +61,17 @@ function Thumbnail({
 
     const dpr = window.devicePixelRatio || 1;
     const renderWidth = Math.round(cssWidth * dpr);
-    const renderHeight = Math.round(cssHeight * dpr);
 
     try {
       const buffer = await invoke<ArrayBuffer>("render_page", {
         docId,
         page: pageNumber,
         width: renderWidth,
-        height: renderHeight,
       });
 
       const rgba = new Uint8ClampedArray(buffer);
-      // pdfium may return a bitmap with height slightly different from requested
-      // (set_target_width is exact, set_maximum_height is a cap)
+      // pdfium derives height from renderWidth via the page's aspect ratio,
+      // which may round slightly differently than cssHeight * dpr.
       const actualHeight = rgba.byteLength / (4 * renderWidth);
       const imageData = new ImageData(rgba, renderWidth, actualHeight);
 

@@ -178,18 +178,12 @@ fn pdf_text_string(s: &str) -> Object {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     /// Writes new metadata into a real PDF via lopdf, then confirms pdfium
     /// can still open the saved file and reads back the new values.
     #[test]
     fn write_metadata_round_trip_with_pdfium() {
-        let src = PathBuf::from(std::env::var("USERPROFILE").unwrap())
-            .join("AppData\\Local\\Temp\\tumbler_print.pdf");
-        if !src.exists() {
-            eprintln!("skipping: {} not found", src.display());
-            return;
-        }
+        let src = crate::fixture_path();
 
         let tmp = std::env::temp_dir().join("tumbler_metadata_test.pdf");
         std::fs::copy(&src, &tmp).expect("copy fixture");

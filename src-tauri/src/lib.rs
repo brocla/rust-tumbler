@@ -124,3 +124,10 @@ pub(crate) fn test_pdfium() -> &'static Pdfium {
         Pdfium::new(bindings)
     })
 }
+
+/// Path to the small checked-in PDF used by tests that need a real,
+/// pdfium- and lopdf-loadable document.
+#[cfg(test)]
+pub(crate) fn fixture_path() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample.pdf")
+}

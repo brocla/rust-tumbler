@@ -50,7 +50,6 @@ export function PageSlot({
   const cssWidth = (pageWidth * zoom) / 100;
   const cssHeight = (pageHeight * zoom) / 100;
   const pixelWidth = Math.round(pageWidth * scale);
-  const pixelHeight = Math.round(pageHeight * scale);
 
   useEffect(() => {
     if (!isInRenderWindow) {
@@ -86,7 +85,6 @@ export function PageSlot({
           docId,
           page: pageNumber,
           width: pixelWidth,
-          height: pixelHeight,
         });
 
         if (cancelled || renderId !== renderIdRef.current) return;
@@ -122,7 +120,7 @@ export function PageSlot({
     return () => {
       cancelled = true;
     };
-  }, [docId, pageNumber, zoom, dpr, isInRenderWindow, pixelWidth, pixelHeight, cssWidth, cssHeight]);
+  }, [docId, pageNumber, zoom, dpr, isInRenderWindow, pixelWidth, cssWidth, cssHeight]);
 
   const filter = DISPLAY_FILTERS[displayMode];
 

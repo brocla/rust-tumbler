@@ -9,8 +9,6 @@ pub fn render_page(
     doc_id: String,
     page: u32,
     width: u32,
-    #[allow(unused)]
-    height: u32,
 ) -> Result<tauri::ipc::Response, String> {
     render_page_impl(&state, doc_id, page, width).map_err(String::from)
 }

@@ -80,7 +80,6 @@ pub fn lock_mutex<T>(mutex: &Mutex<T>) -> Result<MutexGuard<'_, T>, AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     #[test]
     fn lock_mutex_returns_guard() {
@@ -107,12 +106,7 @@ mod tests {
     /// removal.
     #[test]
     fn document_map_get_insert_remove() {
-        let src = PathBuf::from(std::env::var("USERPROFILE").unwrap())
-            .join("AppData\\Local\\Temp\\tumbler_print.pdf");
-        if !src.exists() {
-            eprintln!("skipping: {} not found", src.display());
-            return;
-        }
+        let src = crate::fixture_path();
 
         let pdfium = crate::test_pdfium();
 
@@ -145,12 +139,7 @@ mod tests {
     /// disk, `reload_documents_with_path` should refresh both `DocEntry`s.
     #[test]
     fn reload_documents_with_path_refreshes_all_matching_tabs() {
-        let src = PathBuf::from(std::env::var("USERPROFILE").unwrap())
-            .join("AppData\\Local\\Temp\\tumbler_print.pdf");
-        if !src.exists() {
-            eprintln!("skipping: {} not found", src.display());
-            return;
-        }
+        let src = crate::fixture_path();
 
         let pdfium = crate::test_pdfium();
         let state = AppState::new(pdfium, None);
