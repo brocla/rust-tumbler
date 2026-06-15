@@ -121,6 +121,45 @@ fn print_impl(
     use windows::Win32::System::Memory::*;
     use windows::Win32::UI::Controls::Dialogs::*;
 
+    /// Closes the pdfium document on drop. `close_fn` is a copy of the
+    /// `FPDF_CloseDocument` function pointer, which stays valid for as long
+    /// as the pdfium library that produced it (`lib`, below) remains loaded.
+    struct DocumentGuard {
+        doc: *mut c_void,
+        close_fn: FnCloseDocument,
+    }
+
+    impl Drop for DocumentGuard {
+        fn drop(&mut self) {
+            if !self.doc.is_null() {
+                unsafe { (self.close_fn)(self.doc) };
+            }
+        }
+    }
+
+    /// Frees a `GlobalAlloc`'d handle (e.g. `hDevMode`/`hDevNames` from
+    /// `PrintDlgExW`) on drop.
+    struct GlobalHandleGuard(HGLOBAL);
+
+    impl Drop for GlobalHandleGuard {
+        fn drop(&mut self) {
+            if !self.0.is_invalid() {
+                let _ = unsafe { GlobalFree(Some(self.0)) };
+            }
+        }
+    }
+
+    /// Deletes a device context on drop.
+    struct DcGuard(HDC);
+
+    impl Drop for DcGuard {
+        fn drop(&mut self) {
+            if !self.0.is_invalid() {
+                let _ = unsafe { DeleteDC(self.0) };
+            }
+        }
+    }
+
     // Load pdfium to get page count for the dialog
     let lib = unsafe { libloading::Library::new(pdfium_path) }
         .map_err(|e| format!("Failed to load pdfium.dll: {e}"))?;
@@ -157,6 +196,10 @@ fn print_impl(
     if doc.is_null() {
         return Err(AppError::Other("Failed to load PDF for printing".to_string()));
     }
+    let _doc_guard = DocumentGuard {
+        doc,
+        close_fn: *fpdf_close_document,
+    };
 
     let page_count = unsafe { fpdf_get_page_count(doc) } as u32;
 
@@ -184,20 +227,15 @@ fn print_impl(
 
     let dialog_result = unsafe { PrintDlgExW(&mut pdx) };
     if dialog_result.is_err() {
-        unsafe { fpdf_close_document(doc) };
         return Err(AppError::Other(format!("PrintDlgExW failed: {dialog_result:?}")));
     }
 
+    // hDevMode/hDevNames may be allocated even if the user cancelled.
+    let _devmode_guard = GlobalHandleGuard(pdx.hDevMode);
+    let _devnames_guard = GlobalHandleGuard(pdx.hDevNames);
+
     if pdx.dwResultAction != PD_RESULT_PRINT {
         // User cancelled
-        unsafe { fpdf_close_document(doc) };
-        // Clean up global handles if they were allocated
-        if !pdx.hDevMode.is_invalid() {
-            let _ = unsafe { GlobalFree(Some(pdx.hDevMode)) };
-        }
-        if !pdx.hDevNames.is_invalid() {
-            let _ = unsafe { GlobalFree(Some(pdx.hDevNames)) };
-        }
         return Ok(PrintResult {
             printed: false,
             pages_printed: 0,
@@ -231,13 +269,9 @@ fn print_impl(
     };
 
     if hdc.is_invalid() {
-        unsafe {
-            fpdf_close_document(doc);
-            let _ = GlobalFree(Some(pdx.hDevMode));
-            let _ = GlobalFree(Some(pdx.hDevNames));
-        }
         return Err(AppError::Other("Failed to create printer DC".to_string()));
     }
+    let _dc_guard = DcGuard(hdc);
 
     // Determine which pages to print
     let pages_to_print: Vec<u32> = if pdx.Flags.contains(PD_PAGENUMS) && pdx.nPageRanges > 0 {
@@ -264,12 +298,6 @@ fn print_impl(
 
     let start_result = unsafe { StartDocW(hdc, &doc_info) };
     if start_result <= 0 {
-        unsafe {
-            let _ = DeleteDC(hdc);
-            fpdf_close_document(doc);
-            let _ = GlobalFree(Some(pdx.hDevMode));
-            let _ = GlobalFree(Some(pdx.hDevNames));
-        }
         return Err(AppError::Other("StartDoc failed".to_string()));
     }
 
@@ -334,13 +362,7 @@ fn print_impl(
         pages_printed += 1;
     }
 
-    unsafe {
-        EndDoc(hdc);
-        let _ = DeleteDC(hdc);
-        fpdf_close_document(doc);
-        let _ = GlobalFree(Some(pdx.hDevMode));
-        let _ = GlobalFree(Some(pdx.hDevNames));
-    }
+    unsafe { EndDoc(hdc) };
 
     Ok(PrintResult {
         printed: true,

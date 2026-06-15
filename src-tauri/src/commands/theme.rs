@@ -10,6 +10,11 @@ pub struct AccentColors {
 
 #[tauri::command]
 pub fn get_accent_color() -> Result<AccentColors, String> {
+    // TODO: RoInitialize(RO_INIT_MULTITHREADED) can fail with RPC_E_CHANGED_MODE
+    // if this command runs on a tokio blocking thread that the file-dialog
+    // plugin already CoInitialize'd as STA (e.g. after Ctrl+O reuses the
+    // thread). Accepted as a known fragility for now rather than detecting
+    // the existing apartment and skipping re-init.
     unsafe { RoInitialize(RO_INIT_MULTITHREADED) }.map_err(|e| format!("RoInitialize failed: {e}"))?;
 
     let settings = UISettings::new().map_err(|e| format!("UISettings::new failed: {e}"))?;

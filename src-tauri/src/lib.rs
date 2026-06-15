@@ -67,6 +67,9 @@ pub fn run() {
 /// file-association launch (`Tumbler.exe "C:\path\to\file.pdf"`). `args[0]`
 /// is the executable path, so the file path (if any) is `args[1]`.
 fn pdf_path_from_args(args: &[String]) -> Option<String> {
+    if args.len() > 2 {
+        eprintln!("pdf_path_from_args: ignoring extra arguments: {:?}", &args[2..]);
+    }
     args.get(1).filter(|p| !p.is_empty()).cloned()
 }
 
