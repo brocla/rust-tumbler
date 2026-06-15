@@ -34,6 +34,55 @@ Built with Tauri v2
 | Printing/theming | `windows` crate (GDI, `PrintDlgExW`, `UISettings`) |
 | Testing | Vitest + jsdom (frontend), `cargo test` (backend) |
 
+## Project structure
+
+```
+rust-tumbler/
+├── src/                          # React frontend
+│   ├── components/
+│   │   ├── Toolbar.tsx           # Navigation, zoom, print, display mode
+│   │   ├── TabBar.tsx            # Multi-document tabs
+│   │   ├── IconRail.tsx          # Sidebar tool switcher
+│   │   ├── Sidebar.tsx           # Tab container for panels
+│   │   ├── ViewerArea.tsx        # Viewer container
+│   │   ├── ContinuousViewer.tsx  # Scrollable page list
+│   │   ├── PageSlot.tsx          # Per-page render + canvas
+│   │   ├── TextLayer.tsx         # Selectable/copyable text overlay
+│   │   ├── HighlightLayer.tsx    # Search-result highlighting
+│   │   ├── ThumbnailPanel.tsx    # Page thumbnail strip
+│   │   ├── SearchPanel.tsx       # Full-text search UI
+│   │   └── MetadataPanel.tsx     # Document info editor
+│   ├── store/
+│   │   └── usePdfStore.ts        # Zustand global state (tabs, zoom, etc.)
+│   ├── utils/                    # Bitmap conversion, render cache, etc.
+│   ├── styles/
+│   │   └── global.css            # Design tokens and layout
+│   ├── App.tsx
+│   └── main.tsx
+├── src-tauri/                    # Rust/Tauri backend
+│   ├── src/
+│   │   ├── commands/
+│   │   │   ├── document.rs       # open/close document
+│   │   │   ├── render.rs         # page rendering
+│   │   │   ├── text.rs           # text extraction + search
+│   │   │   ├── metadata.rs       # metadata read/write (lopdf)
+│   │   │   ├── print.rs          # native printing (GDI)
+│   │   │   ├── theme.rs          # Windows accent color
+│   │   │   └── startup.rs        # file-association startup path
+│   │   ├── state.rs              # AppState, document map
+│   │   ├── error.rs               # AppError
+│   │   ├── lib.rs
+│   │   └── main.rs
+│   ├── tauri.conf.json
+│   └── Cargo.toml
+├── .github/
+│   └── workflows/
+│       └── ci.yml                # Frontend tests + cargo check
+├── index.html
+├── vite.config.ts
+└── package.json
+```
+
 ## Getting started
 
 ### Prerequisites
@@ -76,10 +125,22 @@ npm run tauri dev
 npm run tauri build
 ```
 
+Installers are written to `src-tauri/target/release/bundle/`:
+- NSIS: `nsis/Tumbler_<version>_x64-setup.exe`
+- MSI: `msi/Tumbler_<version>_x64_en-US.msi`
+
 ### Test
 
 ```sh
 npm test           # frontend (Vitest)
 cargo test         # backend (from src-tauri/)
 ```
+
+## Updating the app version
+
+Version is set in three places — keep them in sync:
+
+- `package.json` → `"version"`
+- `src-tauri/tauri.conf.json` → `"version"`
+- `src-tauri/Cargo.toml` → `version`
 
