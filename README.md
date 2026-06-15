@@ -5,10 +5,8 @@
 
 [![CI](https://github.com/brocla/rust-tumbler/actions/workflows/ci.yml/badge.svg)](https://github.com/brocla/rust-tumbler/actions/workflows/ci.yml)
 
-A personal PDF viewer, editor, and printer for Windows, built with Tauri v2
+A personal PDF viewer for Windows, built with Tauri v2
 (Rust backend, React/TypeScript frontend) and pdfium.
-
-**Work in progress.**
 
 </div>
 
@@ -16,15 +14,13 @@ A personal PDF viewer, editor, and printer for Windows, built with Tauri v2
 
 - Continuous-scroll page viewer with smooth zoom (presets, +/-, and
   Ctrl+scroll)
-- Text layer with copy-to-clipboard and full-document search with
-  highlighting
+- Text layer with copy-to-clipboard and full-document search
 - Thumbnail sidebar for quick page navigation
 - Document metadata viewing and editing
-- Native Windows printing at printer-native resolution via pdfium + GDI
+- Native Windows printing at printer-native resolution
 - Multiple documents open in draggable, reorderable tabs
 - Display modes: normal, inverted, and sepia
-- Windows accent-color theming and PDF file-association support
-  (double-click a `.pdf` to open in Tumbler)
+
 
 ## Tech stack
 
@@ -70,3 +66,15 @@ npm run tauri build
 npm test           # frontend (Vitest)
 cargo test         # backend (from src-tauri/)
 ```
+
+## Future
+
+Planned enhancements:
+
+- **Document Operations** — Merge, split, add, delete, reorder, rotate, and
+  crop pages. Uses pdfium (`FPDF_ImportPages`, `FPDFPage_Delete`,
+  `FPDFPage_SetRotation`) and lopdf (CropBox).
+- **Form Filling** — Enumerate form fields via pdfium's form API, render
+  interactive overlays, and save filled forms.
+- **Text Extraction** — Export plain text from all pages to a `.txt` file via
+  pdfium's text API.
