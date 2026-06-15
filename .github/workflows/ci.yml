@@ -32,6 +32,16 @@ jobs:
         run: npm ci
       - name: Build frontend
         run: npm run build
+      - name: Create placeholder pdfium.dll
+        # pdfium.dll is gitignored (downloaded separately); tauri's build
+        # script only checks that the resource file exists, it doesn't
+        # need to be a real library for `cargo check`.
+        working-directory: src-tauri
+        run: |
+          New-Item -ItemType Directory -Force -Path resources | Out-Null
+          if (-not (Test-Path resources/pdfium.dll)) {
+            New-Item -ItemType File -Path resources/pdfium.dll | Out-Null
+          }
       - name: Check Rust
         working-directory: src-tauri
         run: cargo check
