@@ -2,7 +2,12 @@ import { useEffect, useRef, useCallback, useMemo } from "react";
 import { usePdfStore } from "../store/usePdfStore";
 import { PageSlot } from "./PageSlot";
 
-const RENDER_RADIUS = 2;
+// Floor for the render radius, used before the container has been measured
+// and as a sane minimum at high zoom where few pages are visible.
+const MIN_RENDER_RADIUS = 2;
+// Extra pages to render past each edge of the viewport, so scrolling doesn't
+// immediately reveal placeholders.
+const RENDER_MARGIN_PAGES = 1;
 const PAGE_GAP = 16;
 
 export function ContinuousViewer() {
@@ -47,12 +52,30 @@ export function ContinuousViewer() {
     return map;
   }, [searchResults]);
 
-  // Track which pages are in the render window
+  // Track which pages are in the render window. The radius is sized so the
+  // window covers however many pages actually fit in the viewport at the
+  // current zoom — at low zoom many pages can be visible at once, so a fixed
+  // radius leaves pages near the edges of the viewport as unrendered
+  // placeholders.
   const isInRenderWindow = useCallback(
     (pageNum: number) => {
-      return Math.abs(pageNum - currentPage) <= RENDER_RADIUS;
+      const container = containerRef.current;
+      const avgPageHeight =
+        pageDimensions.length > 0
+          ? (pageDimensions.reduce((sum, d) => sum + d.height, 0) / pageDimensions.length) *
+              (zoom / 100) +
+            PAGE_GAP
+          : 0;
+
+      let radius = MIN_RENDER_RADIUS;
+      if (container && avgPageHeight > 0) {
+        const visiblePages = Math.ceil(container.clientHeight / avgPageHeight);
+        radius = Math.max(MIN_RENDER_RADIUS, visiblePages + RENDER_MARGIN_PAGES);
+      }
+
+      return Math.abs(pageNum - currentPage) <= radius;
     },
-    [currentPage],
+    [currentPage, pageDimensions, zoom],
   );
 
   useEffect(() => {
