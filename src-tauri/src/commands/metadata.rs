@@ -86,24 +86,36 @@ fn set_metadata_impl(
     metadata: MetadataUpdate,
 ) -> Result<(DocumentMetadata, Vec<String>), AppError> {
     let entry = state.get_document(&doc_id)?;
-    let file_path = lock_mutex(&entry)?.file_path.clone();
+    let (file_path, producer, creation_date, mod_date) = {
+        let entry = lock_mutex(&entry)?;
+        let meta = entry.document.metadata();
+        (
+            entry.file_path.clone(),
+            read_meta_tag(&meta, PdfDocumentMetadataTagType::Producer),
+            read_meta_tag(&meta, PdfDocumentMetadataTagType::CreationDate),
+            read_meta_tag(&meta, PdfDocumentMetadataTagType::ModificationDate),
+        )
+    };
 
     write_metadata(&file_path, &metadata)?;
 
     let reloaded_ids = state.reload_documents_with_path(&file_path)?;
 
-    let entry = state.get_document(&doc_id)?;
-    let entry = lock_mutex(&entry)?;
-    let meta = entry.document.metadata();
+    // `write_metadata` only touches Title/Author/Subject/Keywords/Creator, so
+    // the result can be built from the values just written plus the
+    // producer/dates read above. This avoids re-fetching `doc_id` from
+    // `state` here, which would otherwise report a misleading failure if this
+    // tab's document was closed during the save even though the write to
+    // disk (and the reload of any other tabs sharing the file) succeeded.
     let result = DocumentMetadata {
-        title: read_meta_tag(&meta, PdfDocumentMetadataTagType::Title),
-        author: read_meta_tag(&meta, PdfDocumentMetadataTagType::Author),
-        subject: read_meta_tag(&meta, PdfDocumentMetadataTagType::Subject),
-        keywords: read_meta_tag(&meta, PdfDocumentMetadataTagType::Keywords),
-        creator: read_meta_tag(&meta, PdfDocumentMetadataTagType::Creator),
-        producer: read_meta_tag(&meta, PdfDocumentMetadataTagType::Producer),
-        creation_date: read_meta_tag(&meta, PdfDocumentMetadataTagType::CreationDate),
-        mod_date: read_meta_tag(&meta, PdfDocumentMetadataTagType::ModificationDate),
+        title: metadata.title,
+        author: metadata.author,
+        subject: metadata.subject,
+        keywords: metadata.keywords,
+        creator: metadata.creator,
+        producer,
+        creation_date,
+        mod_date,
     };
 
     Ok((result, reloaded_ids))
@@ -178,6 +190,7 @@ fn pdf_text_string(s: &str) -> Object {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::DocEntry;
 
     /// Writes new metadata into a real PDF via lopdf, then confirms pdfium
     /// can still open the saved file and reads back the new values.
@@ -211,6 +224,75 @@ mod tests {
         assert_eq!(read_meta_tag(&meta, PdfDocumentMetadataTagType::Creator), "Tumbler");
 
         drop(doc);
+        std::fs::remove_file(&tmp).ok();
+    }
+
+    /// `set_metadata_impl` builds its returned `DocumentMetadata` from the
+    /// values just written plus the producer/dates read before the write,
+    /// without re-fetching `doc_id` from `state` afterward. Confirms the
+    /// returned result has the new editable fields and unchanged read-only
+    /// fields, the document is reloaded in place (still reachable via the
+    /// original `doc_id`), and `reloaded_ids` includes it.
+    #[test]
+    fn set_metadata_returns_new_values_and_reloads_document_in_place() {
+        let src = crate::fixture_path();
+
+        let tmp = std::env::temp_dir().join("tumbler_set_metadata_test.pdf");
+        std::fs::copy(&src, &tmp).expect("copy fixture");
+        let file_path = tmp.to_string_lossy().into_owned();
+
+        let pdfium = crate::test_pdfium();
+        let state = AppState::new(pdfium, None);
+
+        let document = pdfium
+            .load_pdf_from_file(&file_path, None)
+            .expect("load pdf");
+        let original_meta = document.metadata();
+        let original_producer = read_meta_tag(&original_meta, PdfDocumentMetadataTagType::Producer);
+        let original_creation_date =
+            read_meta_tag(&original_meta, PdfDocumentMetadataTagType::CreationDate);
+        let original_mod_date =
+            read_meta_tag(&original_meta, PdfDocumentMetadataTagType::ModificationDate);
+
+        state
+            .insert_document(
+                "doc-1".to_string(),
+                DocEntry {
+                    document,
+                    file_path: file_path.clone(),
+                },
+            )
+            .expect("insert");
+
+        let update = MetadataUpdate {
+            title: "New Title".to_string(),
+            author: "New Author".to_string(),
+            subject: "New Subject".to_string(),
+            keywords: "new, keywords".to_string(),
+            creator: "Tumbler".to_string(),
+        };
+
+        let (result, reloaded_ids) = set_metadata_impl(&state, "doc-1".to_string(), update)
+            .expect("set_metadata_impl");
+
+        assert_eq!(result.title, "New Title");
+        assert_eq!(result.author, "New Author");
+        assert_eq!(result.subject, "New Subject");
+        assert_eq!(result.keywords, "new, keywords");
+        assert_eq!(result.creator, "Tumbler");
+        assert_eq!(result.producer, original_producer);
+        assert_eq!(result.creation_date, original_creation_date);
+        assert_eq!(result.mod_date, original_mod_date);
+
+        assert_eq!(reloaded_ids, vec!["doc-1".to_string()]);
+
+        // doc-1 is still reachable and was reloaded in place to reflect the save.
+        let entry = state.get_document("doc-1").expect("get doc-1");
+        let entry = lock_mutex(&entry).expect("lock doc-1");
+        let meta = entry.document.metadata();
+        assert_eq!(read_meta_tag(&meta, PdfDocumentMetadataTagType::Title), "New Title");
+        drop(entry);
+
         std::fs::remove_file(&tmp).ok();
     }
 }

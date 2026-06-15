@@ -303,6 +303,7 @@ fn print_impl(
 
     let total = pages_to_print.len() as u32;
     let mut pages_printed = 0u32;
+    let mut aborted = false;
 
     for &page_num in &pages_to_print {
         // Emit progress
@@ -316,6 +317,7 @@ fn print_impl(
 
         if unsafe { StartPage(hdc) } <= 0 {
             let _ = unsafe { AbortDoc(hdc) };
+            aborted = true;
             break;
         }
 
@@ -356,13 +358,18 @@ fn print_impl(
 
         if unsafe { EndPage(hdc) } <= 0 {
             let _ = unsafe { AbortDoc(hdc) };
+            aborted = true;
             break;
         }
 
         pages_printed += 1;
     }
 
-    unsafe { EndDoc(hdc) };
+    // AbortDoc already ended the print job; calling EndDoc afterward is
+    // invalid per the Win32 contract.
+    if !aborted {
+        unsafe { EndDoc(hdc) };
+    }
 
     Ok(PrintResult {
         printed: true,
