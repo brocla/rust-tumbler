@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { ImageOff } from "lucide-react";
 import { usePdfStore } from "../store/usePdfStore";
 
 const THUMBNAIL_SCALE = 0.18;
@@ -48,6 +49,7 @@ function Thumbnail({
 }: ThumbnailProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [rendered, setRendered] = useState(false);
+  const [failed, setFailed] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
 
   const cssWidth = Math.round(pageWidth * THUMBNAIL_SCALE);
@@ -55,7 +57,7 @@ function Thumbnail({
 
   const renderThumb = useCallback(async () => {
     const canvas = canvasRef.current;
-    if (!canvas || rendered) return;
+    if (!canvas || rendered || failed) return;
 
     const dpr = window.devicePixelRatio || 1;
     const renderWidth = Math.round(cssWidth * dpr);
@@ -87,8 +89,9 @@ function Thumbnail({
       }
     } catch (err) {
       console.error(`Failed to render thumbnail page ${pageNumber}:`, err);
+      setFailed(true);
     }
-  }, [docId, pageNumber, cssWidth, cssHeight, rendered]);
+  }, [docId, pageNumber, cssWidth, cssHeight, rendered, failed]);
 
   // Lazy render when visible
   useEffect(() => {
@@ -115,6 +118,15 @@ function Thumbnail({
       onClick={onClick}
     >
       <canvas ref={canvasRef} style={{ width: cssWidth, height: cssHeight }} />
+      {failed && (
+        <div
+          className="thumbnail-error"
+          style={{ width: cssWidth, height: cssHeight }}
+          title={`Failed to load page ${pageNumber}`}
+        >
+          <ImageOff size={16} />
+        </div>
+      )}
       <span className="thumbnail-label">{pageNumber}</span>
     </div>
   );

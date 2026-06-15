@@ -1,4 +1,5 @@
-use crate::state::AppState;
+use crate::error::AppError;
+use crate::state::{AppState, DocEntry};
 use serde::Serialize;
 use tauri::State;
 
@@ -18,10 +19,14 @@ pub struct DocInfo {
 
 #[tauri::command]
 pub fn open_document(state: State<'_, AppState>, path: String) -> Result<DocInfo, String> {
+    open_document_impl(&state, path).map_err(String::from)
+}
+
+fn open_document_impl(state: &AppState, path: String) -> Result<DocInfo, AppError> {
     let doc = state
         .pdfium
         .load_pdf_from_file(&path, None)
-        .map_err(|e| format!("Failed to load PDF: {e}"))?;
+        .map_err(|e| AppError::pdfium("Failed to load PDF", e))?;
 
     let page_count = doc.pages().len() as u32;
     let mut page_dimensions = Vec::with_capacity(page_count as usize);
@@ -30,7 +35,7 @@ pub fn open_document(state: State<'_, AppState>, path: String) -> Result<DocInfo
         let page = doc
             .pages()
             .get(i as i32)
-            .map_err(|e| format!("Failed to get page {i}: {e}"))?;
+            .map_err(|e| AppError::pdfium(format!("Failed to get page {i}"), e))?;
         page_dimensions.push(PageDimension {
             width: page.width().value,
             height: page.height().value,
@@ -38,16 +43,13 @@ pub fn open_document(state: State<'_, AppState>, path: String) -> Result<DocInfo
     }
 
     let doc_id = uuid::Uuid::new_v4().to_string();
-    let entry = crate::state::DocEntry {
-        document: doc,
-        file_path: path,
-    };
-
-    state
-        .documents
-        .lock()
-        .map_err(|e| format!("Lock error: {e}"))?
-        .insert(doc_id.clone(), entry);
+    state.insert_document(
+        doc_id.clone(),
+        DocEntry {
+            document: doc,
+            file_path: path,
+        },
+    )?;
 
     Ok(DocInfo {
         doc_id,
@@ -58,10 +60,5 @@ pub fn open_document(state: State<'_, AppState>, path: String) -> Result<DocInfo
 
 #[tauri::command]
 pub fn close_document(state: State<'_, AppState>, doc_id: String) -> Result<(), String> {
-    state
-        .documents
-        .lock()
-        .map_err(|e| format!("Lock error: {e}"))?
-        .remove(&doc_id);
-    Ok(())
+    state.remove_document(&doc_id).map_err(String::from)
 }

@@ -1,4 +1,5 @@
-use crate::state::AppState;
+use crate::error::AppError;
+use crate::state::{lock_mutex, AppState};
 use serde::Serialize;
 use std::ffi::c_void;
 use std::os::raw::c_int;
@@ -53,23 +54,27 @@ pub async fn print_document(
     state: State<'_, AppState>,
     doc_id: String,
 ) -> Result<PrintResult, String> {
+    print_document_impl(window, &state, doc_id)
+        .await
+        .map_err(String::from)
+}
+
+async fn print_document_impl(
+    window: tauri::WebviewWindow,
+    state: &AppState,
+    doc_id: String,
+) -> Result<PrintResult, AppError> {
     // Look up the file path for this document
     let file_path = {
-        let docs = state
-            .documents
-            .lock()
-            .map_err(|e| format!("Lock error: {e}"))?;
-        let entry = docs
-            .get(&doc_id)
-            .ok_or_else(|| format!("Document not found: {doc_id}"))?;
+        let entry = state.get_document(&doc_id)?;
+        let entry = lock_mutex(&entry)?;
         entry.file_path.clone()
     };
 
     // Resolve pdfium.dll path (same logic as lib.rs)
     let pdfium_path = crate::resolve_pdfium_path();
 
-    let hwnd_raw =
-        window.hwnd().map_err(|e| format!("hwnd() failed: {e}"))?.0 as isize;
+    let hwnd_raw = window.hwnd().map_err(|e| format!("hwnd() failed: {e}"))?.0 as isize;
 
     let (tx, rx) = std::sync::mpsc::channel();
 
@@ -86,13 +91,16 @@ fn print_on_sta_thread(
     pdfium_path: &str,
     pdf_path: &str,
     window: &tauri::WebviewWindow,
-) -> Result<PrintResult, String> {
+) -> Result<PrintResult, AppError> {
     use windows::Win32::System::Com::*;
 
     // Initialize COM as STA — must be first call on this thread
     let hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
     if hr.is_err() {
-        return Err(format!("CoInitializeEx failed: HRESULT 0x{:08x}", hr.0));
+        return Err(AppError::Other(format!(
+            "CoInitializeEx failed: HRESULT 0x{:08x}",
+            hr.0
+        )));
     }
 
     let result = print_impl(hwnd_raw, pdfium_path, pdf_path, window);
@@ -106,7 +114,7 @@ fn print_impl(
     pdfium_path: &str,
     pdf_path: &str,
     window: &tauri::WebviewWindow,
-) -> Result<PrintResult, String> {
+) -> Result<PrintResult, AppError> {
     use windows::Win32::Foundation::*;
     use windows::Win32::Graphics::Gdi::*;
     use windows::Win32::Storage::Xps::*;
@@ -147,7 +155,7 @@ fn print_impl(
         .map_err(|_| "Invalid PDF path".to_string())?;
     let doc = unsafe { fpdf_load_document(pdf_path_cstr.as_ptr() as *const u8, std::ptr::null()) };
     if doc.is_null() {
-        return Err("Failed to load PDF for printing".to_string());
+        return Err(AppError::Other("Failed to load PDF for printing".to_string()));
     }
 
     let page_count = unsafe { fpdf_get_page_count(doc) } as u32;
@@ -177,7 +185,7 @@ fn print_impl(
     let dialog_result = unsafe { PrintDlgExW(&mut pdx) };
     if dialog_result.is_err() {
         unsafe { fpdf_close_document(doc) };
-        return Err(format!("PrintDlgExW failed: {dialog_result:?}"));
+        return Err(AppError::Other(format!("PrintDlgExW failed: {dialog_result:?}")));
     }
 
     if pdx.dwResultAction != PD_RESULT_PRINT {
@@ -228,7 +236,7 @@ fn print_impl(
             let _ = GlobalFree(Some(pdx.hDevMode));
             let _ = GlobalFree(Some(pdx.hDevNames));
         }
-        return Err("Failed to create printer DC".to_string());
+        return Err(AppError::Other("Failed to create printer DC".to_string()));
     }
 
     // Determine which pages to print
@@ -262,7 +270,7 @@ fn print_impl(
             let _ = GlobalFree(Some(pdx.hDevMode));
             let _ = GlobalFree(Some(pdx.hDevNames));
         }
-        return Err("StartDoc failed".to_string());
+        return Err(AppError::Other("StartDoc failed".to_string()));
     }
 
     let total = pages_to_print.len() as u32;

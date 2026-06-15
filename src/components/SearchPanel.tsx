@@ -16,6 +16,7 @@ export function SearchPanel() {
 
   const [query, setQuery] = useState(activeTab?.searchQuery ?? "");
   const [searching, setSearching] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
   const [resultPage, setResultPage] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout>>();
@@ -30,6 +31,8 @@ export function SearchPanel() {
   const doSearch = useCallback(
     async (q: string) => {
       if (!tabId || !docId) return;
+
+      setSearchError(null);
 
       if (q.length === 0) {
         updateTab(tabId, {
@@ -58,7 +61,7 @@ export function SearchPanel() {
           updateTab(tabId, { currentPage: results[0].page });
         }
       } catch (err) {
-        console.error("Search failed:", err);
+        setSearchError(String(err));
       } finally {
         setSearching(false);
       }
@@ -90,6 +93,11 @@ export function SearchPanel() {
     inputRef.current?.focus();
     inputRef.current?.select();
   }, []);
+
+  // Clear any stale search error when switching tabs
+  useEffect(() => {
+    setSearchError(null);
+  }, [tabId]);
 
   const handleResultClick = (page: number) => {
     if (!tabId) return;
@@ -137,7 +145,11 @@ export function SearchPanel() {
         <div className="search-status">Searching...</div>
       )}
 
-      {!searching && query.length > 0 && (
+      {!searching && searchError && (
+        <div className="search-status search-error">Search failed: {searchError}</div>
+      )}
+
+      {!searching && !searchError && query.length > 0 && (
         <div className="search-status">
           {totalMatches === 0
             ? "No matches found"

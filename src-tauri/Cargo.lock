@@ -4150,6 +4150,7 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-fs",
  "tauri-plugin-single-instance",
+ "thiserror 2.0.18",
  "time",
  "uuid",
  "windows",

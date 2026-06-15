@@ -21,6 +21,7 @@ uuid = { version = "1", features = ["v4"] }
 pdfium-render = { version = "0.9", features = ["pdfium_use_win32", "thread_safe"] }
 libloading = "0.7"
 lopdf = "0.34"
+thiserror = "2"
 
 # Pin time to avoid blanket impl conflict with cookie 0.18
 time = "=0.3.41"

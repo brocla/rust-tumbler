@@ -1,10 +1,9 @@
 mod commands;
+mod error;
 mod state;
 
 use pdfium_render::prelude::*;
 use state::AppState;
-use std::collections::HashMap;
-use std::sync::Mutex;
 use tauri::{Emitter, Manager};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -20,11 +19,7 @@ pub fn run() {
 
     let startup_file = pdf_path_from_args(&std::env::args().collect::<Vec<_>>());
 
-    let app_state = AppState {
-        pdfium,
-        documents: Mutex::new(HashMap::new()),
-        startup_file: Mutex::new(startup_file),
-    };
+    let app_state = AppState::new(pdfium, startup_file);
 
     tauri::Builder::default()
         // Must be registered first: forwards the command line of a second
@@ -75,6 +70,17 @@ fn pdf_path_from_args(args: &[String]) -> Option<String> {
     args.get(1).filter(|p| !p.is_empty()).cloned()
 }
 
+/// Formats a `PdfiumError` as a short identifier (e.g. "FormatError") instead
+/// of pdfium-render's default `Display` impl, which pretty-prints the full
+/// `Debug` representation across multiple lines (e.g.
+/// "PdfiumLibraryInternalError(\n    FormatError,\n)").
+pub fn describe_pdfium_error(e: &PdfiumError) -> String {
+    match e {
+        PdfiumError::PdfiumLibraryInternalError(inner) => format!("{inner:?}"),
+        other => format!("{other:?}"),
+    }
+}
+
 /// Resolve the path to pdfium.dll.
 /// In dev mode: look relative to the src-tauri directory.
 /// In production: look in the bundled resources directory.
@@ -102,4 +108,19 @@ pub fn resolve_pdfium_path() -> String {
 
     // Fallback
     "pdfium.dll".to_string()
+}
+
+/// Returns a process-wide `Pdfium` instance for use in tests.
+///
+/// pdfium-render's `Pdfium::bind_to_library` can only succeed once per
+/// process, so tests across multiple modules must share a single binding
+/// rather than each binding their own.
+#[cfg(test)]
+pub(crate) fn test_pdfium() -> &'static Pdfium {
+    use std::sync::OnceLock;
+    static PDFIUM: OnceLock<Pdfium> = OnceLock::new();
+    PDFIUM.get_or_init(|| {
+        let bindings = Pdfium::bind_to_library(resolve_pdfium_path()).expect("bind pdfium");
+        Pdfium::new(bindings)
+    })
 }

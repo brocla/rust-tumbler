@@ -372,6 +372,18 @@ body {
   font-size: var(--font-size-sm);
 }
 
+.page-error {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-error);
+  font-size: var(--font-size-sm);
+  text-align: center;
+  padding: 8px;
+}
+
 /* Text layer — invisible selectable text overlay */
 .text-layer {
   position: absolute;
@@ -556,6 +568,10 @@ body {
   padding: 0 2px;
 }
 
+.search-status.search-error {
+  color: var(--color-error);
+}
+
 .search-results-list {
   flex: 1;
   overflow-y: auto;
@@ -626,6 +642,16 @@ body {
 
 .thumbnail canvas {
   display: block;
+  box-shadow: var(--shadow-sm);
+}
+
+.thumbnail-error {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border-light);
+  color: var(--color-error);
   box-shadow: var(--shadow-sm);
 }
 

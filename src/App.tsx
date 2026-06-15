@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { open } from "@tauri-apps/plugin-dialog";
+import { message, open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Toolbar } from "./components/Toolbar";
@@ -52,7 +52,7 @@ function App() {
         loading: false,
       });
     } catch (err) {
-      console.error("Failed to open document:", err);
+      await message(String(err), { title: "Failed to Open PDF", kind: "error" });
     }
   };
 
@@ -76,7 +76,7 @@ function App() {
       setPrintProgress({ page: 0, total: tab.pageCount });
       await invoke("print_document", { docId: tab.docId });
     } catch (err) {
-      console.error("Print failed:", err);
+      await message(String(err), { title: "Print Failed", kind: "error" });
     } finally {
       setPrintProgress(null);
     }
@@ -162,6 +162,70 @@ function App() {
     };
     window.addEventListener("keydown", handleCtrlF, { capture: true });
     return () => window.removeEventListener("keydown", handleCtrlF, { capture: true });
+  }, []);
+
+  // Reconstruct copied text with line breaks and inter-item spacing.
+  // Text-layer spans are absolutely positioned, so the browser's default
+  // plain-text serialization concatenates lines without inserting "\n" or
+  // preserving gaps between separate runs on the same line (e.g. a list
+  // number and its item text). Each span carries data-line/data-x/
+  // data-right/data-font-size (set by TextLayer); insert "\n" when the
+  // line changes, and a tab between same-line items separated by a real
+  // gap (e.g. a list number and its item text). The Rust extractor only
+  // splits same-line runs at gaps >= 0.5 * fontSize, so any gap above this
+  // threshold is a deliberate spatial gap, not adjacent run fragments —
+  // use one threshold/character so gaps of varying width (e.g. "1." vs
+  // "10.") still align to the same tab stop.
+  useEffect(() => {
+    const GAP_THRESHOLD = 0.2;
+
+    const handleCopy = (e: ClipboardEvent) => {
+      const selection = window.getSelection();
+      if (!selection || selection.isCollapsed || selection.rangeCount === 0) return;
+
+      const fragment = selection.getRangeAt(0).cloneContents();
+      if (!fragment.querySelector("[data-line]")) return;
+
+      let result = "";
+      let lastLine: string | null = null;
+      let prevRight: number | null = null;
+
+      const walk = (node: Node) => {
+        if (node.nodeType === Node.TEXT_NODE) {
+          result += node.textContent ?? "";
+          return;
+        }
+        if (node.nodeType === Node.ELEMENT_NODE) {
+          const el = node as Element;
+          const line = el.getAttribute("data-line");
+          if (line !== null) {
+            const x = parseFloat(el.getAttribute("data-x") ?? "0");
+            const right = parseFloat(el.getAttribute("data-right") ?? "0");
+            const fontSize = parseFloat(el.getAttribute("data-font-size") ?? "0");
+
+            if (lastLine !== null && line !== lastLine) {
+              result += "\n";
+            } else if (lastLine !== null && prevRight !== null && fontSize > 0) {
+              const gap = x - prevRight;
+              if (gap > fontSize * GAP_THRESHOLD) {
+                result += "\t";
+              }
+            }
+
+            lastLine = line;
+            prevRight = right;
+          }
+          el.childNodes.forEach(walk);
+        }
+      };
+      fragment.childNodes.forEach(walk);
+
+      e.preventDefault();
+      e.clipboardData?.setData("text/plain", result);
+    };
+
+    document.addEventListener("copy", handleCopy);
+    return () => document.removeEventListener("copy", handleCopy);
   }, []);
 
   return (

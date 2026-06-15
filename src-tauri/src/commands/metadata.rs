@@ -1,8 +1,9 @@
-use crate::state::{AppState, DocEntry};
+use crate::error::AppError;
+use crate::state::{lock_mutex, AppState};
 use lopdf::{Dictionary, Object, StringFormat};
 use pdfium_render::prelude::*;
 use serde::{Deserialize, Serialize};
-use tauri::State;
+use tauri::{Emitter, State};
 
 #[derive(Serialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -32,14 +33,12 @@ pub fn get_metadata(
     state: State<'_, AppState>,
     doc_id: String,
 ) -> Result<DocumentMetadata, String> {
-    let docs = state
-        .documents
-        .lock()
-        .map_err(|e| format!("Lock error: {e}"))?;
+    get_metadata_impl(&state, doc_id).map_err(String::from)
+}
 
-    let entry = docs
-        .get(&doc_id)
-        .ok_or_else(|| format!("Document not found: {doc_id}"))?;
+fn get_metadata_impl(state: &AppState, doc_id: String) -> Result<DocumentMetadata, AppError> {
+    let entry = state.get_document(&doc_id)?;
+    let entry = lock_mutex(&entry)?;
 
     let meta = entry
         .document
@@ -64,33 +63,38 @@ fn read_meta_tag(meta: &PdfMetadata, tag: PdfDocumentMetadataTagType) -> String 
 }
 
 /// Writes Title, Author, Subject, Keywords, and Creator into the document's
-/// info dictionary via lopdf, then reloads the file into pdfium so the
-/// in-memory handle reflects the saved bytes.
+/// info dictionary via lopdf, then reloads every open tab pointing at this
+/// file so all in-memory pdfium handles reflect the saved bytes. Emits
+/// `document-metadata-changed` with the reloaded doc_ids so other tabs can
+/// refresh their displayed metadata.
 #[tauri::command]
 pub fn set_metadata(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     doc_id: String,
     metadata: MetadataUpdate,
 ) -> Result<DocumentMetadata, String> {
-    let file_path = {
-        let docs = state
-            .documents
-            .lock()
-            .map_err(|e| format!("Lock error: {e}"))?;
-        docs.get(&doc_id)
-            .ok_or_else(|| format!("Document not found: {doc_id}"))?
-            .file_path
-            .clone()
-    };
+    let (result, reloaded_ids) =
+        set_metadata_impl(&state, doc_id, metadata).map_err(String::from)?;
+    let _ = app.emit("document-metadata-changed", &reloaded_ids);
+    Ok(result)
+}
+
+fn set_metadata_impl(
+    state: &AppState,
+    doc_id: String,
+    metadata: MetadataUpdate,
+) -> Result<(DocumentMetadata, Vec<String>), AppError> {
+    let entry = state.get_document(&doc_id)?;
+    let file_path = lock_mutex(&entry)?.file_path.clone();
 
     write_metadata(&file_path, &metadata)?;
 
-    let reloaded = state
-        .pdfium
-        .load_pdf_from_file(&file_path, None)
-        .map_err(|e| format!("Failed to reload PDF: {e}"))?;
+    let reloaded_ids = state.reload_documents_with_path(&file_path)?;
 
-    let meta = reloaded.metadata();
+    let entry = state.get_document(&doc_id)?;
+    let entry = lock_mutex(&entry)?;
+    let meta = entry.document.metadata();
     let result = DocumentMetadata {
         title: read_meta_tag(&meta, PdfDocumentMetadataTagType::Title),
         author: read_meta_tag(&meta, PdfDocumentMetadataTagType::Author),
@@ -102,26 +106,14 @@ pub fn set_metadata(
         mod_date: read_meta_tag(&meta, PdfDocumentMetadataTagType::ModificationDate),
     };
 
-    state
-        .documents
-        .lock()
-        .map_err(|e| format!("Lock error: {e}"))?
-        .insert(
-            doc_id,
-            DocEntry {
-                document: reloaded,
-                file_path,
-            },
-        );
-
-    Ok(result)
+    Ok((result, reloaded_ids))
 }
 
 /// Writes Title, Author, Subject, Keywords, and Creator into the info
 /// dictionary of the PDF at `file_path`, in place, via lopdf.
-fn write_metadata(file_path: &str, metadata: &MetadataUpdate) -> Result<(), String> {
+fn write_metadata(file_path: &str, metadata: &MetadataUpdate) -> Result<(), AppError> {
     let mut lopdf_doc = lopdf::Document::load(file_path)
-        .map_err(|e| format!("Failed to open PDF for metadata update: {e}"))?;
+        .map_err(|e| AppError::lopdf("Failed to open PDF for metadata update", e))?;
 
     let info_id = lopdf_doc
         .trailer
@@ -150,9 +142,20 @@ fn write_metadata(file_path: &str, metadata: &MetadataUpdate) -> Result<(), Stri
         }
     }
 
-    lopdf_doc
-        .save(file_path)
-        .map_err(|e| format!("Failed to save PDF: {e}"))?;
+    // Save to a temporary file in the same directory, then atomically replace
+    // the original. This avoids corrupting/truncating the user's PDF if the
+    // save is interrupted partway through.
+    let tmp_path = format!("{file_path}.tmp-{}", uuid::Uuid::new_v4());
+
+    if let Err(e) = lopdf_doc.save(&tmp_path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(AppError::io("Failed to save PDF", e));
+    }
+
+    std::fs::rename(&tmp_path, file_path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp_path);
+        AppError::io("Failed to replace PDF with updated copy", e)
+    })?;
 
     Ok(())
 }
@@ -201,8 +204,7 @@ mod tests {
 
         write_metadata(tmp.to_str().unwrap(), &update).expect("write_metadata");
 
-        let bindings = Pdfium::bind_to_library(crate::resolve_pdfium_path()).expect("bind pdfium");
-        let pdfium = Pdfium::new(bindings);
+        let pdfium = crate::test_pdfium();
         let doc = pdfium
             .load_pdf_from_file(tmp.to_str().unwrap(), None)
             .expect("pdfium reload");

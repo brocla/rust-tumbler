@@ -1,4 +1,5 @@
-use crate::state::AppState;
+use crate::error::AppError;
+use crate::state::{lock_mutex, AppState};
 use pdfium_render::prelude::*;
 use serde::Serialize;
 use tauri::State;
@@ -50,27 +51,29 @@ pub fn extract_page_text(
     doc_id: String,
     page: u32,
 ) -> Result<Vec<TextItem>, String> {
-    let docs = state
-        .documents
-        .lock()
-        .map_err(|e| format!("Lock error: {e}"))?;
+    extract_page_text_impl(&state, doc_id, page).map_err(String::from)
+}
 
-    let entry = docs
-        .get(&doc_id)
-        .ok_or_else(|| format!("Document not found: {doc_id}"))?;
+fn extract_page_text_impl(
+    state: &AppState,
+    doc_id: String,
+    page: u32,
+) -> Result<Vec<TextItem>, AppError> {
+    let entry = state.get_document(&doc_id)?;
+    let entry = lock_mutex(&entry)?;
 
     let pdf_page = entry
         .document
         .pages()
         .get(page.saturating_sub(1) as i32)
-        .map_err(|e| format!("Failed to get page {page}: {e}"))?;
+        .map_err(|e| AppError::pdfium(format!("Failed to get page {page}"), e))?;
 
     let page_height = pdf_page.height().value;
     let (origin_x, origin_y) = page_origin(&pdf_page);
 
     let text = pdf_page
         .text()
-        .map_err(|e| format!("Failed to get text: {e}"))?;
+        .map_err(|e| AppError::pdfium("Failed to get text", e))?;
 
     let mut items: Vec<TextItem> = Vec::new();
     let mut current_text = String::new();
@@ -158,18 +161,20 @@ pub fn search_document(
     doc_id: String,
     query: String,
 ) -> Result<Vec<SearchResult>, String> {
+    search_document_impl(&state, doc_id, query).map_err(String::from)
+}
+
+fn search_document_impl(
+    state: &AppState,
+    doc_id: String,
+    query: String,
+) -> Result<Vec<SearchResult>, AppError> {
     if query.is_empty() {
         return Ok(Vec::new());
     }
 
-    let docs = state
-        .documents
-        .lock()
-        .map_err(|e| format!("Lock error: {e}"))?;
-
-    let entry = docs
-        .get(&doc_id)
-        .ok_or_else(|| format!("Document not found: {doc_id}"))?;
+    let entry = state.get_document(&doc_id)?;
+    let entry = lock_mutex(&entry)?;
 
     let page_count = entry.document.pages().len();
     let mut results = Vec::new();

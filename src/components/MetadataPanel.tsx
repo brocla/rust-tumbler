@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { usePdfStore } from "../store/usePdfStore";
 
 interface DocumentMetadata {
@@ -48,12 +49,11 @@ export function MetadataPanel() {
     if (!activeTab?.docId) return;
 
     let cancelled = false;
+    const docId = activeTab.docId;
 
-    (async () => {
+    const load = async () => {
       try {
-        const meta = await invoke<DocumentMetadata>("get_metadata", {
-          docId: activeTab.docId,
-        });
+        const meta = await invoke<DocumentMetadata>("get_metadata", { docId });
         if (!cancelled) {
           setMetadata(meta);
           setEdited(pickEditable(meta));
@@ -64,10 +64,20 @@ export function MetadataPanel() {
           setError(String(err));
         }
       }
-    })();
+    };
+
+    load();
+
+    // Another tab may have edited metadata for this same underlying file.
+    const unlisten = listen<string[]>("document-metadata-changed", (event) => {
+      if (event.payload.includes(docId)) {
+        load();
+      }
+    });
 
     return () => {
       cancelled = true;
+      unlisten.then((f) => f());
     };
   }, [activeTab?.docId]);
 

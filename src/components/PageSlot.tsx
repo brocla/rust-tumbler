@@ -42,6 +42,7 @@ export function PageSlot({
 }: PageSlotProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [rendered, setRendered] = useState(false);
+  const [failed, setFailed] = useState(false);
   const renderIdRef = useRef(0);
 
   const dpr = window.devicePixelRatio || 1;
@@ -61,6 +62,7 @@ export function PageSlot({
     if (!canvas) return;
 
     const renderId = ++renderIdRef.current;
+    setFailed(false);
 
     const cached = getCached(docId, pageNumber, zoom, dpr);
     if (cached) {
@@ -113,6 +115,7 @@ export function PageSlot({
         }
       } catch (err) {
         console.error(`Failed to render page ${pageNumber}:`, err);
+        if (!cancelled && renderId === renderIdRef.current) setFailed(true);
       }
     })();
 
@@ -158,7 +161,8 @@ export function PageSlot({
           />
         </>
       )}
-      {!rendered && <div className="page-loading">Loading...</div>}
+      {!rendered && !failed && <div className="page-loading">Loading...</div>}
+      {failed && <div className="page-error">Failed to load page {pageNumber}</div>}
     </div>
   );
 }

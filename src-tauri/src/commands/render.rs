@@ -1,4 +1,5 @@
-use crate::state::AppState;
+use crate::error::AppError;
+use crate::state::{lock_mutex, AppState};
 use pdfium_render::prelude::*;
 use tauri::State;
 
@@ -11,27 +12,30 @@ pub fn render_page(
     #[allow(unused)]
     height: u32,
 ) -> Result<tauri::ipc::Response, String> {
-    let docs = state
-        .documents
-        .lock()
-        .map_err(|e| format!("Lock error: {e}"))?;
+    render_page_impl(&state, doc_id, page, width).map_err(String::from)
+}
 
-    let entry = docs
-        .get(&doc_id)
-        .ok_or_else(|| format!("Document not found: {doc_id}"))?;
+fn render_page_impl(
+    state: &AppState,
+    doc_id: String,
+    page: u32,
+    width: u32,
+) -> Result<tauri::ipc::Response, AppError> {
+    let entry = state.get_document(&doc_id)?;
+    let entry = lock_mutex(&entry)?;
 
     let pdf_page = entry
         .document
         .pages()
         .get(page.saturating_sub(1) as i32)
-        .map_err(|e| format!("Failed to get page {page}: {e}"))?;
+        .map_err(|e| AppError::pdfium(format!("Failed to get page {page}"), e))?;
 
     let config = PdfRenderConfig::new()
         .set_target_width(width as Pixels);
 
     let bitmap = pdf_page
         .render_with_config(&config)
-        .map_err(|e| format!("Failed to render page {page}: {e}"))?;
+        .map_err(|e| AppError::pdfium(format!("Failed to render page {page}"), e))?;
 
     let rgba_bytes = bitmap.as_rgba_bytes();
 
