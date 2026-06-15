@@ -18,6 +18,13 @@ export function ContinuousViewer() {
   // here" apart from "the user asked to go to this page" (toolbar, search,
   // thumbnails, PageUp/Down) and only scrollIntoView for the latter.
   const lastObserverPage = useRef<number | null>(null);
+  // Mirrors currentPage for the IntersectionObserver callback below, so that
+  // callback can read the latest value without making currentPage a
+  // dependency of that effect. Recreating the observer on every currentPage
+  // change would re-`observe()` every slot, which immediately re-evaluates
+  // ratios and can override an explicit page change (e.g. a thumbnail click)
+  // before the user ever sees it take effect.
+  const currentPageRef = useRef(1);
 
   const docId = activeTab?.docId ?? "";
   const pageCount = activeTab?.pageCount ?? 0;
@@ -48,6 +55,10 @@ export function ContinuousViewer() {
     [currentPage],
   );
 
+  useEffect(() => {
+    currentPageRef.current = currentPage;
+  }, [currentPage]);
+
   // IntersectionObserver to track the most-visible page
   useEffect(() => {
     const container = containerRef.current;
@@ -57,7 +68,7 @@ export function ContinuousViewer() {
       (entries) => {
         if (suppressObserver.current) return;
 
-        let bestPage = currentPage;
+        let bestPage = currentPageRef.current;
         let bestRatio = 0;
 
         for (const entry of entries) {
@@ -71,7 +82,7 @@ export function ContinuousViewer() {
           }
         }
 
-        if (bestRatio > 0 && bestPage !== currentPage && tabId) {
+        if (bestRatio > 0 && bestPage !== currentPageRef.current && tabId) {
           lastObserverPage.current = bestPage;
           updateTab(tabId, { currentPage: bestPage });
         }
@@ -87,7 +98,7 @@ export function ContinuousViewer() {
     slots.forEach((slot) => observer.observe(slot));
 
     return () => observer.disconnect();
-  }, [pageCount, currentPage, tabId, updateTab, zoom]);
+  }, [pageCount, tabId, updateTab, zoom]);
 
   // Jump to page when currentPage changes via toolbar/keyboard/search/thumbnails.
   // Skip changes that came from the scroll-driven IntersectionObserver above —
