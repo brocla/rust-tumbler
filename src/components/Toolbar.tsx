@@ -60,6 +60,15 @@ export function Toolbar({ onOpenFile, onPrint }: ToolbarProps) {
     }
   };
 
+  // Wheel-zoom moves in fixed increments and isn't snapped to ZOOM_PRESETS,
+  // so the controlled <select> below needs a matching <option> for whatever
+  // arbitrary value activeTab.zoom currently holds — otherwise its displayed
+  // value goes blank/stale.
+  const zoomOptions =
+    activeTab && !ZOOM_PRESETS.includes(activeTab.zoom)
+      ? [...ZOOM_PRESETS, activeTab.zoom].sort((a, b) => a - b)
+      : ZOOM_PRESETS;
+
   const handleCycleDisplayMode = () => {
     if (!activeTab) return;
     const idx = DISPLAY_MODE_ORDER.indexOf(activeTab.displayMode);
@@ -125,7 +134,7 @@ export function Toolbar({ onOpenFile, onPrint }: ToolbarProps) {
               value={activeTab.zoom}
               onChange={handleZoomSelect}
             >
-              {ZOOM_PRESETS.map((z) => (
+              {zoomOptions.map((z) => (
                 <option key={z} value={z}>
                   {z}%
                 </option>
