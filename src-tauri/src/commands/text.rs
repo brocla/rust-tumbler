@@ -235,3 +235,108 @@ fn search_document_impl(
 
     Ok(results)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::DocEntry;
+
+    /// Loads the checked-in fixture into `state` under `doc_id`.
+    fn open_fixture(state: &AppState, doc_id: &str) {
+        let src = crate::fixture_path();
+        let pdfium = crate::test_pdfium();
+        let document = pdfium
+            .load_pdf_from_file(src.to_str().unwrap(), None)
+            .expect("load pdf");
+        state
+            .insert_document(
+                doc_id.to_string(),
+                DocEntry {
+                    document,
+                    file_path: src.to_string_lossy().into_owned(),
+                },
+            )
+            .expect("insert");
+    }
+
+    /// `sample.pdf` is a single 200x200 page containing the text "Test
+    /// Fixture" in one run at 24pt, starting near the top-left of the page.
+    /// This pins both the run-grouping logic and the coordinate conversion
+    /// (PDF bottom-left origin -> top-left origin used by the UI).
+    #[test]
+    fn extract_page_text_returns_single_run_with_position() {
+        let pdfium = crate::test_pdfium();
+        let state = AppState::new(pdfium, None);
+        open_fixture(&state, "doc1");
+
+        let items = extract_page_text_impl(&state, "doc1".to_string(), 1).expect("extract");
+
+        assert_eq!(items.len(), 1);
+        let item = &items[0];
+        assert_eq!(item.text, "Test Fixture");
+        assert_eq!(item.font_size, 24.0);
+        assert!((item.x - 20.0).abs() < 0.5, "unexpected x: {}", item.x);
+        assert!((item.y - 78.28).abs() < 0.5, "unexpected y: {}", item.y);
+        assert!(item.width > 100.0, "unexpected width: {}", item.width);
+        assert!(item.height > 0.0, "unexpected height: {}", item.height);
+    }
+
+    #[test]
+    fn extract_page_text_for_missing_page_is_error() {
+        let pdfium = crate::test_pdfium();
+        let state = AppState::new(pdfium, None);
+        open_fixture(&state, "doc1");
+
+        match extract_page_text_impl(&state, "doc1".to_string(), 99) {
+            Err(AppError::Pdfium { .. }) => {}
+            Err(other) => panic!("expected AppError::Pdfium, got {other:?}"),
+            Ok(_) => panic!("expected an error for an out-of-range page"),
+        }
+    }
+
+    /// Searching for a word that appears on the page returns one rect with a
+    /// sensible size, using the same coordinate conversion as
+    /// `extract_page_text`.
+    #[test]
+    fn search_document_finds_known_word_with_nonempty_rect() {
+        let pdfium = crate::test_pdfium();
+        let state = AppState::new(pdfium, None);
+        open_fixture(&state, "doc1");
+
+        let results =
+            search_document_impl(&state, "doc1".to_string(), "Test".to_string()).expect("search");
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].page, 1);
+        assert_eq!(results[0].rects.len(), 1);
+
+        let rect = &results[0].rects[0];
+        assert!(rect.width > 0.0, "unexpected width: {}", rect.width);
+        assert!(rect.height > 0.0, "unexpected height: {}", rect.height);
+        assert!(rect.x >= 0.0 && rect.y >= 0.0);
+    }
+
+    #[test]
+    fn search_document_returns_empty_for_word_not_present() {
+        let pdfium = crate::test_pdfium();
+        let state = AppState::new(pdfium, None);
+        open_fixture(&state, "doc1");
+
+        let results = search_document_impl(&state, "doc1".to_string(), "Nonexistent".to_string())
+            .expect("search");
+
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn search_document_returns_empty_for_empty_query() {
+        let pdfium = crate::test_pdfium();
+        let state = AppState::new(pdfium, None);
+        open_fixture(&state, "doc1");
+
+        let results =
+            search_document_impl(&state, "doc1".to_string(), String::new()).expect("search");
+
+        assert!(results.is_empty());
+    }
+}

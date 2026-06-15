@@ -5,7 +5,9 @@
 
 [![CI](https://github.com/brocla/rust-tumbler/actions/workflows/ci.yml/badge.svg)](https://github.com/brocla/rust-tumbler/actions/workflows/ci.yml)
 
-A personal PDF viewer for Windows, built with Tauri v2
+A personal PDF viewer for Windows. 
+
+Built with Tauri v2
 (Rust backend, React/TypeScript frontend) and pdfium.
 
 </div>
@@ -14,10 +16,10 @@ A personal PDF viewer for Windows, built with Tauri v2
 
 - Continuous-scroll page viewer with smooth zoom (presets, +/-, and
   Ctrl+scroll)
+- Native Windows printing at printer-native resolution
 - Text layer with copy-to-clipboard and full-document search
 - Thumbnail sidebar for quick page navigation
 - Document metadata viewing and editing
-- Native Windows printing at printer-native resolution
 - Multiple documents open in draggable, reorderable tabs
 - Display modes: normal, inverted, and sepia
 
@@ -41,6 +43,20 @@ A personal PDF viewer for Windows, built with Tauri v2
 - A win-x64 `pdfium.dll` (e.g. from the
   [pdfium-binaries](https://github.com/bblanchon/pdfium-binaries) releases),
   placed at `src-tauri/resources/pdfium.dll` (not checked into the repo)
+
+## Future
+
+Planned enhancements:
+
+- **Document Operations** — Merge, split, add, delete, reorder, rotate, and
+  crop pages. Uses pdfium (`FPDF_ImportPages`, `FPDFPage_Delete`,
+  `FPDFPage_SetRotation`) and lopdf (CropBox).
+- **Form Filling** — Enumerate form fields via pdfium's form API, render
+  interactive overlays, and save filled forms.
+- **Text Extraction** — Export plain text from all pages to a `.txt` file via
+  pdfium's text API.
+
+
 
 ### Setup
 
@@ -67,14 +83,3 @@ npm test           # frontend (Vitest)
 cargo test         # backend (from src-tauri/)
 ```
 
-## Future
-
-Planned enhancements:
-
-- **Document Operations** — Merge, split, add, delete, reorder, rotate, and
-  crop pages. Uses pdfium (`FPDF_ImportPages`, `FPDFPage_Delete`,
-  `FPDFPage_SetRotation`) and lopdf (CropBox).
-- **Form Filling** — Enumerate form fields via pdfium's form API, render
-  interactive overlays, and save filled forms.
-- **Text Extraction** — Export plain text from all pages to a `.txt` file via
-  pdfium's text API.

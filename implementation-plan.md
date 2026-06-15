@@ -582,102 +582,65 @@ Icon rail with toggle buttons, resizable sidebar with three panels (Thumbnails, 
 ## Phase 6: Printing
 
 ### Goal
-Native Windows printing via PrintDlgExW + pdfium GDI rendering. All DEVMODE settings honored.
+Native Windows printing via `PrintDlgExW` + pdfium GDI rendering. All DEVMODE settings honored. No print preview.
 
-### This is the most complex phase. Read section 2 (Hard-Won Lessons) carefully before starting.
+### Key Design Decisions
 
-### Steps
+- **No print preview.** Rendering pages at printer DPI into bitmaps for on-screen preview would be substantial work with little benefit — the viewer already shows the PDF content. The Windows print dialog provides all job configuration.
+- **Raw pdfium via `libloading`, not pdfium-render.** The pdfium-render crate's `bindings()` and `page_handle()` methods are `pub(crate)`, making `FPDF_RenderPage` inaccessible through the high-level API. The implementation loads pdfium.dll via `libloading` and calls the raw C functions (`FPDF_LoadDocument`, `FPDF_LoadPage`, `FPDF_RenderPage`, etc.) directly.
+- **Separate document instance on the STA thread.** Rather than trying to send pdfium-render handles across threads (they aren't `Send`), the STA print thread loads a fresh `FPDF_DOCUMENT` from the file path. This cleanly avoids all thread-safety concerns.
+- **`PD_HIDEPRINTTOFILE` flag.** The "Print to File" checkbox is hidden because GDI printing to an HDC cannot produce a file — the checkbox is non-functional and would confuse users.
 
-1. **Add windows crate features** (see section 3.4).
+### What Was Built
 
-2. **Implement `print_document` Tauri command:**
-   This command does everything — shows the dialog, renders to the printer, reports results.
+**Rust backend** (`src-tauri/src/commands/print.rs`):
 
-   ```rust
-   #[tauri::command]
-   async fn print_document(
-       window: tauri::WebviewWindow,
-       state: tauri::State<'_, DocManager>,
-       doc_id: String,
-   ) -> Result<PrintResult, String> {
-       let hwnd = window.hwnd()?.0 as isize;
-       let page_count = /* get from doc manager */;
-       
-       // Spawn STA thread for PrintDlgExW
-       let (tx, rx) = std::sync::mpsc::channel();
-       std::thread::spawn(move || {
-           // CoInitializeEx(COINIT_APARTMENTTHREADED)
-           // PrintDlgExW with hwndOwner
-           // Extract DEVNAMES, DEVMODE
-           // If not cancelled:
-           //   CreateDC with DEVMODE
-           //   StartDoc
-           //   For each page:
-           //     StartPage
-           //     FPDF_RenderPage(hdc, page, ...)
-           //     EndPage
-           //     // Emit progress event
-           //   EndDoc
-           //   DeleteDC
-           // Free DEVNAMES, DEVMODE
-           // CoUninitialize
-           tx.send(result).ok();
-       });
-       rx.recv().map_err(|e| format!("{e}"))?
-   }
-   ```
+1. **Tauri command `print_document`** — async entry point. Looks up the document's `file_path` from `AppState` via `state.get_document(&doc_id)`, resolves the pdfium.dll path, extracts the window HWND, then spawns an STA thread and waits on an `mpsc::channel` for the result. Returns `Result<PrintResult, String>` (the inner `AppError` is converted to `String` at the boundary).
 
-3. **Page scaling for printing:** The print HDC has its own resolution (e.g., 600 DPI). Get the printable area with `GetDeviceCaps(hdc, HORZRES)` / `VERTRES` (in device pixels) and `PHYSICALWIDTH` / `PHYSICALHEIGHT`. Scale the PDF page to fit the printable area while maintaining aspect ratio.
+2. **`print_on_sta_thread`** — initializes COM as STA (`CoInitializeEx(COINIT_APARTMENTTHREADED)`), delegates to `print_impl`, then calls `CoUninitialize`. The STA apartment is required because `PrintDlgExW` uses COM internally (it hosts property-sheet pages from printer drivers).
 
-4. **FPDF_RenderPage call:**
-   ```rust
-   // Access the raw binding through pdfium-render
-   pdfium.bindings().FPDF_RenderPage(
-       hdc.0 as *mut c_void,  // HDC as raw pointer
-       page_handle,            // FPDF_PAGE handle
-       start_x,               // left margin in device coords
-       start_y,               // top margin in device coords
-       size_x,                // width in device coords
-       size_y,                // height in device coords
-       0,                     // rotation (0 = normal)
-       FPDF_PRINTING,         // render flags for print quality
-   );
-   ```
+3. **`print_impl`** — the core implementation:
+   - Loads pdfium.dll via `libloading::Library::new` and binds eight raw C function pointers (`FPDF_LoadDocument`, `FPDF_GetPageCount`, `FPDF_LoadPage`, `FPDF_GetPageWidth`, `FPDF_GetPageHeight`, `FPDF_RenderPage`, `FPDF_ClosePage`, `FPDF_CloseDocument`).
+   - Opens the PDF with `FPDF_LoadDocument` (pdfium is already initialized globally by the main thread's pdfium-render binding).
+   - Configures `PRINTDLGEXW` with flags: `PD_ALLPAGES | PD_NOSELECTION | PD_NOCURRENTPAGE | PD_USEDEVMODECOPIESANDCOLLATE | PD_HIDEPRINTTOFILE`. Sets `nMinPage=1`, `nMaxPage=page_count`, `hwndOwner` to the Tauri window HWND.
+   - Calls `PrintDlgExW`. If `dwResultAction != PD_RESULT_PRINT`, returns early with `{ printed: false }`.
+   - Extracts the printer name from `DEVNAMES` (via `GlobalLock`, reading the wide string at `wDeviceOffset`).
+   - Extracts `DEVMODE` via `GlobalLock` and passes it to `CreateDCW` to create the printer device context.
+   - Queries printable area with `GetDeviceCaps(HORZRES)` / `GetDeviceCaps(VERTRES)`.
+   - Calls `StartDocW` with document name "Tumbler PDF Print".
+   - For each page in the range (all pages, or the user-selected `PRINTPAGERANGE`):
+     - Emits a `print-progress` Tauri event with `{ page, total }`.
+     - Calls `StartPage`, loads the pdfium page, computes scale-to-fit (preserving aspect ratio) with centering offsets, calls `FPDF_RenderPage` with `FPDF_PRINTING | FPDF_ANNOT` flags, closes the page, calls `EndPage`.
+   - Calls `EndDoc`.
+   - RAII guards handle cleanup (see below).
 
-   The `FPDF_PRINTING` flag tells pdfium to optimize for print (e.g., no screen-oriented anti-aliasing).
+4. **RAII guards** — three guard types defined inside `print_impl` ensure resource cleanup on all exit paths:
+   - `DocumentGuard` — calls `FPDF_CloseDocument` on drop.
+   - `GlobalHandleGuard` — calls `GlobalFree` on `hDevMode` and `hDevNames`.
+   - `DcGuard` — calls `DeleteDC` on the printer HDC.
 
-5. **Progress events:** From the print loop, emit Tauri events:
-   ```rust
-   window.emit("print-progress", PrintProgress { page: i, total: page_count })?;
-   ```
-   The frontend listens and shows "Printing page 3 of 12..."
+5. **Windows crate features** added to `Cargo.toml`:
+   - `Win32_Foundation`, `Win32_Graphics_Gdi`, `Win32_Storage_Xps` (for `StartDocW`/`EndDoc` — these are in Xps, not Gdi), `Win32_System_Com`, `Win32_System_Memory`, `Win32_UI_Controls_Dialogs`.
+   - `libloading = "0.7"` added as a direct dependency.
 
-6. **Cancellation:** The frontend sends a cancel signal (e.g., sets an `AtomicBool` in shared state). The print loop checks this before each page and calls `AbortDoc(hdc)` if cancelled.
+**Frontend**:
 
-7. **Frontend:** Print button in toolbar + Ctrl+P shortcut. Calls `invoke("print_document", { docId })`. Listens for progress events. Shows cancel UI.
+6. **Toolbar print button** — Printer icon from lucide-react, visible when a tab is active. Calls `onPrint` prop.
 
-### Thread safety note for pdfium
+7. **Ctrl+P shortcut** — `useEffect` listener in App.tsx, calls `printRef.current()`.
 
-The print loop needs access to the pdfium document to call `FPDF_RenderPage`. If the document is behind a `Mutex` in the doc manager, the STA thread must acquire the lock. This means rendering is blocked during printing — acceptable for now, since the user isn't interacting with the viewer during a print job.
+8. **Print progress overlay** — modal overlay in App.tsx showing "Printing page N of M..." during the print job. Uses `useState` for `printProgress`, updated by a `listen("print-progress")` event listener. The overlay disappears when the `invoke` promise resolves (in the `finally` block).
 
-If pdfium objects are not `Send`, you may need to load a separate copy of the PDF on the STA print thread:
-```rust
-// On the STA thread:
-let pdfium = Pdfium::bind_to_library(pdfium_path)?;
-let doc = pdfium.load_pdf_from_file(&pdf_path, None)?;
-// Render pages from this independent document instance
-```
-
-This avoids threading issues entirely at the cost of loading the PDF twice.
+9. **No cancellation UI.** The progress overlay is display-only. `AbortDoc` is called only if `StartPage` or `EndPage` returns an error mid-job.
 
 ### Verification
-- Ctrl+P opens the Windows Print Dialog.
+- Ctrl+P opens the Windows Print Dialog. "Print to File" checkbox is hidden.
 - Select a printer, set page range, copies, duplex, orientation.
 - Click Print. Pages print at full printer DPI. Text is vector-sharp.
-- All DEVMODE settings are honored (test duplex if you have a duplex printer).
-- Cancel mid-print works.
+- All DEVMODE settings are honored (test duplex if available).
 - Print a 1-page, 10-page, and 50-page PDF.
-- Verify that printing works when Tumbler IS the default PDF application (no external app dependency).
+- Cancel the dialog returns without error.
+- Printing works when Tumbler is the default PDF application (no external app dependency).
 
 ---
 

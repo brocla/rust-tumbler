@@ -10,6 +10,7 @@ import { ViewerArea } from "./components/ViewerArea";
 import { usePdfStore } from "./store/usePdfStore";
 import type { PageDimension } from "./store/usePdfStore";
 import { contrastTextColor } from "./utils/color";
+import { reconstructCopyText, type CopyToken } from "./utils/textSelection";
 
 interface DocInfo {
   docId: string;
@@ -169,16 +170,10 @@ function App() {
   // plain-text serialization concatenates lines without inserting "\n" or
   // preserving gaps between separate runs on the same line (e.g. a list
   // number and its item text). Each span carries data-line/data-x/
-  // data-right/data-font-size (set by TextLayer); insert "\n" when the
-  // line changes, and a tab between same-line items separated by a real
-  // gap (e.g. a list number and its item text). The Rust extractor only
-  // splits same-line runs at gaps >= 0.5 * fontSize, so any gap above this
-  // threshold is a deliberate spatial gap, not adjacent run fragments —
-  // use one threshold/character so gaps of varying width (e.g. "1." vs
-  // "10.") still align to the same tab stop.
+  // data-right/data-font-size (set by TextLayer); walk the selection into a
+  // flat list of tokens and let reconstructCopyText (utils/textSelection)
+  // decide where "\n" and "\t" belong.
   useEffect(() => {
-    const GAP_THRESHOLD = 0.2;
-
     const handleCopy = (e: ClipboardEvent) => {
       const selection = window.getSelection();
       if (!selection || selection.isCollapsed || selection.rangeCount === 0) return;
@@ -186,34 +181,24 @@ function App() {
       const fragment = selection.getRangeAt(0).cloneContents();
       if (!fragment.querySelector("[data-line]")) return;
 
-      let result = "";
-      let lastLine: string | null = null;
-      let prevRight: number | null = null;
+      const tokens: CopyToken[] = [];
 
       const walk = (node: Node) => {
         if (node.nodeType === Node.TEXT_NODE) {
-          result += node.textContent ?? "";
+          tokens.push({ text: node.textContent ?? "", line: null, x: 0, right: 0, fontSize: 0 });
           return;
         }
         if (node.nodeType === Node.ELEMENT_NODE) {
           const el = node as Element;
           const line = el.getAttribute("data-line");
           if (line !== null) {
-            const x = parseFloat(el.getAttribute("data-x") ?? "0");
-            const right = parseFloat(el.getAttribute("data-right") ?? "0");
-            const fontSize = parseFloat(el.getAttribute("data-font-size") ?? "0");
-
-            if (lastLine !== null && line !== lastLine) {
-              result += "\n";
-            } else if (lastLine !== null && prevRight !== null && fontSize > 0) {
-              const gap = x - prevRight;
-              if (gap > fontSize * GAP_THRESHOLD) {
-                result += "\t";
-              }
-            }
-
-            lastLine = line;
-            prevRight = right;
+            tokens.push({
+              text: "",
+              line,
+              x: parseFloat(el.getAttribute("data-x") ?? "0"),
+              right: parseFloat(el.getAttribute("data-right") ?? "0"),
+              fontSize: parseFloat(el.getAttribute("data-font-size") ?? "0"),
+            });
           }
           el.childNodes.forEach(walk);
         }
@@ -221,7 +206,7 @@ function App() {
       fragment.childNodes.forEach(walk);
 
       e.preventDefault();
-      e.clipboardData?.setData("text/plain", result);
+      e.clipboardData?.setData("text/plain", reconstructCopyText(tokens));
     };
 
     document.addEventListener("copy", handleCopy);

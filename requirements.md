@@ -221,42 +221,51 @@ Display mode is per-tab state.
 
 ### 5.1 Objectives
 
-1. **Print quality:** Output must be rendered at the printer's native resolution. Text must be vector-sharp. Images must be reproduced at their embedded resolution. No intermediate rasterization at screen DPI.
-2. **Self-sufficient:** Printing must not depend on any external PDF application. It uses only pdfium, Windows GDI, and the printer driver.
-3. **Standard UX:** Use the Windows common print dialog (`PrintDlgExW`) for printer selection and job configuration.
+1. **Print quality:** Output is rendered at the printer's native resolution via `FPDF_RenderPage` to a GDI device context. Text is vector-sharp. Images are reproduced at their embedded resolution. No intermediate rasterization at screen DPI.
+2. **Self-sufficient:** Printing uses only pdfium's raw C API (loaded via `libloading`), the Windows GDI, and the printer driver. No external PDF application is involved.
+3. **Standard UX:** The Windows common print dialog (`PrintDlgExW`) handles printer selection and job configuration. The "Print to File" checkbox is hidden (`PD_HIDEPRINTTOFILE`) because it is non-functional with GDI rendering.
+4. **No print preview.** Print preview was considered and rejected. It would require rendering pages at printer DPI into bitmaps for on-screen display — a substantial implementation effort with little benefit given that the viewer already shows the PDF content. Users configure the print job entirely through `PrintDlgExW`.
 
 ### 5.2 Print Architecture
+
+The pdfium-render crate's `bindings()` and `page_handle()` methods are `pub(crate)`, making `FPDF_RenderPage` inaccessible through the high-level API. The solution loads pdfium.dll via the `libloading` crate and calls the raw C functions directly. This also solves thread safety: the STA print thread works with its own document handle, independent of the main pdfium-render instance.
 
 ```
 Frontend                          Rust Backend
 --------                          ------------
 Ctrl+P or Print button
   |
-  invoke("print", {})  -------->  1. Load PDF bytes into pdfium (FPDF_DOCUMENT)
-                                  2. Spawn STA thread (COM requirement for PrintDlgExW)
-                                  3. Show PrintDlgExW with HWND from Tauri window
-                                  4. User configures: printer, copies, page range,
-                                     duplex, orientation, paper size
-                                  5. Extract DEVNAMES (printer name) and DEVMODE
-                                     (all job settings) from dialog result
-                                  6. CreateDC(printer_name, DEVMODE) -> HDC
-                                  7. StartDoc / StartPage
-                                  8. For each page in range:
-                                       FPDF_RenderPage(HDC, page, ...)
-                                       EndPage
-                                  9. EndDoc / DeleteDC
-                                  10. Return result to frontend
-  <-------- Ok / Error
-  Show success or error
+  invoke("print_document",     1. Look up file_path from AppState for the doc_id
+         { docId })  -------->  2. Resolve pdfium.dll path
+                                3. Spawn STA thread (COM requirement for PrintDlgExW):
+                                     CoInitializeEx(COINIT_APARTMENTTHREADED)
+                                4. Load pdfium.dll via libloading, bind raw C functions
+                                5. FPDF_LoadDocument (separate instance from viewer)
+                                6. Show PrintDlgExW (PD_HIDEPRINTTOFILE flag set)
+                                7. Extract DEVNAMES → printer name, DEVMODE → job settings
+                                8. CreateDCW(printer_name, DEVMODE) → HDC
+                                9. StartDocW / for each page:
+                                     StartPage
+                                     Scale page to fit printable area (aspect-ratio preserved, centered)
+                                     FPDF_RenderPage(HDC, page, ..., FPDF_PRINTING | FPDF_ANNOT)
+                                     EndPage
+                                     emit("print-progress", { page, total })
+                                10. EndDoc
+                                11. RAII guards clean up: DC, DEVMODE/DEVNAMES globals, pdfium document
+                                12. CoUninitialize
+  <-------- PrintResult         13. Return { printed: true, pages_printed: N }
+  Hide progress overlay
 ```
 
 ### 5.3 Print Dialog Settings
 
-The following settings from `PrintDlgExW` must be read and honored via the `DEVMODE` structure:
+`PrintDlgExW` is configured with flags: `PD_ALLPAGES | PD_NOSELECTION | PD_NOCURRENTPAGE | PD_USEDEVMODECOPIESANDCOLLATE | PD_HIDEPRINTTOFILE`.
+
+The following settings are read from the dialog result and honored via the `DEVMODE` structure passed to `CreateDCW`:
 
 | Setting | Source | Applied via |
 |---|---|---|
-| Printer | DEVNAMES.wDeviceOffset | `CreateDC` printer name parameter |
+| Printer | DEVNAMES.wDeviceOffset | `CreateDCW` printer name parameter |
 | Copies | DEVMODE.dmCopies | Passed to printer driver via DEVMODE |
 | Page range | PRINTPAGERANGE | Controls which pages are rendered in the loop |
 | Duplex | DEVMODE.dmDuplex | Passed to printer driver via DEVMODE |
@@ -266,20 +275,27 @@ The following settings from `PrintDlgExW` must be read and honored via the `DEVM
 
 ### 5.4 Print Rendering
 
-- `FPDF_RenderPage` renders directly to the printer's GDI device context (HDC). GDI drawing commands (text, vector paths, fills) are sent to the printer driver, which converts them to the printer's native language (PCL, PostScript, XPS) at full device resolution.
+- `FPDF_RenderPage` renders directly to the printer's GDI device context (HDC) with `FPDF_PRINTING | FPDF_ANNOT` flags. GDI drawing commands are sent to the printer driver, which converts them to the printer's native language at full device resolution.
+- The page is scaled to fit the printable area (`GetDeviceCaps` `HORZRES`/`VERTRES`) while preserving aspect ratio. The rendered page is centered within the printable area.
 - No bitmaps are created on the application side for vector content. Images embedded in the PDF are rendered at their native resolution or the printer's DPI, whichever is lower.
-- The page is scaled to fit the printable area of the selected paper size, respecting orientation.
 
-### 5.5 Print Progress and Cancellation
+### 5.5 Print Progress
 
-- During printing, the frontend shows progress: "Printing page N of M..."
-- A cancel button aborts the print loop. `AbortDoc` is called on the HDC to cancel the spooled job.
-- Progress updates are delivered via Tauri events emitted from the Rust print loop.
+- The Rust print loop emits `print-progress` Tauri events with `{ page, total }` after each page.
+- The frontend shows a modal overlay: "Printing page N of M..." which disappears when the command completes.
+- Cancellation is not implemented. The print job runs to completion once started. `AbortDoc` is called only if `StartPage` or `EndPage` fails mid-job.
 
-### 5.6 Error Handling
+### 5.6 Resource Management
 
-- Errors from `PrintDlgExW`, `CreateDC`, `StartDoc`, `FPDF_RenderPage`, or `EndDoc` are reported to the user in a dialog with **selectable, copy-pasteable text**.
-- If the print dialog is cancelled, no action is taken.
+RAII guard types ensure cleanup on all exit paths (success, error, or early return):
+- **`DocumentGuard`** — calls `FPDF_CloseDocument` on the separately-loaded pdfium document.
+- **`GlobalHandleGuard`** — calls `GlobalFree` on `hDevMode` and `hDevNames` handles allocated by `PrintDlgExW`.
+- **`DcGuard`** — calls `DeleteDC` on the printer device context.
+
+### 5.7 Error Handling
+
+- Errors from `PrintDlgExW`, `CreateDCW`, `StartDocW`, or pdfium loading are returned as `AppError` variants, converted to `String` at the Tauri command boundary, and shown to the user via a Tauri message dialog.
+- If the user cancels the print dialog (`dwResultAction != PD_RESULT_PRINT`), the command returns `PrintResult { printed: false, pages_printed: 0 }` — no error is raised.
 
 ---
 

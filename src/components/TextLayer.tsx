@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { groupIntoLines } from "../utils/textSelection";
 
 interface TextItem {
   text: string;
@@ -69,23 +70,13 @@ export function TextLayer({
   // in a larger font than its item text — so group by vertical overlap with
   // the previous item rather than a fixed y tolerance.
   const spans = useMemo(() => {
-    let lineIndex = 0;
-    let prevTop: number | null = null;
-    let prevBottom: number | null = null;
-    return textItems.map((item) => {
-      const itemBottom = item.y + item.height;
-      if (prevTop !== null && prevBottom !== null) {
-        const overlaps = item.y < prevBottom && itemBottom > prevTop;
-        if (!overlaps) lineIndex++;
-      }
-      prevTop = item.y;
-      prevBottom = itemBottom;
-
+    const lineIndices = groupIntoLines(textItems);
+    return textItems.map((item, i) => {
       const fontSizePx = item.fontSize * scale;
       const targetWidth = item.width * scale;
       const measuredWidth = measureTextWidth(item.text, fontSizePx);
       const scaleX = measuredWidth > 0 ? targetWidth / measuredWidth : 1;
-      return { item, fontSizePx, targetWidth, scaleX, lineIndex };
+      return { item, fontSizePx, targetWidth, scaleX, lineIndex: lineIndices[i] };
     });
   }, [textItems, scale]);
 

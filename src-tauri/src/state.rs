@@ -189,4 +189,55 @@ mod tests {
 
         std::fs::remove_file(&other_path).ok();
     }
+
+    /// The whole point of `documents: Mutex<HashMap<String, Arc<Mutex<DocEntry>>>>`
+    /// (rather than e.g. `Mutex<HashMap<String, DocEntry>>`) is that a
+    /// long-running operation on one document's `Mutex<DocEntry>` must not
+    /// block other tabs from getting/locking *their* documents. Hold doc-a's
+    /// lock on a background thread and confirm doc-b remains immediately
+    /// accessible on the main thread.
+    #[test]
+    fn locking_one_document_does_not_block_access_to_another() {
+        let src = crate::fixture_path();
+        let pdfium = crate::test_pdfium();
+        let state = AppState::new(pdfium, None);
+        let file_path = src.to_string_lossy().into_owned();
+
+        for doc_id in ["doc-a", "doc-b"] {
+            let document = pdfium
+                .load_pdf_from_file(&file_path, None)
+                .expect("load pdf");
+            state
+                .insert_document(
+                    doc_id.to_string(),
+                    DocEntry {
+                        document,
+                        file_path: file_path.clone(),
+                    },
+                )
+                .expect("insert");
+        }
+
+        let entry_a = state.get_document("doc-a").expect("get doc-a");
+        let entry_b = state.get_document("doc-b").expect("get doc-b");
+
+        // Hold doc-a's lock on another thread until the main thread says so.
+        let (held_tx, held_rx) = std::sync::mpsc::channel::<()>();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let holder = std::thread::spawn(move || {
+            let _guard = lock_mutex(&entry_a).expect("lock doc-a");
+            held_tx.send(()).expect("signal held");
+            release_rx.recv().expect("wait for release");
+        });
+
+        held_rx.recv().expect("holder thread should acquire doc-a's lock");
+
+        // doc-b must still be retrievable and lockable while doc-a is held.
+        assert!(state.get_document("doc-b").is_ok());
+        let guard_b = lock_mutex(&entry_b).expect("doc-b should not be blocked by doc-a's lock");
+        drop(guard_b);
+
+        release_tx.send(()).expect("signal release");
+        holder.join().expect("holder thread");
+    }
 }

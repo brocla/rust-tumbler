@@ -62,3 +62,41 @@ fn open_document_impl(state: &AppState, path: String) -> Result<DocInfo, AppErro
 pub fn close_document(state: State<'_, AppState>, doc_id: String) -> Result<(), String> {
     state.remove_document(&doc_id).map_err(String::from)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `sample.pdf` is a single 200x200 page (see `commands::text` tests for
+    /// its text content). Opening it should report that size and register
+    /// the document in `state` under the returned `doc_id`.
+    #[test]
+    fn open_document_loads_fixture_with_page_dimensions() {
+        let pdfium = crate::test_pdfium();
+        let state = AppState::new(pdfium, None);
+        let src = crate::fixture_path();
+
+        let info = open_document_impl(&state, src.to_string_lossy().into_owned()).expect("open");
+
+        assert_eq!(info.page_count, 1);
+        assert_eq!(info.page_dimensions.len(), 1);
+        assert_eq!(info.page_dimensions[0].width, 200.0);
+        assert_eq!(info.page_dimensions[0].height, 200.0);
+        assert!(!info.doc_id.is_empty());
+
+        assert!(state.get_document(&info.doc_id).is_ok());
+    }
+
+    #[test]
+    fn open_document_for_missing_file_is_error() {
+        let pdfium = crate::test_pdfium();
+        let state = AppState::new(pdfium, None);
+
+        let missing = std::env::temp_dir().join("tumbler_does_not_exist.pdf");
+        match open_document_impl(&state, missing.to_string_lossy().into_owned()) {
+            Err(AppError::Pdfium { .. }) => {}
+            Err(other) => panic!("expected AppError::Pdfium, got {other:?}"),
+            Ok(_) => panic!("expected an error for a missing file"),
+        }
+    }
+}

@@ -39,3 +39,72 @@ fn render_page_impl(
 
     Ok(tauri::ipc::Response::new(rgba_bytes))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::DocEntry;
+    use tauri::ipc::{InvokeResponseBody, IpcResponse};
+
+    fn open_fixture(state: &AppState, doc_id: &str) {
+        let pdfium = crate::test_pdfium();
+        let src = crate::fixture_path();
+        let document = pdfium
+            .load_pdf_from_file(src.to_str().unwrap(), None)
+            .expect("load pdf");
+        state
+            .insert_document(
+                doc_id.to_string(),
+                DocEntry {
+                    document,
+                    file_path: src.to_string_lossy().into_owned(),
+                },
+            )
+            .expect("insert");
+    }
+
+    fn raw_body_len(response: tauri::ipc::Response) -> usize {
+        match response.body().expect("body") {
+            InvokeResponseBody::Raw(bytes) => bytes.len(),
+            other => panic!("expected raw bytes, got {other:?}"),
+        }
+    }
+
+    /// `sample.pdf` is a single 200x200 page (see `commands::text` tests).
+    /// Rendering it at a target width of 200 should produce an RGBA buffer
+    /// sized `width * height * 4` for the resulting (square) bitmap.
+    #[test]
+    fn render_page_produces_rgba_buffer_of_expected_size() {
+        let pdfium = crate::test_pdfium();
+        let state = AppState::new(pdfium, None);
+        open_fixture(&state, "doc1");
+
+        let response = render_page_impl(&state, "doc1".to_string(), 1, 200).expect("render");
+        assert_eq!(raw_body_len(response), 200 * 200 * 4);
+    }
+
+    /// Rendering at a smaller target width should scale the output buffer
+    /// proportionally (the fixture page is square, so width == height).
+    #[test]
+    fn render_page_scales_buffer_with_target_width() {
+        let pdfium = crate::test_pdfium();
+        let state = AppState::new(pdfium, None);
+        open_fixture(&state, "doc1");
+
+        let response = render_page_impl(&state, "doc1".to_string(), 1, 100).expect("render");
+        assert_eq!(raw_body_len(response), 100 * 100 * 4);
+    }
+
+    #[test]
+    fn render_page_for_missing_page_is_error() {
+        let pdfium = crate::test_pdfium();
+        let state = AppState::new(pdfium, None);
+        open_fixture(&state, "doc1");
+
+        match render_page_impl(&state, "doc1".to_string(), 99, 200) {
+            Err(AppError::Pdfium { .. }) => {}
+            Err(other) => panic!("expected AppError::Pdfium, got {other:?}"),
+            Ok(_) => panic!("expected an error for an out-of-range page"),
+        }
+    }
+}
