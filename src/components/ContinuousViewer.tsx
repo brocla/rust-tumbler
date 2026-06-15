@@ -12,8 +12,12 @@ export function ContinuousViewer() {
   const updateTab = usePdfStore((s) => s.updateTab);
   const containerRef = useRef<HTMLDivElement>(null);
   const pageRefsMap = useRef<Map<number, HTMLDivElement>>(new Map());
-  const isJumping = useRef(false);
   const suppressObserver = useRef(false);
+  // Set by the IntersectionObserver when it updates currentPage from scroll
+  // position, so the jump-to-page effect below can tell "the user scrolled
+  // here" apart from "the user asked to go to this page" (toolbar, search,
+  // thumbnails, PageUp/Down) and only scrollIntoView for the latter.
+  const lastObserverPage = useRef<number | null>(null);
 
   const docId = activeTab?.docId ?? "";
   const pageCount = activeTab?.pageCount ?? 0;
@@ -68,6 +72,7 @@ export function ContinuousViewer() {
         }
 
         if (bestRatio > 0 && bestPage !== currentPage && tabId) {
+          lastObserverPage.current = bestPage;
           updateTab(tabId, { currentPage: bestPage });
         }
       },
@@ -84,9 +89,17 @@ export function ContinuousViewer() {
     return () => observer.disconnect();
   }, [pageCount, currentPage, tabId, updateTab, zoom]);
 
-  // Jump to page when currentPage changes via toolbar/keyboard
+  // Jump to page when currentPage changes via toolbar/keyboard/search/thumbnails.
+  // Skip changes that came from the scroll-driven IntersectionObserver above —
+  // those reflect where the user already is, and re-centering them with
+  // scrollIntoView would fight the user's scroll gesture.
   useEffect(() => {
-    if (!containerRef.current || isJumping.current) return;
+    if (lastObserverPage.current === currentPage) {
+      lastObserverPage.current = null;
+      return;
+    }
+
+    if (!containerRef.current) return;
 
     const slot = pageRefsMap.current.get(currentPage);
     if (!slot) return;
