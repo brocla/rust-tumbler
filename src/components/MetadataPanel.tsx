@@ -50,6 +50,7 @@ export function MetadataPanel() {
 
     let cancelled = false;
     const docId = activeTab.docId;
+    const tabId = activeTab.id;
 
     const load = async () => {
       try {
@@ -69,10 +70,13 @@ export function MetadataPanel() {
     load();
 
     // Another tab may have edited metadata for this same underlying file.
+    // Skip the refresh if this tab has unsaved edits of its own — otherwise
+    // we'd silently overwrite them with the reloaded values.
     const unlisten = listen<string[]>("document-metadata-changed", (event) => {
-      if (event.payload.includes(docId)) {
-        load();
-      }
+      if (!event.payload.includes(docId)) return;
+      const tab = usePdfStore.getState().tabs.find((t) => t.id === tabId);
+      if (tab?.metadataDirty) return;
+      load();
     });
 
     return () => {
