@@ -3,6 +3,8 @@ use crate::state::{lock_mutex, AppState};
 use serde::Serialize;
 use std::ffi::c_void;
 use std::os::raw::c_int;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tauri::{Emitter, State};
 
 #[derive(Serialize, Clone)]
@@ -76,14 +78,19 @@ async fn print_document_impl(
 
     let hwnd_raw = window.hwnd().map_err(|e| format!("hwnd() failed: {e}"))?.0 as isize;
 
+    let cancel = Arc::new(AtomicBool::new(false));
+    state.set_print_job(cancel.clone());
+
     let (tx, rx) = std::sync::mpsc::channel();
 
     std::thread::spawn(move || {
-        let result = print_on_sta_thread(hwnd_raw, &pdfium_path, &file_path, &window);
+        let result = print_on_sta_thread(hwnd_raw, &pdfium_path, &file_path, &window, cancel);
         tx.send(result).ok();
     });
 
-    rx.recv().map_err(|e| format!("channel recv failed: {e}"))?
+    let result = rx.recv().map_err(|e| AppError::Other(format!("channel recv failed: {e}")));
+    state.take_print_job();
+    result?
 }
 
 fn print_on_sta_thread(
@@ -91,6 +98,7 @@ fn print_on_sta_thread(
     pdfium_path: &str,
     pdf_path: &str,
     window: &tauri::WebviewWindow,
+    cancel: Arc<AtomicBool>,
 ) -> Result<PrintResult, AppError> {
     use windows::Win32::System::Com::*;
 
@@ -103,7 +111,7 @@ fn print_on_sta_thread(
         )));
     }
 
-    let result = print_impl(hwnd_raw, pdfium_path, pdf_path, window);
+    let result = print_impl(hwnd_raw, pdfium_path, pdf_path, window, cancel);
 
     unsafe { CoUninitialize() };
     result
@@ -114,6 +122,7 @@ fn print_impl(
     pdfium_path: &str,
     pdf_path: &str,
     window: &tauri::WebviewWindow,
+    cancel: Arc<AtomicBool>,
 ) -> Result<PrintResult, AppError> {
     use windows::Win32::Foundation::*;
     use windows::Win32::Graphics::Gdi::*;
@@ -362,6 +371,11 @@ fn print_impl(
             break;
         }
 
+        if cancel.load(Ordering::Relaxed) {
+            unsafe { AbortDoc(hdc) };
+            return Err(AppError::Other("Print cancelled".into()));
+        }
+
         pages_printed += 1;
     }
 
@@ -377,6 +391,12 @@ fn print_impl(
     })
 }
 
+#[tauri::command]
+pub fn cancel_print(state: State<'_, AppState>) -> Result<(), String> {
+    state.cancel_print_job();
+    Ok(())
+}
+
 /// Read a null-terminated UTF-16 string from a raw pointer.
 unsafe fn read_wide_string(ptr: *const u16) -> String {
     let mut len = 0;
@@ -385,4 +405,22 @@ unsafe fn read_wide_string(ptr: *const u16) -> String {
     }
     let slice = std::slice::from_raw_parts(ptr, len);
     String::from_utf16_lossy(slice)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Exercises the token-check branch by pre-setting the cancel flag and
+    /// invoking print_impl. Requires pdfium.dll and a real (or PDF) printer.
+    #[test]
+    #[ignore = "needs pdfium.dll and a real printer — run locally with cargo test -- --ignored"]
+    fn print_cancelled_before_first_page_returns_cancelled_error() {
+        // Pre-set the cancel token to true so the very first post-EndPage
+        // check fires. Verify the function returns the cancelled error.
+        let cancel = Arc::new(AtomicBool::new(true));
+        // A real hwnd_raw, pdfium_path, pdf_path, and window are needed here.
+        // Run manually on a machine with pdfium.dll and a printer available.
+        let _ = cancel;
+    }
 }

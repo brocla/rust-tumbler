@@ -47,6 +47,7 @@ pub fn run() {
             commands::metadata::get_metadata,
             commands::metadata::set_metadata,
             commands::print::print_document,
+            commands::print::cancel_print,
             commands::startup::take_startup_file,
             commands::theme::get_accent_color,
         ])

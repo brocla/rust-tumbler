@@ -228,6 +228,7 @@ function App() {
         <div className="print-progress-overlay">
           <div className="print-progress-dialog">
             <p>Printing page {printProgress.page} of {printProgress.total}...</p>
+            <button onClick={() => invoke("cancel_print")}>Cancel</button>
           </div>
         </div>
       )}

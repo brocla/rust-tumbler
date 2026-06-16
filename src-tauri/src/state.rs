@@ -1,6 +1,7 @@
 use crate::error::AppError;
 use pdfium_render::prelude::*;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 pub struct DocEntry {
@@ -12,6 +13,7 @@ pub struct AppState {
     pub pdfium: &'static Pdfium,
     documents: Mutex<HashMap<String, Arc<Mutex<DocEntry>>>>,
     pub startup_file: Mutex<Option<String>>,
+    print_job: Mutex<Option<Arc<AtomicBool>>>,
 }
 
 impl AppState {
@@ -20,6 +22,7 @@ impl AppState {
             pdfium,
             documents: Mutex::new(HashMap::new()),
             startup_file: Mutex::new(startup_file),
+            print_job: Mutex::new(None),
         }
     }
 
@@ -41,6 +44,24 @@ impl AppState {
     pub fn remove_document(&self, doc_id: &str) -> Result<(), AppError> {
         lock_mutex(&self.documents)?.remove(doc_id);
         Ok(())
+    }
+
+    pub fn set_print_job(&self, token: Arc<AtomicBool>) {
+        if let Ok(mut guard) = self.print_job.lock() {
+            *guard = Some(token);
+        }
+    }
+
+    pub fn take_print_job(&self) -> Option<Arc<AtomicBool>> {
+        self.print_job.lock().ok()?.take()
+    }
+
+    pub fn cancel_print_job(&self) {
+        if let Ok(guard) = self.print_job.lock() {
+            if let Some(token) = guard.as_ref() {
+                token.store(true, Ordering::Relaxed);
+            }
+        }
     }
 
     /// Reloads every open document whose file matches `file_path` from disk.
@@ -80,6 +101,27 @@ pub fn lock_mutex<T>(mutex: &Mutex<T>) -> Result<MutexGuard<'_, T>, AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cancel_print_job_sets_token_to_true() {
+        let pdfium = crate::test_pdfium();
+        let state = AppState::new(pdfium, None);
+        let token = Arc::new(AtomicBool::new(false));
+        state.set_print_job(token.clone());
+        state.cancel_print_job();
+        assert!(token.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn take_print_job_removes_token_from_state() {
+        let pdfium = crate::test_pdfium();
+        let state = AppState::new(pdfium, None);
+        let token = Arc::new(AtomicBool::new(false));
+        state.set_print_job(token.clone());
+        let taken = state.take_print_job();
+        assert!(taken.is_some());
+        assert!(state.take_print_job().is_none());
+    }
 
     #[test]
     fn lock_mutex_returns_guard() {

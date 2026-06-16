@@ -758,3 +758,20 @@ body {
 .print-progress-dialog p {
   margin: 0;
 }
+
+.print-progress-dialog button {
+  display: block;
+  margin-top: 16px;
+  padding: 5px 20px;
+  width: 100%;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--color-text);
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+}
+
+.print-progress-dialog button:hover {
+  background: var(--color-hover, rgba(128, 128, 128, 0.15));
+}
