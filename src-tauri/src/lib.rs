@@ -46,6 +46,11 @@ pub fn run() {
             commands::text::export_text,
             commands::metadata::get_metadata,
             commands::metadata::set_metadata,
+            commands::pages::delete_pages,
+            commands::pages::rotate_pages,
+            commands::pages::reorder_pages,
+            commands::pages::merge_document,
+            commands::pages::split_document,
             commands::print::print_document,
             commands::print::cancel_print,
             commands::startup::take_startup_file,
@@ -113,6 +118,21 @@ pub fn resolve_pdfium_path() -> String {
 
     // Fallback
     "pdfium.dll".to_string()
+}
+
+/// A process-wide mutex that serializes tests which create or mutate pdfium
+/// documents. pdfium-render's `thread_safe` feature serializes individual
+/// API calls, but multi-step operations (create + copy-pages + save + reload)
+/// can interleave between threads in ways that trigger pdfium internal races.
+/// Tests that do more than a single read should hold this guard for their
+/// duration.
+#[cfg(test)]
+pub(crate) fn test_pdfium_guard() -> std::sync::MutexGuard<'static, ()> {
+    use std::sync::{Mutex, OnceLock};
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
 }
 
 /// Returns a process-wide `Pdfium` instance for use in tests.

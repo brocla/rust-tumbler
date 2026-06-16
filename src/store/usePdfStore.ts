@@ -24,6 +24,7 @@ export interface TabState {
   searchResultIndex: number;
   metadataDirty: boolean;
   loading: boolean;
+  pagesVersion: number;
 }
 
 export interface SearchResult {
@@ -37,7 +38,7 @@ interface PdfStore {
   activeTabId: string | null;
 
   // Global state
-  activeSidebarTool: "thumbnails" | "search" | "metadata" | null;
+  activeSidebarTool: "thumbnails" | "search" | "metadata" | "pages" | null;
   sidebarWidth: number;
 
   // Actions

@@ -17,7 +17,7 @@ export function ThumbnailPanel() {
     <div className="thumbnail-panel">
       {activeTab.pageDimensions.map((dim, i) => (
         <Thumbnail
-          key={`${activeTab.docId}-${i + 1}`}
+          key={`${activeTab.docId}-v${activeTab.pagesVersion}-${i + 1}`}
           docId={activeTab.docId}
           pageNumber={i + 1}
           pageWidth={dim.width}

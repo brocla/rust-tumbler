@@ -1,4 +1,4 @@
-import { Layers, Search, Info } from "lucide-react";
+import { Layers, Search, Info, PocketKnife } from "lucide-react";
 import { usePdfStore } from "../store/usePdfStore";
 
 export function IconRail() {
@@ -32,6 +32,13 @@ export function IconRail() {
         title="Metadata"
       >
         <Info size={20} />
+      </button>
+      <button
+        className={`rail-button ${activeTool === "pages" ? "active" : ""}`}
+        onClick={() => setSidebarTool("pages")}
+        title="Page Operations"
+      >
+        <PocketKnife size={20} />
       </button>
     </div>
   );

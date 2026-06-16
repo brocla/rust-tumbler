@@ -328,6 +328,7 @@ mod tests {
     /// (PDF bottom-left origin -> top-left origin used by the UI).
     #[test]
     fn extract_page_text_returns_single_run_with_position() {
+        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
         let state = AppState::new(pdfium, None);
         open_fixture(&state, "doc1");

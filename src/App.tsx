@@ -25,6 +25,7 @@ interface AccentColors {
 
 function App() {
   const addTab = usePdfStore((s) => s.addTab);
+  const updateTab = usePdfStore((s) => s.updateTab);
   const openFileRef = useRef<() => Promise<void>>();
   const printRef = useRef<() => Promise<void>>();
   const [printProgress, setPrintProgress] = useState<{ page: number; total: number } | null>(null);
@@ -51,6 +52,7 @@ function App() {
         searchResultIndex: -1,
         metadataDirty: false,
         loading: false,
+        pagesVersion: 0,
       });
     } catch (err) {
       await message(String(err), { title: "Failed to Open PDF", kind: "error" });
@@ -139,6 +141,30 @@ function App() {
     window.addEventListener("keydown", handleCtrlP);
     return () => window.removeEventListener("keydown", handleCtrlP);
   }, []);
+
+  // Sync page count and dimensions after any page operation (delete, rotate, reorder, merge, split).
+  // The backend emits this event for all tabs sharing the same file, so a second open tab also updates.
+  useEffect(() => {
+    interface PagesChangedPayload {
+      docIds: string[];
+      pageCount: number;
+      pageDimensions: PageDimension[];
+    }
+    const unlisten = listen<PagesChangedPayload>("document-pages-changed", (event) => {
+      const { docIds, pageCount, pageDimensions } = event.payload;
+      const { tabs } = usePdfStore.getState();
+      for (const tab of tabs) {
+        if (docIds.includes(tab.docId)) {
+          updateTab(tab.id, {
+            pageCount,
+            pageDimensions,
+            pagesVersion: tab.pagesVersion + 1,
+          });
+        }
+      }
+    });
+    return () => { unlisten.then((f) => f()); };
+  }, [updateTab]);
 
   // Ctrl+F — open search panel, focus and select input
   // Uses capture phase to intercept before WebView2's native find dialog

@@ -16,13 +16,34 @@ Built with Tauri v2
 
 - Continuous-scroll page viewer with smooth zoom (presets, +/-, and
   Ctrl+scroll)
-- Native Windows printing at printer-native resolution
+- Native Windows printing at printer-native resolution, with in-progress cancellation
 - Text layer with copy-to-clipboard and full-document search
+- Export all page text to a `.txt` file
 - Thumbnail sidebar for quick page navigation
 - Document metadata viewing and editing
+- Page operations: delete, rotate, reorder (drag-and-drop), merge, and split pages
 - Multiple documents open in draggable, reorderable tabs
 - Display modes: normal, inverted, and sepia
 
+
+## UI
+
+### Page operations
+
+Click the **scissors icon** (✂) in the left rail to open the Pages panel.
+
+**Navigating pages** — In normal mode, click any thumbnail to jump to that page.
+
+**Editing pages** — Click **Edit** to enter edit mode:
+
+- **Select pages** — Click a thumbnail (or its checkbox) to toggle selection. Use **Select All / Deselect All** in the action bar to bulk-select.
+- **Delete** — Select one or more pages and click the trash icon. The last remaining page cannot be deleted.
+- **Rotate** — Select pages and click the rotate-clockwise or rotate-counter-clockwise icon to spin them 90°. Each click adds another 90°.
+- **Merge** — Click the import icon to pick a PDF file. Its pages are appended after the last page of the current document.
+- **Split** — Click the scissors icon in the action bar, enter a **first** and **last** page number in the fields that appear, then click **Save…** to choose where the extracted pages are written. The original document is not modified.
+- **Reorder** — In edit mode, drag any thumbnail to a new position and drop it. The document is saved in the new order.
+
+Click **Done** to leave edit mode. All operations save the document immediately and reload every open tab that shares the same file.
 
 ## Tech stack
 
@@ -40,7 +61,7 @@ Built with Tauri v2
 rust-tumbler/
 ├── src/                          # React frontend
 │   ├── components/
-│   │   ├── Toolbar.tsx           # Navigation, zoom, print, display mode
+│   │   ├── Toolbar.tsx           # Navigation, zoom, print, export text, display mode
 │   │   ├── TabBar.tsx            # Multi-document tabs
 │   │   ├── IconRail.tsx          # Sidebar tool switcher
 │   │   ├── Sidebar.tsx           # Tab container for panels
@@ -51,7 +72,8 @@ rust-tumbler/
 │   │   ├── HighlightLayer.tsx    # Search-result highlighting
 │   │   ├── ThumbnailPanel.tsx    # Page thumbnail strip
 │   │   ├── SearchPanel.tsx       # Full-text search UI
-│   │   └── MetadataPanel.tsx     # Document info editor
+│   │   ├── MetadataPanel.tsx     # Document info editor
+│   │   └── PagesPanel.tsx        # Page operations (delete/rotate/reorder/merge/split)
 │   ├── store/
 │   │   └── usePdfStore.ts        # Zustand global state (tabs, zoom, etc.)
 │   ├── utils/                    # Bitmap conversion, render cache, etc.
@@ -66,6 +88,7 @@ rust-tumbler/
 │   │   │   ├── render.rs         # page rendering
 │   │   │   ├── text.rs           # text extraction + search
 │   │   │   ├── metadata.rs       # metadata read/write (lopdf)
+│   │   │   ├── pages.rs          # page operations (delete/rotate/reorder/merge/split)
 │   │   │   ├── print.rs          # native printing (GDI)
 │   │   │   ├── theme.rs          # Windows accent color
 │   │   │   └── startup.rs        # file-association startup path
@@ -97,14 +120,8 @@ rust-tumbler/
 
 Planned enhancements:
 
-- **Document Operations** — Merge, split, add, delete, reorder, rotate, and
-  crop pages. Uses pdfium (`FPDF_ImportPages`, `FPDFPage_Delete`,
-  `FPDFPage_SetRotation`) and lopdf (CropBox).
 - **Form Filling** — Enumerate form fields via pdfium's form API, render
   interactive overlays, and save filled forms.
-- **Text Extraction** — Export plain text from all pages to a `.txt` file via
-  pdfium's text API.
-- **Print Cancel**
 - **OCR** - Enables Search and Copy
 - **Web Optimization** - Compress, Linearize
  

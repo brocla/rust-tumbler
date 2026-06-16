@@ -733,6 +733,226 @@ body {
   font-size: var(--font-size-sm);
 }
 
+/* Pages Panel */
+.pages-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.pages-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--color-border-light);
+  flex-shrink: 0;
+}
+
+.pages-panel-title {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+}
+
+.pages-edit-toggle {
+  height: 24px;
+  padding: 0 10px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-family: var(--font-family);
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+}
+
+.pages-edit-toggle:hover {
+  background: var(--color-bg-tertiary);
+}
+
+.pages-edit-toggle.active {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+  color: var(--color-on-accent);
+}
+
+.pages-action-bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--color-border-light);
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+
+.pages-action-sep {
+  flex-shrink: 0;
+  width: 1px;
+  height: 16px;
+  background: var(--color-border);
+  margin: 0 2px;
+}
+
+.pages-action-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text);
+  font-family: var(--font-family);
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.pages-action-button:hover:not(:disabled) {
+  background: var(--color-bg-tertiary);
+}
+
+.pages-action-button:disabled {
+  color: var(--color-text-muted);
+  cursor: default;
+}
+
+.pages-action-button.active {
+  background: var(--color-bg-tertiary);
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
+.pages-action-button.pages-action-danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-error) 15%, transparent);
+  border-color: var(--color-error);
+  color: var(--color-error);
+}
+
+.pages-split-form {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--color-border-light);
+  flex-shrink: 0;
+  background: var(--color-bg-secondary);
+}
+
+.pages-split-label {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+}
+
+.pages-split-input {
+  width: 48px;
+  height: 24px;
+  text-align: center;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-family);
+  font-size: var(--font-size-sm);
+}
+
+.pages-split-input:focus {
+  outline: 2px solid var(--color-accent);
+  outline-offset: -1px;
+  border-color: transparent;
+}
+
+.pages-split-to {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+}
+
+.pages-split-save {
+  height: 24px;
+  padding: 0 10px;
+  border: 1px solid var(--color-accent);
+  border-radius: var(--radius-sm);
+  background: var(--color-accent);
+  color: var(--color-on-accent);
+  font-family: var(--font-family);
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+}
+
+.pages-split-save:hover:not(:disabled) {
+  background: var(--color-accent-dim);
+  border-color: var(--color-accent-dim);
+}
+
+.pages-split-save:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.pages-grid {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+}
+
+.pages-thumb {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  padding: 4px;
+  border: 2px solid transparent;
+  border-radius: var(--radius-md);
+  user-select: none;
+}
+
+.pages-thumb:hover {
+  border-color: var(--color-border);
+}
+
+.pages-thumb.active {
+  border-color: var(--color-accent);
+}
+
+.pages-thumb.selected {
+  border-color: var(--color-accent);
+  background: color-mix(in srgb, var(--color-accent) 8%, transparent);
+}
+
+.pages-thumb.dragging {
+  opacity: 0.4;
+}
+
+.pages-thumb.drop-target {
+  border-color: var(--color-accent);
+  border-style: dashed;
+}
+
+.pages-thumb canvas {
+  display: block;
+  box-shadow: var(--shadow-sm);
+}
+
+.pages-thumb-checkbox {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  width: 14px;
+  height: 14px;
+  cursor: pointer;
+  accent-color: var(--color-accent);
+}
+
 /* Print progress overlay */
 .print-progress-overlay {
   position: fixed;

@@ -1,5 +1,6 @@
 pub mod document;
 pub mod metadata;
+pub mod pages;
 pub mod print;
 pub mod render;
 pub mod startup;

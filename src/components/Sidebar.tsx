@@ -3,6 +3,7 @@ import { usePdfStore } from "../store/usePdfStore";
 import { SearchPanel } from "./SearchPanel";
 import { ThumbnailPanel } from "./ThumbnailPanel";
 import { MetadataPanel } from "./MetadataPanel";
+import { PagesPanel } from "./PagesPanel";
 
 const MIN_WIDTH = 150;
 const MAX_WIDTH = 500;
@@ -70,6 +71,7 @@ export function Sidebar() {
         {activeTool === "thumbnails" && <ThumbnailPanel />}
         {activeTool === "search" && <SearchPanel />}
         {activeTool === "metadata" && <MetadataPanel />}
+        {activeTool === "pages" && <PagesPanel />}
       </div>
       <div className="sidebar-resize-handle" onMouseDown={handleMouseDown} />
     </div>
