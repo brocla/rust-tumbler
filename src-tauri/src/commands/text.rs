@@ -1,7 +1,8 @@
 use crate::error::AppError;
-use crate::state::{lock_mutex, AppState};
+use crate::state::{lock_mutex, AppState, DocEntry};
 use pdfium_render::prelude::*;
 use serde::Serialize;
+use std::sync::{Arc, Mutex};
 use tauri::State;
 
 #[derive(Serialize, Clone)]
@@ -27,6 +28,13 @@ pub struct TextItem {
 pub struct SearchResult {
     pub page: u32,
     pub rects: Vec<TextRect>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextExportResult {
+    pub pages: u32,
+    pub characters: u64,
 }
 
 /// Returns the effective left and bottom origin of the page's bounding box.
@@ -236,6 +244,61 @@ fn search_document_impl(
     Ok(results)
 }
 
+#[tauri::command]
+pub async fn export_text(
+    state: State<'_, AppState>,
+    doc_id: String,
+    dest_path: String,
+) -> Result<TextExportResult, String> {
+    let entry = state.get_document(&doc_id).map_err(String::from)?;
+    tauri::async_runtime::spawn_blocking(move || export_text_impl(entry, dest_path))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(String::from)
+}
+
+fn export_text_impl(
+    entry: Arc<Mutex<DocEntry>>,
+    dest_path: String,
+) -> Result<TextExportResult, AppError> {
+    let entry = lock_mutex(&entry)?;
+    let page_count = entry.document.pages().len() as u32;
+    let mut output = String::new();
+    let mut total_chars: u64 = 0;
+
+    for i in 0..page_count {
+        let page_num = i + 1;
+        let page = entry
+            .document
+            .pages()
+            .get(i as i32)
+            .map_err(|e| AppError::pdfium(format!("Failed to get page {page_num}"), e))?;
+        let text = page
+            .text()
+            .map_err(|e| AppError::pdfium("Failed to get text", e))?;
+        let content = text.all();
+
+        if page_num > 1 {
+            output.push_str("\n\n");
+        }
+        output.push_str(&format!("--- Page {page_num} ---\n"));
+        if content.trim().is_empty() {
+            output.push_str("[no extractable text]");
+        } else {
+            total_chars += content.len() as u64;
+            output.push_str(&content);
+        }
+    }
+
+    std::fs::write(&dest_path, output.as_bytes())
+        .map_err(|e| AppError::io(format!("Failed to write to {dest_path}"), e))?;
+
+    Ok(TextExportResult {
+        pages: page_count,
+        characters: total_chars,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -338,5 +401,27 @@ mod tests {
             search_document_impl(&state, "doc1".to_string(), String::new()).expect("search");
 
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn export_text_produces_nonempty_output_for_fixture() {
+        let pdfium = crate::test_pdfium();
+        let state = AppState::new(pdfium, None);
+        open_fixture(&state, "doc1");
+
+        let entry = state.get_document("doc1").expect("get document");
+        let dest = std::env::temp_dir().join("tumbler_export_text_test.txt");
+        let dest_str = dest.to_string_lossy().into_owned();
+
+        let result = export_text_impl(entry, dest_str).expect("export");
+
+        assert_eq!(result.pages, 1);
+        assert!(result.characters > 0, "expected characters > 0");
+
+        let content = std::fs::read_to_string(&dest).expect("read output file");
+        assert!(content.contains("--- Page 1 ---"), "missing page separator");
+        assert!(!content.trim().is_empty(), "output should not be empty");
+
+        std::fs::remove_file(&dest).ok();
     }
 }

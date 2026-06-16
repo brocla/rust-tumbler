@@ -43,6 +43,7 @@ pub fn run() {
             commands::render::render_page,
             commands::text::extract_page_text,
             commands::text::search_document,
+            commands::text::export_text,
             commands::metadata::get_metadata,
             commands::metadata::set_metadata,
             commands::print::print_document,

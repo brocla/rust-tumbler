@@ -1,7 +1,14 @@
-import { BookOpen, ChevronLeft, ChevronRight, Moon, Printer, Sun, ZoomIn, ZoomOut } from "lucide-react";
+import { BookOpen, ChevronLeft, ChevronRight, Moon, Printer, ScrollText, Sun, ZoomIn, ZoomOut } from "lucide-react";
+import { save, message } from "@tauri-apps/plugin-dialog";
+import { invoke } from "@tauri-apps/api/core";
 import { usePdfStore } from "../store/usePdfStore";
 import type { DisplayMode } from "../store/usePdfStore";
 import { ZOOM_PRESETS } from "../utils/zoomConstants";
+
+interface TextExportResult {
+  pages: number;
+  characters: number;
+}
 
 interface ToolbarProps {
   onOpenFile: () => void;
@@ -74,6 +81,28 @@ export function Toolbar({ onOpenFile, onPrint }: ToolbarProps) {
     const idx = DISPLAY_MODE_ORDER.indexOf(activeTab.displayMode);
     const next = DISPLAY_MODE_ORDER[(idx + 1) % DISPLAY_MODE_ORDER.length];
     updateTab(activeTab.id, { displayMode: next });
+  };
+
+  const handleExportText = async () => {
+    if (!activeTab) return;
+    const defaultName = activeTab.fileName.replace(/\.pdf$/i, "");
+    const destPath = await save({
+      filters: [{ name: "Text", extensions: ["txt"] }],
+      defaultPath: `${defaultName}.txt`,
+    });
+    if (!destPath) return;
+    try {
+      const result = await invoke<TextExportResult>("export_text", {
+        docId: activeTab.docId,
+        destPath,
+      });
+      await message(`Exported ${result.pages} pages (${result.characters} characters).`, {
+        title: "Export Complete",
+        kind: "info",
+      });
+    } catch (err) {
+      await message(String(err), { title: "Export Failed", kind: "error" });
+    }
   };
 
   return (
@@ -165,6 +194,13 @@ export function Toolbar({ onOpenFile, onPrint }: ToolbarProps) {
           })()}
 
           <div className="toolbar-separator" />
+          <button
+            className="toolbar-button"
+            onClick={handleExportText}
+            title="Export Text..."
+          >
+            <ScrollText size={18} />
+          </button>
           <button
             className="toolbar-button"
             onClick={onPrint}
