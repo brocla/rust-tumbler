@@ -105,7 +105,9 @@ Planned enhancements:
 - **Text Extraction** — Export plain text from all pages to a `.txt` file via
   pdfium's text API.
 - **Print Cancel**
-
+- **OCR** - Enables Search and Copy
+- **Web Optimization** - Compress, Linearize
+ 
 
 
 ### Setup
