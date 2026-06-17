@@ -10,11 +10,49 @@ export function ThumbnailPanel() {
     s.tabs.find((t) => t.id === s.activeTabId),
   );
   const updateTab = usePdfStore((s) => s.updateTab);
+  const panelRef = useRef<HTMLDivElement>(null);
+
+  // Scroll to the last-known sidebar page when this panel mounts
+  useEffect(() => {
+    const page = usePdfStore.getState().getActiveTab()?.sidebarScrollPage ?? 1;
+    if (page <= 1) return;
+    requestAnimationFrame(() => {
+      panelRef.current
+        ?.querySelector<HTMLElement>(`[data-page="${page}"]`)
+        ?.scrollIntoView({ block: "start" });
+    });
+  }, []); // mount only
+
+  // Track topmost visible thumbnail and persist to store
+  useEffect(() => {
+    const panel = panelRef.current;
+    if (!panel || !activeTab) return;
+    const scrollRoot = panel.parentElement; // .sidebar-content
+    const visible = new Set<number>();
+
+    const obs = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          const p = Number(entry.target.getAttribute("data-page"));
+          if (entry.isIntersecting) visible.add(p);
+          else visible.delete(p);
+        }
+        if (visible.size > 0) {
+          const min = [...visible].reduce((a, b) => (b < a ? b : a));
+          updateTab(activeTab.id, { sidebarScrollPage: min });
+        }
+      },
+      { root: scrollRoot, threshold: 0.1 },
+    );
+
+    panel.querySelectorAll<HTMLElement>("[data-page]").forEach((el) => obs.observe(el));
+    return () => obs.disconnect();
+  }, [activeTab?.id, activeTab?.pageCount, updateTab]);
 
   if (!activeTab) return null;
 
   return (
-    <div className="thumbnail-panel">
+    <div ref={panelRef} className="thumbnail-panel">
       {activeTab.pageDimensions.map((dim, i) => (
         <Thumbnail
           key={`${activeTab.docId}-v${activeTab.pagesVersion}-${i + 1}`}
@@ -113,6 +151,7 @@ function Thumbnail({
     <div
       ref={containerRef}
       className={`thumbnail ${isActive ? "active" : ""}`}
+      data-page={pageNumber}
       onClick={onClick}
     >
       <canvas ref={canvasRef} style={{ width: cssWidth, height: cssHeight }} />

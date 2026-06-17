@@ -11,6 +11,7 @@ import { usePdfStore } from "./store/usePdfStore";
 import type { PageDimension } from "./store/usePdfStore";
 import { contrastTextColor } from "./utils/color";
 import { reconstructCopyText, type CopyToken } from "./utils/textSelection";
+import { evictDoc } from "./utils/renderCache";
 
 interface DocInfo {
   docId: string;
@@ -53,6 +54,7 @@ function App() {
         metadataDirty: false,
         loading: false,
         pagesVersion: 0,
+        sidebarScrollPage: 1,
       });
     } catch (err) {
       await message(String(err), { title: "Failed to Open PDF", kind: "error" });
@@ -155,6 +157,7 @@ function App() {
       const { tabs } = usePdfStore.getState();
       for (const tab of tabs) {
         if (docIds.includes(tab.docId)) {
+          evictDoc(tab.docId);
           updateTab(tab.id, {
             pageCount,
             pageDimensions,
@@ -254,7 +257,7 @@ function App() {
         <div className="print-progress-overlay">
           <div className="print-progress-dialog">
             <p>Printing page {printProgress.page} of {printProgress.total}...</p>
-            <button onClick={() => invoke("cancel_print")}>Cancel</button>
+            <button onClick={() => void invoke("cancel_print")}>Cancel</button>
           </div>
         </div>
       )}

@@ -30,20 +30,17 @@ Built with Tauri v2
 
 ### Page operations
 
-Click the **scissors icon** (✂) in the left rail to open the Pages panel.
+Click the **pocket-knife icon** in the left rail to open the Pages panel.
 
-**Navigating pages** — In normal mode, click any thumbnail to jump to that page.
-
-**Editing pages** — Click **Edit** to enter edit mode:
-
-- **Select pages** — Click a thumbnail (or its checkbox) to toggle selection. Use **Select All / Deselect All** in the action bar to bulk-select.
+- **Navigate** — Click any thumbnail to jump to that page.
+- **Select pages** — Click a checkbox on any thumbnail to toggle selection. Use **Select All / Deselect All** in the action bar to bulk-select. The trash, rotate, and reorder actions are enabled only when at least one page is selected.
 - **Delete** — Select one or more pages and click the trash icon. The last remaining page cannot be deleted.
 - **Rotate** — Select pages and click the rotate-clockwise or rotate-counter-clockwise icon to spin them 90°. Each click adds another 90°.
 - **Merge** — Click the import icon to pick a PDF file. Its pages are appended after the last page of the current document.
 - **Split** — Click the scissors icon in the action bar, enter a **first** and **last** page number in the fields that appear, then click **Save…** to choose where the extracted pages are written. The original document is not modified.
-- **Reorder** — In edit mode, drag any thumbnail to a new position and drop it. The document is saved in the new order.
+- **Reorder** — Grab the grip handle on the left of any thumbnail and drag it to a new position. The document is saved in the new order.
 
-Click **Done** to leave edit mode. All operations save the document immediately and reload every open tab that shares the same file.
+All operations save the document immediately and reload every open tab that shares the same file.
 
 ## Tech stack
 

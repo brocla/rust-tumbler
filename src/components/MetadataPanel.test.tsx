@@ -27,6 +27,7 @@ function makeTab(overrides: Partial<TabState> = {}): TabState {
     metadataDirty: false,
     loading: false,
     pagesVersion: 0,
+    sidebarScrollPage: 1,
     ...overrides,
   };
 }

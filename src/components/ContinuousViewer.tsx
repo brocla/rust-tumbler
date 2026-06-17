@@ -30,6 +30,10 @@ export function ContinuousViewer() {
   // ratios and can override an explicit page change (e.g. a thumbnail click)
   // before the user ever sees it take effect.
   const currentPageRef = useRef(1);
+  // Running set of page numbers currently intersecting the viewport. Updated
+  // incrementally by the IntersectionObserver (which delivers diffs, not
+  // snapshots). Cleared when the observer is recreated.
+  const visiblePagesRef = useRef<Set<number>>(new Set());
 
   const docId = activeTab?.docId ?? "";
   const pageCount = activeTab?.pageCount ?? 0;
@@ -38,6 +42,7 @@ export function ContinuousViewer() {
   const zoom = activeTab?.zoom ?? 100;
   const displayMode = activeTab?.displayMode ?? "normal";
   const tabId = activeTab?.id ?? "";
+  const pagesVersion = activeTab?.pagesVersion ?? 0;
   const searchResults = activeTab?.searchResults ?? [];
   const searchResultIndex = activeTab?.searchResultIndex ?? -1;
 
@@ -82,37 +87,46 @@ export function ContinuousViewer() {
     currentPageRef.current = currentPage;
   }, [currentPage]);
 
-  // IntersectionObserver to track the most-visible page
+  // IntersectionObserver to track the topmost visible page.
+  // We pick the minimum page number among all currently-intersecting pages
+  // rather than the page with the highest ratio. This avoids the case where a
+  // tall page n is at the top of the viewport but page n+1 (which fits entirely
+  // in the remaining space) has a higher ratio and "wins".
   useEffect(() => {
     const container = containerRef.current;
     if (!container || pageCount === 0) return;
 
+    visiblePagesRef.current.clear();
+
     const observer = new IntersectionObserver(
       (entries) => {
-        if (suppressObserver.current) return;
-
-        let bestPage = currentPageRef.current;
-        let bestRatio = 0;
-
+        // Always keep the set current — skipping updates during suppression
+        // would leave stale entries that corrupt topPage once suppress lifts.
         for (const entry of entries) {
           const pageNum = parseInt(
             (entry.target as HTMLElement).dataset.page ?? "0",
             10,
           );
-          if (pageNum > 0 && entry.intersectionRatio > bestRatio) {
-            bestRatio = entry.intersectionRatio;
-            bestPage = pageNum;
+          if (pageNum > 0) {
+            if (entry.isIntersecting) visiblePagesRef.current.add(pageNum);
+            else visiblePagesRef.current.delete(pageNum);
           }
         }
 
-        if (bestRatio > 0 && bestPage !== currentPageRef.current && tabId) {
-          lastObserverPage.current = bestPage;
-          updateTab(tabId, { currentPage: bestPage });
+        if (suppressObserver.current) return;
+
+        const visible = visiblePagesRef.current;
+        if (visible.size === 0) return;
+        const topPage = Math.min(...visible);
+
+        if (topPage !== currentPageRef.current && tabId) {
+          lastObserverPage.current = topPage;
+          updateTab(tabId, { currentPage: topPage });
         }
       },
       {
         root: container,
-        threshold: [0, 0.25, 0.5, 0.75, 1.0],
+        threshold: 0,
       },
     );
 
@@ -120,7 +134,10 @@ export function ContinuousViewer() {
     const slots = container.querySelectorAll("[data-page]");
     slots.forEach((slot) => observer.observe(slot));
 
-    return () => observer.disconnect();
+    return () => {
+      observer.disconnect();
+      visiblePagesRef.current.clear();
+    };
   }, [pageCount, tabId, updateTab, zoom]);
 
   // Jump to page when currentPage changes via toolbar/keyboard/search/thumbnails.
@@ -153,7 +170,7 @@ export function ContinuousViewer() {
       slot.scrollIntoView({ behavior: "smooth", block: "start" });
       setTimeout(() => {
         suppressObserver.current = false;
-      }, 500);
+      }, 1000);
     }
   }, [currentPage]);
 
@@ -248,7 +265,7 @@ export function ContinuousViewer() {
         const dim = pageDimensions[i];
         return (
           <div
-            key={pageNum}
+            key={`${pageNum}-v${pagesVersion}`}
             ref={setPageRef(pageNum)}
             data-page={pageNum}
             className="page-slot-wrapper"

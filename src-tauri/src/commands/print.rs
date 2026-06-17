@@ -373,7 +373,10 @@ fn print_impl(
 
         if cancel.load(Ordering::Relaxed) {
             unsafe { AbortDoc(hdc) };
-            return Err(AppError::Other("Print cancelled".into()));
+            return Ok(PrintResult {
+                printed: false,
+                pages_printed,
+            });
         }
 
         pages_printed += 1;

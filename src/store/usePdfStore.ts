@@ -25,6 +25,7 @@ export interface TabState {
   metadataDirty: boolean;
   loading: boolean;
   pagesVersion: number;
+  sidebarScrollPage: number;
 }
 
 export interface SearchResult {
