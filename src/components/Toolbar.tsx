@@ -7,7 +7,6 @@ import { ZOOM_PRESETS } from "../utils/zoomConstants";
 
 interface TextExportResult {
   pages: number;
-  characters: number;
 }
 
 interface ToolbarProps {
@@ -85,10 +84,11 @@ export function Toolbar({ onOpenFile, onPrint }: ToolbarProps) {
 
   const handleExportText = async () => {
     if (!activeTab) return;
-    const defaultName = activeTab.fileName.replace(/\.pdf$/i, "");
+    const dir = activeTab.filePath.replace(/[\\/][^\\/]*$/, "");
+    const baseName = activeTab.fileName.replace(/\.pdf$/i, "");
     const destPath = await save({
       filters: [{ name: "Text", extensions: ["txt"] }],
-      defaultPath: `${defaultName}.txt`,
+      defaultPath: `${dir}/${baseName}.txt`,
     });
     if (!destPath) return;
     try {
@@ -96,7 +96,7 @@ export function Toolbar({ onOpenFile, onPrint }: ToolbarProps) {
         docId: activeTab.docId,
         destPath,
       });
-      await message(`Exported ${result.pages} pages (${result.characters} characters).`, {
+      await message(`Exported ${result.pages} pages.`, {
         title: "Export Complete",
         kind: "info",
       });

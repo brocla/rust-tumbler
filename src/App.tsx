@@ -41,6 +41,7 @@ function App() {
         id: tabId,
         docId: info.docId,
         fileName: path.split(/[\\/]/).pop() ?? "Untitled",
+        filePath: path,
         pageCount: info.pageCount,
         pageDimensions: info.pageDimensions,
         currentPage: 1,
@@ -79,7 +80,12 @@ function App() {
     if (!tab) return;
     try {
       setPrintProgress({ page: 0, total: tab.pageCount });
-      await invoke("print_document", { docId: tab.docId });
+      const result = await invoke<{ printed: boolean; pagesPrinted: number; cancelled: boolean }>(
+        "print_document", { docId: tab.docId }
+      );
+      if (result.cancelled) {
+        await message("Print job cancelled.", { title: "Cancelled", kind: "info" });
+      }
     } catch (err) {
       await message(String(err), { title: "Print Failed", kind: "error" });
     } finally {

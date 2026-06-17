@@ -7,6 +7,7 @@ function makeTab(overrides: Partial<TabState> = {}): TabState {
     id: crypto.randomUUID(),
     docId: `doc-${Math.random()}`,
     fileName: "test.pdf",
+    filePath: "C:\\Users\\test\\test.pdf",
     pageCount: 10,
     pageDimensions: Array.from({ length: 10 }, () => ({
       width: 612,

@@ -29,7 +29,6 @@ export function PagesPanel() {
   const [flipStyle, setFlipStyle] = useState<React.CSSProperties | undefined>(undefined);
   const gridRef = useRef<HTMLDivElement>(null);
   const draggedHeightRef = useRef<number>(0);
-  const pendingFlipRef = useRef<{ fromY: number; fromIdx: number; toIdx: number } | null>(null);
   const lastOpRef = useRef<"rotate" | "other">("other");
 
   // Scroll to the last-known sidebar page when this panel mounts
@@ -77,36 +76,10 @@ export function PagesPanel() {
     }
   }, [activeTab?.docId]);
 
-  // useLayoutEffect: fires after new DOM is committed but before the browser
-  // paints. We clear drag state here (no flash) and kick off the FLIP animation
-  // so the moved thumbnail appears to slide from its old position to its new one.
+  // Clear drag/animation state once the backend reload lands (pagesVersion bump).
   useLayoutEffect(() => {
-    const flip = pendingFlipRef.current;
-    if (flip) {
-      pendingFlipRef.current = null;
-      const el = gridRef.current
-        ?.querySelectorAll<HTMLElement>("[data-page]")
-        [flip.toIdx];
-      if (el) {
-        // At this point dragIndex/dropIndex are still set, so the element at
-        // flip.toIdx has a displacement transform. Back it out to get the natural
-        // position, which is where the gap actually is.
-        const appliedShift = flip.fromIdx < flip.toIdx ? -dragShift : dragShift;
-        const naturalTop = el.getBoundingClientRect().top - appliedShift;
-        const delta = flip.fromY - naturalTop;
-        if (Math.abs(delta) > 2) {
-          setFlipIndex(flip.toIdx);
-          setFlipStyle({ transform: `translateY(${delta}px)`, transition: "none" });
-          requestAnimationFrame(() => {
-            setFlipStyle({ transition: "transform 250ms cubic-bezier(0.22,1,0.36,1)" });
-            setTimeout(() => {
-              setFlipIndex(null);
-              setFlipStyle(undefined);
-            }, 270);
-          });
-        }
-      }
-    }
+    setFlipIndex(null);
+    setFlipStyle(undefined);
     const keepSelection = lastOpRef.current === "rotate";
     lastOpRef.current = "other";
     if (!keepSelection) setSelected(new Set());
@@ -232,23 +205,51 @@ export function PagesPanel() {
   };
   const handleDragEnd = () => {
     if (dragIndex !== null && dropIndex !== null && dragIndex !== dropIndex) {
-      // Record the dragged item's current screen position for the FLIP animation.
-      const draggingEl = gridRef.current
-        ?.querySelectorAll<HTMLElement>("[data-page]")
-        [dragIndex];
-      if (draggingEl) {
-        pendingFlipRef.current = {
-          fromY: draggingEl.getBoundingClientRect().top,
-          fromIdx: dragIndex,
-          toIdx: dropIndex,
-        };
+      // Compute the slide distance while the DOM still reflects the drag state.
+      // The drop-target element has a CSS gap-shift transform applied; undo it to
+      // find where the gap actually sits (the dragged item's destination).
+      const items = gridRef.current?.querySelectorAll<HTMLElement>("[data-page]");
+      const draggingEl = items?.[dragIndex];
+      const dropEl = items?.[dropIndex];
+      let slideDelta = 0;
+      if (draggingEl && dropEl) {
+        const fromY = draggingEl.getBoundingClientRect().top;
+        const appliedShift = dragIndex < dropIndex ? -dragShift : dragShift;
+        const gapY = dropEl.getBoundingClientRect().top - appliedShift;
+        slideDelta = gapY - fromY;
       }
-      const order = Array.from({ length: pageCount }, (_, i) => i + 1);
-      const [moved] = order.splice(dragIndex, 1);
-      order.splice(dropIndex, 0, moved);
-      // Keep dragIndex/dropIndex set — the gap stays visible while Rust runs.
-      // useLayoutEffect clears them once pagesVersion updates.
-      runOp(() => invoke<PageInfo>("reorder_pages", { docId, newOrder: order }));
+
+      const savedDragIndex = dragIndex;
+      const savedDropIndex = dropIndex;
+
+      // Phase 1 – snap opacity to 1 and suppress the .dragging transition so the
+      // element starts from its natural position with no pending CSS changes.
+      setFlipIndex(savedDragIndex);
+      setFlipStyle({ opacity: 1, transition: "none" });
+
+      requestAnimationFrame(() => {
+        // Phase 2 – slide the element to the gap position.
+        if (Math.abs(slideDelta) > 2) {
+          setFlipStyle({
+            opacity: 1,
+            transform: `translateY(${slideDelta}px)`,
+            transition: "transform 250ms cubic-bezier(0.22,1,0.36,1)",
+          });
+        }
+
+        setTimeout(() => {
+          // Phase 3 – animation done: freeze at destination while Rust runs.
+          // Keep dragIndex/dropIndex set so shifted neighbours don't snap back.
+          // useLayoutEffect fires synchronously before paint when pagesVersion
+          // bumps, so the gap transforms are cleared without a visible transition.
+          setFlipStyle({ opacity: 1, transform: `translateY(${slideDelta}px)` });
+
+          const order = Array.from({ length: pageCount }, (_, i) => i + 1);
+          const [moved] = order.splice(savedDragIndex, 1);
+          order.splice(savedDropIndex, 0, moved);
+          runOp(() => invoke<PageInfo>("reorder_pages", { docId, newOrder: order }));
+        }, 260);
+      });
     } else {
       setDragIndex(null);
       setDropIndex(null);
@@ -367,7 +368,8 @@ export function PagesPanel() {
           const pageNum = i + 1;
           return (
             <PageThumb
-              key={`${docId}-v${pagesVersion}-${pageNum}`}
+              key={`${docId}-${pageNum}`}
+              renderKey={`${docId}-v${pagesVersion}-${pageNum}`}
               docId={docId}
               pageNumber={pageNum}
               pageWidth={dim.width}
@@ -395,6 +397,7 @@ export function PagesPanel() {
 // ── PageThumb ─────────────────────────────────────────────────────────────────
 
 interface PageThumbProps {
+  renderKey: string;
   docId: string;
   pageNumber: number;
   pageWidth: number;
@@ -412,6 +415,7 @@ interface PageThumbProps {
 }
 
 function PageThumb({
+  renderKey,
   docId,
   pageNumber,
   pageWidth,
@@ -431,6 +435,14 @@ function PageThumb({
   const containerRef = useRef<HTMLDivElement>(null);
   const [rendered, setRendered] = useState(false);
   const [failed, setFailed] = useState(false);
+
+  // When the backend reloads the document (pagesVersion bump), reset so the
+  // canvas re-renders with the new page content. The old bitmap stays visible
+  // on the unchanged DOM canvas until the new one arrives, avoiding a blank flash.
+  useEffect(() => {
+    setRendered(false);
+    setFailed(false);
+  }, [renderKey]);
 
   const cssWidth = Math.round(pageWidth * THUMBNAIL_SCALE);
   const cssHeight = Math.round(pageHeight * THUMBNAIL_SCALE);

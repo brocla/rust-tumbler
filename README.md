@@ -28,6 +28,12 @@ Built with Tauri v2
 
 ## UI
 
+### Export Text
+
+Click the **scroll icon** in the toolbar (left of the print button) to export the document's text layer to a `.txt` file.
+
+A save dialog opens defaulting to the same folder as the source PDF. Each page is written with a `--- Page N ---` header. Pages with no text layer (scanned images) get a `[no extractable text]` placeholder so every page is accounted for. A confirmation shows the number of pages exported when done.
+
 ### Page operations
 
 Click the **pocket-knife icon** in the left rail to open the Pages panel.

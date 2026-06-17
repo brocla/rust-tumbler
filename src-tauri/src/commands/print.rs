@@ -11,6 +11,7 @@ use tauri::{Emitter, State};
 pub struct PrintResult {
     pub printed: bool,
     pub pages_printed: u32,
+    pub cancelled: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -244,10 +245,11 @@ fn print_impl(
     let _devnames_guard = GlobalHandleGuard(pdx.hDevNames);
 
     if pdx.dwResultAction != PD_RESULT_PRINT {
-        // User cancelled
+        // User dismissed the dialog
         return Ok(PrintResult {
             printed: false,
             pages_printed: 0,
+            cancelled: false,
         });
     }
 
@@ -376,6 +378,7 @@ fn print_impl(
             return Ok(PrintResult {
                 printed: false,
                 pages_printed,
+                cancelled: true,
             });
         }
 
@@ -391,6 +394,7 @@ fn print_impl(
     Ok(PrintResult {
         printed: true,
         pages_printed,
+        cancelled: false,
     })
 }
 

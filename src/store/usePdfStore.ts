@@ -12,6 +12,7 @@ export interface TabState {
   id: string;
   docId: string;
   fileName: string;
+  filePath: string;
   pageCount: number;
   pageDimensions: PageDimension[];
   currentPage: number;

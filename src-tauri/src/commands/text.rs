@@ -34,7 +34,6 @@ pub struct SearchResult {
 #[serde(rename_all = "camelCase")]
 pub struct TextExportResult {
     pub pages: u32,
-    pub characters: u64,
 }
 
 /// Returns the effective left and bottom origin of the page's bounding box.
@@ -261,42 +260,47 @@ fn export_text_impl(
     entry: Arc<Mutex<DocEntry>>,
     dest_path: String,
 ) -> Result<TextExportResult, AppError> {
-    let entry = lock_mutex(&entry)?;
-    let page_count = entry.document.pages().len() as u32;
-    let mut output = String::new();
-    let mut total_chars: u64 = 0;
+    // Hold the lock only long enough to extract all page text, then release
+    // before doing any I/O so other commands (render, search) aren't blocked.
+    let (page_count, output) = {
+        let entry = lock_mutex(&entry)?;
+        let page_count = entry.document.pages().len() as u32;
+        let mut output = String::new();
 
-    for i in 0..page_count {
-        let page_num = i + 1;
-        let page = entry
-            .document
-            .pages()
-            .get(i as i32)
-            .map_err(|e| AppError::pdfium(format!("Failed to get page {page_num}"), e))?;
-        let text = page
-            .text()
-            .map_err(|e| AppError::pdfium("Failed to get text", e))?;
-        let content = text.all();
+        for i in 0..page_count {
+            let page_num = i + 1;
+            let page = entry
+                .document
+                .pages()
+                .get(i as i32)
+                .map_err(|e| AppError::pdfium(format!("Failed to get page {page_num}"), e))?;
+            let content = page
+                .text()
+                .map(|t| t.all())
+                .unwrap_or_default();
 
-        if page_num > 1 {
-            output.push_str("\n\n");
+            if page_num > 1 {
+                output.push_str("\n\n");
+            }
+            output.push_str(&format!("--- Page {page_num} ---\n"));
+            if content.trim().is_empty() {
+                output.push_str("[no extractable text]");
+            } else {
+                output.push_str(&content);
+            }
         }
-        output.push_str(&format!("--- Page {page_num} ---\n"));
-        if content.trim().is_empty() {
-            output.push_str("[no extractable text]");
-        } else {
-            total_chars += content.len() as u64;
-            output.push_str(&content);
-        }
-    }
+        (page_count, output)
+    }; // lock released here
 
-    std::fs::write(&dest_path, output.as_bytes())
-        .map_err(|e| AppError::io(format!("Failed to write to {dest_path}"), e))?;
+    // Write via a temp file then atomic rename so a disk-full or crash does
+    // not truncate an existing file at dest_path.
+    let tmp_path = format!("{dest_path}.tmp");
+    std::fs::write(&tmp_path, output.as_bytes())
+        .map_err(|e| AppError::io(format!("Failed to write to {tmp_path}"), e))?;
+    std::fs::rename(&tmp_path, &dest_path)
+        .map_err(|e| AppError::io(format!("Failed to rename {tmp_path} to {dest_path}"), e))?;
 
-    Ok(TextExportResult {
-        pages: page_count,
-        characters: total_chars,
-    })
+    Ok(TextExportResult { pages: page_count })
 }
 
 #[cfg(test)]
@@ -417,7 +421,6 @@ mod tests {
         let result = export_text_impl(entry, dest_str).expect("export");
 
         assert_eq!(result.pages, 1);
-        assert!(result.characters > 0, "expected characters > 0");
 
         let content = std::fs::read_to_string(&dest).expect("read output file");
         assert!(content.contains("--- Page 1 ---"), "missing page separator");
