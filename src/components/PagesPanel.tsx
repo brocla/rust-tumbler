@@ -29,6 +29,7 @@ export function PagesPanel() {
   const [flipStyle, setFlipStyle] = useState<React.CSSProperties | undefined>(undefined);
   const gridRef = useRef<HTMLDivElement>(null);
   const draggedHeightRef = useRef<number>(0);
+  const dragOffsetRef = useRef({ x: 0, y: 0 });
   const lastOpRef = useRef<"rotate" | "other">("other");
 
   // Scroll to the last-known sidebar page when this panel mounts
@@ -197,52 +198,55 @@ export function PagesPanel() {
     setDragIndex(index);
     setFlipIndex(null);
     setFlipStyle(undefined);
-    draggedHeightRef.current = (e.currentTarget as HTMLElement).getBoundingClientRect().height;
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    draggedHeightRef.current = rect.height;
+    dragOffsetRef.current = { x: e.clientX - rect.left, y: e.clientY - rect.top };
   };
   const handleDragOver = (e: React.DragEvent, index: number) => {
     e.preventDefault();
     setDropIndex(index);
   };
-  const handleDragEnd = () => {
+  const handleDragEnd = (e: React.DragEvent) => {
     if (dragIndex !== null && dropIndex !== null && dragIndex !== dropIndex) {
-      // Compute the slide distance while the DOM still reflects the drag state.
-      // The drop-target element has a CSS gap-shift transform applied; undo it to
-      // find where the gap actually sits (the dragged item's destination).
       const items = gridRef.current?.querySelectorAll<HTMLElement>("[data-page]");
       const draggingEl = items?.[dragIndex];
       const dropEl = items?.[dropIndex];
-      let slideDelta = 0;
+
+      // startX/startY: offset to apply so the element appears exactly where the
+      // drag ghost was when the user released (ghost top-left = cursor - dragOffset).
+      // endX/endY: where the element should end up — natural column x (0), gap y.
+      let startX = 0, startY = 0, endY = 0;
       if (draggingEl && dropEl) {
-        const fromY = draggingEl.getBoundingClientRect().top;
+        const rect = draggingEl.getBoundingClientRect();
+        startX = e.clientX - dragOffsetRef.current.x - rect.left;
+        startY = e.clientY - dragOffsetRef.current.y - rect.top;
         const appliedShift = dragIndex < dropIndex ? -dragShift : dragShift;
-        const gapY = dropEl.getBoundingClientRect().top - appliedShift;
-        slideDelta = gapY - fromY;
+        endY = dropEl.getBoundingClientRect().top - appliedShift - rect.top;
       }
 
       const savedDragIndex = dragIndex;
       const savedDropIndex = dropIndex;
 
-      // Phase 1 – snap opacity to 1 and suppress the .dragging transition so the
-      // element starts from its natural position with no pending CSS changes.
+      // Phase 1 – teleport the element to where the ghost was released.
+      // transition:none prevents the 150ms CSS rule from animating this snap.
       setFlipIndex(savedDragIndex);
-      setFlipStyle({ opacity: 1, transition: "none" });
+      setFlipStyle({ opacity: 1, transform: `translate(${startX}px, ${startY}px)`, transition: "none" });
 
       requestAnimationFrame(() => {
-        // Phase 2 – slide the element to the gap position.
-        if (Math.abs(slideDelta) > 2) {
-          setFlipStyle({
-            opacity: 1,
-            transform: `translateY(${slideDelta}px)`,
-            transition: "transform 250ms cubic-bezier(0.22,1,0.36,1)",
-          });
-        }
+        // Phase 2 – animate from ghost-release position to the gap.
+        // endX is 0: the column is single-file, so x always returns to centre.
+        setFlipStyle({
+          opacity: 1,
+          transform: `translate(0px, ${endY}px)`,
+          transition: "transform 250ms cubic-bezier(0.22,1,0.36,1)",
+        });
 
         setTimeout(() => {
-          // Phase 3 – animation done: freeze at destination while Rust runs.
+          // Phase 3 – freeze at destination while Rust runs.
           // Keep dragIndex/dropIndex set so shifted neighbours don't snap back.
-          // useLayoutEffect fires synchronously before paint when pagesVersion
-          // bumps, so the gap transforms are cleared without a visible transition.
-          setFlipStyle({ opacity: 1, transform: `translateY(${slideDelta}px)` });
+          // useLayoutEffect fires synchronously before paint on pagesVersion bump,
+          // so gap transforms clear without a visible transition.
+          setFlipStyle({ opacity: 1, transform: `translate(0px, ${endY}px)` });
 
           const order = Array.from({ length: pageCount }, (_, i) => i + 1);
           const [moved] = order.splice(savedDragIndex, 1);
@@ -411,7 +415,7 @@ interface PageThumbProps {
   onClick: () => void;
   onDragStart: (e: React.DragEvent) => void;
   onDragOver: (e: React.DragEvent) => void;
-  onDragEnd: () => void;
+  onDragEnd: (e: React.DragEvent) => void;
 }
 
 function PageThumb({
