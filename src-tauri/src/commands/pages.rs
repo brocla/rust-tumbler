@@ -348,6 +348,16 @@ fn merge_document_impl(
     let entry_arc = state.get_document(&doc_id)?;
     let mut entry = lock_mutex(&entry_arc)?;
 
+    let src_real = std::fs::canonicalize(&source_path)
+        .unwrap_or_else(|_| std::path::PathBuf::from(&source_path));
+    let dest_real = std::fs::canonicalize(&entry.file_path)
+        .unwrap_or_else(|_| std::path::PathBuf::from(&entry.file_path));
+    if src_real == dest_real {
+        return Err(AppError::Other(
+            "Cannot merge a document into itself".to_string(),
+        ));
+    }
+
     let page_count = entry.document.pages().len() as u32;
     if insert_after_page > page_count {
         return Err(AppError::Other(format!(

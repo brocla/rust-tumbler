@@ -31,6 +31,8 @@ export function PagesPanel() {
   const draggedHeightRef = useRef<number>(0);
   const dragOffsetRef = useRef({ x: 0, y: 0 });
   const lastOpRef = useRef<"rotate" | "other">("other");
+  const pageCountRef = useRef(0);
+  const docIdRef = useRef("");
 
   // Scroll to the last-known sidebar page when this panel mounts
   useEffect(() => {
@@ -93,6 +95,8 @@ export function PagesPanel() {
 
   const { docId, pageDimensions, pagesVersion } = activeTab;
   const pageCount = activeTab.pageCount;
+  pageCountRef.current = pageCount;
+  docIdRef.current = docId;
 
   const toggleSelect = (page: number) => {
     setSelected((prev) => {
@@ -227,6 +231,10 @@ export function PagesPanel() {
       const savedDragIndex = dragIndex;
       const savedDropIndex = dropIndex;
 
+      // Lock out other operations for the duration of the animation + backend call.
+      // Batched with Phase 1 state updates — single render, no extra paint.
+      setBusy(true);
+
       // Phase 1 – teleport the element to where the ghost was released.
       // transition:none prevents the 150ms CSS rule from animating this snap.
       setFlipIndex(savedDragIndex);
@@ -246,12 +254,14 @@ export function PagesPanel() {
           // Keep dragIndex/dropIndex set so shifted neighbours don't snap back.
           // useLayoutEffect fires synchronously before paint on pagesVersion bump,
           // so gap transforms clear without a visible transition.
+          // Read pageCount/docId from refs: if a concurrent op somehow landed
+          // before this fires, refs hold the current value, not the stale closure.
           setFlipStyle({ opacity: 1, transform: `translate(0px, ${endY}px)` });
 
-          const order = Array.from({ length: pageCount }, (_, i) => i + 1);
+          const order = Array.from({ length: pageCountRef.current }, (_, i) => i + 1);
           const [moved] = order.splice(savedDragIndex, 1);
           order.splice(savedDropIndex, 0, moved);
-          runOp(() => invoke<PageInfo>("reorder_pages", { docId, newOrder: order }));
+          runOp(() => invoke<PageInfo>("reorder_pages", { docId: docIdRef.current, newOrder: order }));
         }, 260);
       });
     } else {
