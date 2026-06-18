@@ -33,6 +33,7 @@ export function PagesPanel() {
   const lastOpRef = useRef<"rotate" | "other">("other");
   const pageCountRef = useRef(0);
   const docIdRef = useRef("");
+  const isDraggingRef = useRef(false);
 
   // Scroll to the last-known sidebar page when this panel mounts
   useEffect(() => {
@@ -87,8 +88,10 @@ export function PagesPanel() {
     lastOpRef.current = "other";
     if (!keepSelection) setSelected(new Set());
     setSplitForm(null);
-    setDragIndex(null);
-    setDropIndex(null);
+    if (!isDraggingRef.current) {
+      setDragIndex(null);
+      setDropIndex(null);
+    }
   }, [activeTab?.pagesVersion]);
 
   if (!activeTab) return null;
@@ -199,6 +202,7 @@ export function PagesPanel() {
   // ── Drag-and-drop reorder ─────────────────────────────────────────────────
 
   const handleDragStart = (index: number, e: React.DragEvent) => {
+    isDraggingRef.current = true;
     setDragIndex(index);
     setFlipIndex(null);
     setFlipStyle(undefined);
@@ -261,10 +265,12 @@ export function PagesPanel() {
           const order = Array.from({ length: pageCountRef.current }, (_, i) => i + 1);
           const [moved] = order.splice(savedDragIndex, 1);
           order.splice(savedDropIndex, 0, moved);
+          isDraggingRef.current = false;
           runOp(() => invoke<PageInfo>("reorder_pages", { docId: docIdRef.current, newOrder: order }));
         }, 260);
       });
     } else {
+      isDraggingRef.current = false;
       setDragIndex(null);
       setDropIndex(null);
     }
