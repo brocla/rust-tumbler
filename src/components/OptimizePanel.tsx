@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { save, message } from "@tauri-apps/plugin-dialog";
 import { usePdfStore } from "../store/usePdfStore";
@@ -101,6 +101,18 @@ export function OptimizePanel() {
   const [running, setRunning] = useState(false);
   const [saving, setSaving] = useState(false);
   const [report, setReport] = useState<OptimizationReport | null>(null);
+  const [saved, setSaved] = useState(false);
+
+  // Reset results when the active document changes, so one file's optimization
+  // never lingers on another file's panel. The panel stays mounted across tab
+  // switches — only the active tab changes — so this can't rely on remounting.
+  const activeDocId = activeTab?.docId;
+  useEffect(() => {
+    setReport(null);
+    setSaved(false);
+    setRunning(false);
+    setSaving(false);
+  }, [activeDocId]);
 
   if (!activeTab) return null;
   const docId = activeTab.docId;
@@ -114,6 +126,7 @@ export function OptimizePanel() {
     });
     // Previous results no longer match the selection.
     setReport(null);
+    setSaved(false);
   };
 
   const handleRun = async () => {
@@ -121,6 +134,7 @@ export function OptimizePanel() {
     const steps = RUNNABLE_STEPS.filter((s) => checked.has(s.id)).map((s) => s.id);
     if (steps.length === 0) return;
     setRunning(true);
+    setSaved(false);
     try {
       const result = await invoke<OptimizationReport>("run_optimization_steps", {
         docId,
@@ -145,11 +159,21 @@ export function OptimizePanel() {
     setSaving(true);
     try {
       await invoke("save_optimized_copy", { docId, destPath });
+      // The staged bytes are consumed by the save, so there's nothing left to
+      // save again — hide the Save As button to mark the task complete.
+      setSaved(true);
     } catch (err) {
       await message(String(err), { title: "Save Failed", kind: "error" });
     } finally {
       setSaving(false);
     }
+  };
+
+  // Discard the optimization result without saving, returning the panel to its
+  // pre-run state.
+  const handleCancel = () => {
+    setReport(null);
+    setSaved(false);
   };
 
   const results = report?.results ?? [];
@@ -250,13 +274,26 @@ export function OptimizePanel() {
             </div>
           )}
 
-          <button
-            className="optimize-save-button"
-            onClick={handleSave}
-            disabled={saving}
-          >
-            {saving ? "Saving…" : "Save As…"}
-          </button>
+          {saved ? (
+            <div className="optimize-saved">✓ Saved</div>
+          ) : (
+            <div className="optimize-actions">
+              <button
+                className="optimize-save-button"
+                onClick={handleSave}
+                disabled={saving}
+              >
+                {saving ? "Saving…" : "Save As…"}
+              </button>
+              <button
+                className="optimize-cancel-button"
+                onClick={handleCancel}
+                disabled={saving}
+              >
+                Cancel
+              </button>
+            </div>
+          )}
         </div>
       )}
     </div>

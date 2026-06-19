@@ -906,6 +906,39 @@ body {
   color: var(--color-text-muted);
 }
 
+.optimize-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.optimize-cancel-button {
+  height: 30px;
+  padding: 0 16px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-family);
+  font-size: var(--font-size-md);
+  cursor: pointer;
+}
+
+.optimize-cancel-button:hover:not(:disabled) {
+  background: var(--color-bg-secondary);
+}
+
+.optimize-cancel-button:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.optimize-saved {
+  font-size: var(--font-size-md);
+  font-weight: 600;
+  color: var(--color-accent);
+}
+
 /* Pages Panel */
 .pages-panel {
   display: flex;

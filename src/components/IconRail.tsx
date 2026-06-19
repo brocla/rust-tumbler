@@ -43,7 +43,7 @@ export function IconRail() {
       <button
         className={`rail-button ${activeTool === "optimize" ? "active" : ""}`}
         onClick={() => setSidebarTool("optimize")}
-        title="Optimize"
+        title="Compress"
       >
         <Minimize2 size={20} />
       </button>

@@ -135,4 +135,57 @@ describe("OptimizePanel", () => {
       destPath: "C:\\out\\report-optimized.pdf",
     });
   });
+
+  it("hides Save As and shows a confirmation after a successful save", async () => {
+    vi.mocked(save).mockResolvedValue("C:\\out\\report-optimized.pdf");
+    render(<OptimizePanel />);
+
+    await act(async () => {
+      fireEvent.click(screen.getByText("Run"));
+    });
+    await waitFor(() => expect(screen.getByText("Save As…")).toBeTruthy());
+
+    await act(async () => {
+      fireEvent.click(screen.getByText("Save As…"));
+    });
+
+    await waitFor(() => expect(screen.getByText("✓ Saved")).toBeTruthy());
+    expect(screen.queryByText("Save As…")).toBeNull();
+  });
+
+  it("Cancel discards the result and returns to the pre-run state", async () => {
+    render(<OptimizePanel />);
+
+    await act(async () => {
+      fireEvent.click(screen.getByText("Run"));
+    });
+    await waitFor(() => expect(screen.getByText("Save As…")).toBeTruthy());
+
+    fireEvent.click(screen.getByText("Cancel"));
+
+    expect(screen.queryByText("Save As…")).toBeNull();
+    expect(screen.queryByText(/Total:/)).toBeNull();
+    expect(screen.getByText("Run")).toBeTruthy();
+  });
+
+  it("clears a previous file's results when the active document changes", async () => {
+    const { rerender } = render(<OptimizePanel />);
+
+    await act(async () => {
+      fireEvent.click(screen.getByText("Run"));
+    });
+    await waitFor(() => expect(screen.getByText(/Total:/)).toBeTruthy());
+
+    // Open a different document in the same (still-mounted) panel.
+    act(() => {
+      usePdfStore.setState({
+        tabs: [makeTab({ id: "tab-2", docId: "doc-2", fileName: "other.pdf" })],
+        activeTabId: "tab-2",
+      });
+    });
+    rerender(<OptimizePanel />);
+
+    expect(screen.queryByText(/Total:/)).toBeNull();
+    expect(screen.queryByText("Save As…")).toBeNull();
+  });
 });
