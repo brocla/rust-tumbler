@@ -22,6 +22,11 @@ pdfium-render = { version = "0.9", features = ["pdfium_use_win32", "thread_safe"
 libloading = "0.7"
 lopdf = "0.34"
 thiserror = "2"
+# Image decode/resize/JPEG re-encode for the image-recompression step.
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
+# zlib inflate for the FlateDecode raw-raster path (decompressed_content()
+# deliberately refuses Image XObjects, so we inflate those ourselves).
+flate2 = "1"
 
 # Pin time to avoid blanket impl conflict with cookie 0.18
 time = "=0.3.41"
