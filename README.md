@@ -39,7 +39,7 @@ A save dialog opens defaulting to the same folder as the source PDF. Each page i
 Click the **pocket-knife icon** in the left rail to open the Pages panel.
 
 - **Navigate** — Click any thumbnail to jump to that page.
-- **Select pages** — Click a checkbox on any thumbnail to toggle selection. Use **Select All / Deselect All** in the action bar to bulk-select. The trash, rotate, and reorder actions are enabled only when at least one page is selected.
+- **Select pages** — Click a checkbox on any thumbnail to toggle selection. Use **Select All / Deselect All** in the action bar to bulk-select. The trash and rotate actions are enabled only when at least one page is selected. (Reorder is drag-based and needs no selection.)
 - **Delete** — Select one or more pages and click the trash icon. The last remaining page cannot be deleted.
 - **Rotate** — Select pages and click the rotate-clockwise or rotate-counter-clockwise icon to spin them 90°. Each click adds another 90°.
 - **Merge** — Click the import icon to pick a PDF file. Its pages are appended after the last page of the current document.
