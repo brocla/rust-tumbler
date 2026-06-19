@@ -15,12 +15,8 @@ interface StepDef {
   id: StepId;
   label: string;
   description: string;
-  /** Image recompression lands in a later commit; rendered but not runnable. */
-  comingSoon?: boolean;
 }
 
-// The four lopdf-only steps are runnable now; image recompression is staged
-// for a later commit and shown disabled so the panel telegraphs what's coming.
 const STEPS: StepDef[] = [
   {
     id: "recompress_streams",
@@ -45,12 +41,33 @@ const STEPS: StepDef[] = [
   {
     id: "recompress_images",
     label: "Downsample images",
-    description: "Resize and re-encode images to a target DPI.",
-    comingSoon: true,
+    description: "Resize and re-encode oversized images to the target DPI (lossy).",
   },
 ];
 
-const RUNNABLE_STEPS = STEPS.filter((s) => !s.comingSoon);
+// The image step is lossy, so it starts unchecked; the four lopdf-only steps
+// are safe and start checked.
+const IMAGE_STEP: StepId = "recompress_images";
+const DEFAULT_CHECKED: StepId[] = STEPS.filter((s) => s.id !== IMAGE_STEP).map((s) => s.id);
+
+// Backend skip reasons → human-readable labels for the skipped-images notice.
+const REASON_LABELS: Record<string, string> = {
+  bilevel: "black & white",
+  indexed: "indexed color",
+  colorspace: "unsupported color",
+  predictor: "predictor",
+  ccitt: "CCITT/fax",
+  jpx: "JPEG2000",
+  jbig2: "JBIG2",
+  crypt: "encrypted",
+  unsupported_filter: "unsupported filter",
+  decode: "unreadable",
+  unreferenced: "not displayed",
+};
+
+function reasonLabel(reason: string): string {
+  return REASON_LABELS[reason] ?? reason;
+}
 
 interface StepResult {
   step: StepId;
@@ -92,10 +109,7 @@ function suggestName(fileName: string): string {
 export function OptimizePanel() {
   const activeTab = usePdfStore((s) => s.tabs.find((t) => t.id === s.activeTabId));
 
-  // All four safe steps start checked.
-  const [checked, setChecked] = useState<Set<StepId>>(
-    () => new Set(RUNNABLE_STEPS.map((s) => s.id)),
-  );
+  const [checked, setChecked] = useState<Set<StepId>>(() => new Set(DEFAULT_CHECKED));
   const [targetDpi, setTargetDpi] = useState(150);
   const [jpegQuality, setJpegQuality] = useState(80);
   const [running, setRunning] = useState(false);
@@ -116,6 +130,7 @@ export function OptimizePanel() {
 
   if (!activeTab) return null;
   const docId = activeTab.docId;
+  const imageChecked = checked.has(IMAGE_STEP);
 
   const toggle = (id: StepId) => {
     setChecked((prev) => {
@@ -131,7 +146,7 @@ export function OptimizePanel() {
 
   const handleRun = async () => {
     // Preserve the declared step order rather than checkbox-click order.
-    const steps = RUNNABLE_STEPS.filter((s) => checked.has(s.id)).map((s) => s.id);
+    const steps = STEPS.filter((s) => checked.has(s.id)).map((s) => s.id);
     if (steps.length === 0) return;
     setRunning(true);
     setSaved(false);
@@ -184,29 +199,23 @@ export function OptimizePanel() {
     <div className="optimize-panel">
       <div className="optimize-steps">
         {STEPS.map((step) => (
-          <label
-            key={step.id}
-            className={`optimize-step${step.comingSoon ? " disabled" : ""}`}
-          >
+          <label key={step.id} className="optimize-step">
             <input
               type="checkbox"
-              checked={!step.comingSoon && checked.has(step.id)}
-              disabled={step.comingSoon || running}
+              checked={checked.has(step.id)}
+              disabled={running}
               onChange={() => toggle(step.id)}
             />
             <span className="optimize-step-text">
-              <span className="optimize-step-label">
-                {step.label}
-                {step.comingSoon && <span className="optimize-soon"> (coming soon)</span>}
-              </span>
+              <span className="optimize-step-label">{step.label}</span>
               <span className="optimize-step-desc">{step.description}</span>
             </span>
           </label>
         ))}
       </div>
 
-      {/* Image controls — inert until the image step ships. */}
-      <fieldset className="optimize-image-controls" disabled>
+      {/* DPI/quality apply only to the image step — disabled until it's checked. */}
+      <fieldset className="optimize-image-controls" disabled={!imageChecked || running}>
         <div className="optimize-slider">
           <label>Target DPI: {targetDpi}</label>
           <input
@@ -267,10 +276,13 @@ export function OptimizePanel() {
 
           {report.skippedImages.length > 0 && (
             <div className="optimize-skipped">
+              Skipped{" "}
               {report.skippedImages
-                .map((s) => `${s.count} image${s.count !== 1 ? "s" : ""} (${s.reason})`)
-                .join(", ")}{" "}
-              skipped
+                .map(
+                  (s) =>
+                    `${s.count} image${s.count !== 1 ? "s" : ""} (${reasonLabel(s.reason)})`,
+                )
+                .join(", ")}
             </div>
           )}
 

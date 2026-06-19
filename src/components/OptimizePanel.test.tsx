@@ -62,14 +62,59 @@ describe("OptimizePanel", () => {
     });
   });
 
-  it("renders the image step disabled as coming soon", () => {
-    render(<OptimizePanel />);
-    expect(screen.getByText(/coming soon/i)).toBeTruthy();
-    const imageCheckbox = screen
+  function imageCheckbox(): HTMLInputElement {
+    return screen
       .getByText("Downsample images")
       .closest("label")!
       .querySelector("input")! as HTMLInputElement;
-    expect(imageCheckbox.disabled).toBe(true);
+  }
+
+  function dpiFieldset(): HTMLFieldSetElement {
+    return screen.getByText(/Target DPI/).closest("fieldset") as HTMLFieldSetElement;
+  }
+
+  it("offers the image step unchecked by default with DPI/quality disabled", () => {
+    render(<OptimizePanel />);
+    const cb = imageCheckbox();
+    expect(cb.disabled).toBe(false);
+    expect(cb.checked).toBe(false);
+    expect(dpiFieldset().disabled).toBe(true);
+  });
+
+  it("includes the image step and enables DPI/quality when checked", async () => {
+    render(<OptimizePanel />);
+    fireEvent.click(imageCheckbox());
+    expect(imageCheckbox().checked).toBe(true);
+    expect(dpiFieldset().disabled).toBe(false);
+
+    await act(async () => {
+      fireEvent.click(screen.getByText("Run"));
+    });
+    const call = vi.mocked(invoke).mock.calls.find((c) => c[0] === "run_optimization_steps");
+    expect(call![1]).toMatchObject({
+      steps: [
+        "recompress_streams",
+        "prune_unused",
+        "delete_zero_length",
+        "strip_extras",
+        "recompress_images",
+      ],
+    });
+  });
+
+  it("renders a friendly skipped-images notice", async () => {
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === "run_optimization_steps") {
+        return { ...REPORT, skippedImages: [{ reason: "jpx", count: 2 }] };
+      }
+      return undefined;
+    });
+    render(<OptimizePanel />);
+    await act(async () => {
+      fireEvent.click(screen.getByText("Run"));
+    });
+    await waitFor(() => expect(screen.getByText(/JPEG2000/)).toBeTruthy());
+    expect(screen.getByText(/2 images/)).toBeTruthy();
   });
 
   it("runs the four checked steps in declared order and shows results", async () => {
