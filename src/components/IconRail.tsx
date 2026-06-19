@@ -1,4 +1,4 @@
-import { Layers, Search, Info, PocketKnife } from "lucide-react";
+import { Layers, Search, Info, PocketKnife, Minimize2 } from "lucide-react";
 import { usePdfStore } from "../store/usePdfStore";
 
 export function IconRail() {
@@ -39,6 +39,13 @@ export function IconRail() {
         title="Page Operations"
       >
         <PocketKnife size={20} />
+      </button>
+      <button
+        className={`rail-button ${activeTool === "optimize" ? "active" : ""}`}
+        onClick={() => setSidebarTool("optimize")}
+        title="Optimize"
+      >
+        <Minimize2 size={20} />
       </button>
     </div>
   );

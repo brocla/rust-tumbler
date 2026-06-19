@@ -57,7 +57,7 @@ interface PdfStore {
   activeTabId: string | null;
 
   // Global state
-  activeSidebarTool: "thumbnails" | "search" | "metadata" | "pages" | null;
+  activeSidebarTool: "thumbnails" | "search" | "metadata" | "pages" | "optimize" | null;
   sidebarWidth: number;
   // Progress of an in-flight document-wide OCR run — "Make Searchable" or
   // Export Text's OCR pass (driven by Tauri `ocr-progress` events). Null when

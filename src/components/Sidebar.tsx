@@ -4,6 +4,7 @@ import { SearchPanel } from "./SearchPanel";
 import { ThumbnailPanel } from "./ThumbnailPanel";
 import { MetadataPanel } from "./MetadataPanel";
 import { PagesPanel } from "./PagesPanel";
+import { OptimizePanel } from "./OptimizePanel";
 
 const MIN_WIDTH = 150;
 const MAX_WIDTH = 500;
@@ -72,6 +73,7 @@ export function Sidebar() {
         {activeTool === "search" && <SearchPanel />}
         {activeTool === "metadata" && <MetadataPanel />}
         {activeTool === "pages" && <PagesPanel />}
+        {activeTool === "optimize" && <OptimizePanel />}
       </div>
       <div className="sidebar-resize-handle" onMouseDown={handleMouseDown} />
     </div>
