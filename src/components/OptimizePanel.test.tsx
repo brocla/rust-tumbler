@@ -127,7 +127,7 @@ describe("OptimizePanel", () => {
     });
 
     expect(vi.mocked(save).mock.calls[0][0]).toMatchObject({
-      defaultPath: "report-optimized.pdf",
+      defaultPath: "report-compressed.pdf",
     });
     const saveCall = vi.mocked(invoke).mock.calls.find((c) => c[0] === "save_optimized_copy");
     expect(saveCall![1]).toMatchObject({

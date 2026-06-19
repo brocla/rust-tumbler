@@ -86,7 +86,7 @@ const STEP_LABELS: Record<StepId, string> = Object.fromEntries(
 function suggestName(fileName: string): string {
   const dot = fileName.lastIndexOf(".");
   const base = dot > 0 ? fileName.slice(0, dot) : fileName;
-  return `${base}-optimized.pdf`;
+  return `${base}-compressed.pdf`;
 }
 
 export function OptimizePanel() {
