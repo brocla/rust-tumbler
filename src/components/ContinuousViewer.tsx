@@ -43,6 +43,7 @@ export function ContinuousViewer() {
   const displayMode = activeTab?.displayMode ?? "normal";
   const tabId = activeTab?.id ?? "";
   const pagesVersion = activeTab?.pagesVersion ?? 0;
+  const contentEpoch = activeTab?.contentEpoch ?? 0;
   const searchResults = activeTab?.searchResults ?? [];
   const searchResultIndex = activeTab?.searchResultIndex ?? -1;
 
@@ -278,6 +279,7 @@ export function ContinuousViewer() {
               pageHeight={dim.height}
               zoom={zoom}
               isInRenderWindow={isInRenderWindow(pageNum)}
+              contentEpoch={contentEpoch}
               displayMode={displayMode}
               highlightRects={pageHighlights.get(pageNum)?.rects ?? []}
               activeHighlightIndex={

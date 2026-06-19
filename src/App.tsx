@@ -7,11 +7,11 @@ import { TabBar } from "./components/TabBar";
 import { IconRail } from "./components/IconRail";
 import { Sidebar } from "./components/Sidebar";
 import { ViewerArea } from "./components/ViewerArea";
-import { usePdfStore } from "./store/usePdfStore";
+import { usePdfStore, suppressedReloadDocs } from "./store/usePdfStore";
 import type { PageDimension } from "./store/usePdfStore";
 import { contrastTextColor } from "./utils/color";
 import { reconstructCopyText, type CopyToken } from "./utils/textSelection";
-import { evictDoc } from "./utils/renderCache";
+import { evictDoc, evictPages } from "./utils/renderCache";
 
 interface DocInfo {
   docId: string;
@@ -55,6 +55,7 @@ function App() {
         metadataDirty: false,
         loading: false,
         pagesVersion: 0,
+        contentEpoch: 0,
         sidebarScrollPage: 1,
       });
     } catch (err) {
@@ -162,12 +163,30 @@ function App() {
       const { docIds, pageCount, pageDimensions } = event.payload;
       const { tabs } = usePdfStore.getState();
       for (const tab of tabs) {
-        if (docIds.includes(tab.docId)) {
+        if (!docIds.includes(tab.docId)) continue;
+        // Was this reload already applied optimistically by an in-place reorder?
+        const optimistic = suppressedReloadDocs.delete(tab.docId);
+        // Reconcile to the backend's authoritative pages. The main canvas won't
+        // flash: a contentEpoch bump re-renders the slots without remounting, so
+        // the old (correct) bitmap stays on screen until the fresh one is drawn
+        // — no blank, no "Loading…".
+        //
+        // For an optimistic reorder we evict only the page cache (the thumbnail
+        // cache keeps its relabeled bitmaps so the *next* reorder can still
+        // repaint synchronously) and we do NOT bump pagesVersion — bumping it is
+        // what remounts every slot and blinks the whole document. A destructive
+        // op (delete/rotate/merge) evicts everything and bumps pagesVersion so
+        // the document fully re-renders.
+        if (optimistic) {
+          evictPages(tab.docId);
+          updateTab(tab.id, { pageCount, pageDimensions, contentEpoch: tab.contentEpoch + 1 });
+        } else {
           evictDoc(tab.docId);
           updateTab(tab.id, {
             pageCount,
             pageDimensions,
             pagesVersion: tab.pagesVersion + 1,
+            contentEpoch: tab.contentEpoch + 1,
           });
         }
       }

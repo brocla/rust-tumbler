@@ -935,6 +935,10 @@ body {
   transition: none;
 }
 
+.pages-grid.clearing .pages-thumb {
+  transition: none;
+}
+
 .pages-thumb.drop-target {
   border-color: var(--color-accent);
   border-style: dashed;

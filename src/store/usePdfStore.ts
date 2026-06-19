@@ -26,8 +26,21 @@ export interface TabState {
   metadataDirty: boolean;
   loading: boolean;
   pagesVersion: number;
+  // Bumped to force a content repaint (e.g. a reorder) without remounting page
+  // slots. Unlike pagesVersion, a bump here does not evict the render cache, so
+  // slots repaint from the (relabeled) cache instead of blanking.
+  contentEpoch: number;
   sidebarScrollPage: number;
 }
+
+/**
+ * docIds whose next `document-pages-changed` reload has already been applied
+ * optimistically on the client (a reorder permuted the store + render cache in
+ * place). The App-level reload listener consumes the id and skips the
+ * evict-and-bump so the UI doesn't repaint a second time. Module-level (not
+ * store state) so reading/consuming it never triggers a re-render.
+ */
+export const suppressedReloadDocs = new Set<string>();
 
 export interface SearchResult {
   page: number;

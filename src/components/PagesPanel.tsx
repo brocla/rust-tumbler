@@ -3,7 +3,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { message } from "@tauri-apps/plugin-dialog";
 import { ImageOff, RotateCw, RotateCcw, Trash2, Scissors, FileInput, GripVertical } from "lucide-react";
-import { usePdfStore } from "../store/usePdfStore";
+import { usePdfStore, suppressedReloadDocs } from "../store/usePdfStore";
+import { permuteDoc, getThumb, putThumb, evictDoc } from "../utils/renderCache";
 
 const THUMBNAIL_SCALE = 0.18;
 
@@ -23,10 +24,17 @@ export function PagesPanel() {
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [busy, setBusy] = useState(false);
   const [splitForm, setSplitForm] = useState<SplitForm | null>(null);
+  const [clearingGap, setClearingGap] = useState(false);
   const [dragIndex, setDragIndex] = useState<number | null>(null);
   const [dropIndex, setDropIndex] = useState<number | null>(null);
   const [flipIndex, setFlipIndex] = useState<number | null>(null);
   const [flipStyle, setFlipStyle] = useState<React.CSSProperties | undefined>(undefined);
+  // Bumped (in the same render that clears the drag transforms) to force every
+  // thumbnail to repaint from the relabeled cache after an in-place reorder, so
+  // the thumbnails never flash back through their original order. Distinct from
+  // the store's pagesVersion, which is only bumped by destructive ops (delete,
+  // rotate, merge) that must re-render from a freshly evicted cache.
+  const [reorderEpoch, setReorderEpoch] = useState(0);
   const gridRef = useRef<HTMLDivElement>(null);
   const draggedHeightRef = useRef<number>(0);
   const dragOffsetRef = useRef({ x: 0, y: 0 });
@@ -80,6 +88,10 @@ export function PagesPanel() {
     }
   }, [activeTab?.docId]);
 
+  useEffect(() => {
+    if (clearingGap) setClearingGap(false);
+  }, [clearingGap]);
+
   // Clear drag/animation state once the backend reload lands (pagesVersion bump).
   useLayoutEffect(() => {
     setFlipIndex(null);
@@ -89,6 +101,11 @@ export function PagesPanel() {
     if (!keepSelection) setSelected(new Set());
     setSplitForm(null);
     if (!isDraggingRef.current) {
+      // setClearingGap batches with setDragIndex/setDropIndex into one render.
+      // The .clearing CSS class on the grid sets transition:none on all thumbs
+      // in that same render, so the browser has no transition to fire when the
+      // gap transforms are removed. clearingGap resets after the next paint.
+      setClearingGap(true);
       setDragIndex(null);
       setDropIndex(null);
     }
@@ -254,19 +271,68 @@ export function PagesPanel() {
         });
 
         setTimeout(() => {
-          // Phase 3 – freeze at destination while Rust runs.
-          // Keep dragIndex/dropIndex set so shifted neighbours don't snap back.
-          // useLayoutEffect fires synchronously before paint on pagesVersion bump,
-          // so gap transforms clear without a visible transition.
-          // Read pageCount/docId from refs: if a concurrent op somehow landed
-          // before this fires, refs hold the current value, not the stale closure.
-          setFlipStyle({ opacity: 1, transform: `translate(0px, ${endY}px)` });
-
+          // Phase 3 – commit. The dragged thumb is frozen at its drop position
+          // and the neighbours are shifted via transforms, so the new order is
+          // already on screen using the *old* bitmaps. Now make that order real
+          // without a destructive reload:
+          //   1. Relabel both render caches so slot N maps to the bitmap that
+          //      page N should now show (a reorder changes no pixels, only
+          //      labels).
+          //   2. Permute the store's page dimensions to match.
+          //   3. Bump reorderEpoch and clear every drag transform in the SAME
+          //      render. The thumbnails repaint from the relabeled cache (in a
+          //      pre-paint layout effect) exactly as the transforms come off —
+          //      so natural slot positions already show the correct content and
+          //      nothing snaps back to the original order.
+          //   4. Tell the reload listener to skip the heavyweight refresh when
+          //      reorder_pages' event lands.
+          // Refs hold current docId/pageCount in case the closure is stale.
+          const docId = docIdRef.current;
           const order = Array.from({ length: pageCountRef.current }, (_, i) => i + 1);
           const [moved] = order.splice(savedDragIndex, 1);
           order.splice(savedDropIndex, 0, moved);
+
+          permuteDoc(docId, order);
+          suppressedReloadDocs.add(docId);
+
+          const store = usePdfStore.getState();
+          const tab = store.tabs.find((t) => t.docId === docId);
+          if (tab) {
+            const dims = tab.pageDimensions.slice();
+            const [movedDim] = dims.splice(savedDragIndex, 1);
+            dims.splice(savedDropIndex, 0, movedDim);
+            store.updateTab(tab.id, { pageDimensions: dims, contentEpoch: tab.contentEpoch + 1 });
+          }
+
+          setReorderEpoch((e) => e + 1);
+          setClearingGap(true);
+          setFlipIndex(null);
+          setFlipStyle(undefined);
+          setDragIndex(null);
+          setDropIndex(null);
           isDraggingRef.current = false;
-          runOp(() => invoke<PageInfo>("reorder_pages", { docId: docIdRef.current, newOrder: order }));
+
+          void (async () => {
+            try {
+              await invoke<PageInfo>("reorder_pages", { docId, newOrder: order });
+            } catch (err) {
+              // The file was not changed — roll back the optimistic reorder by
+              // forcing a real reload from the backend's (unchanged) document.
+              suppressedReloadDocs.delete(docId);
+              evictDoc(docId);
+              const s = usePdfStore.getState();
+              const t = s.tabs.find((x) => x.docId === docId);
+              if (t) {
+                s.updateTab(t.id, {
+                  pagesVersion: t.pagesVersion + 1,
+                  contentEpoch: t.contentEpoch + 1,
+                });
+              }
+              await message(String(err), { title: "Reorder Failed", kind: "error" });
+            } finally {
+              setBusy(false);
+            }
+          })();
         }, 260);
       });
     } else {
@@ -383,13 +449,13 @@ export function PagesPanel() {
       )}
 
       {/* Thumbnail grid */}
-      <div ref={gridRef} className="pages-grid">
+      <div ref={gridRef} className={`pages-grid${clearingGap ? " clearing" : ""}`}>
         {pageDimensions.map((dim, i) => {
           const pageNum = i + 1;
           return (
             <PageThumb
               key={`${docId}-${pageNum}`}
-              renderKey={`${docId}-v${pagesVersion}-${pageNum}`}
+              renderKey={`${docId}-v${pagesVersion}-r${reorderEpoch}-${pageNum}`}
               docId={docId}
               pageNumber={pageNum}
               pageWidth={dim.width}
@@ -453,26 +519,40 @@ function PageThumb({
 }: PageThumbProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
-  const [rendered, setRendered] = useState(false);
+  const visibleRef = useRef(false);
   const [failed, setFailed] = useState(false);
 
-  // When the backend reloads the document (pagesVersion bump), reset so the
-  // canvas re-renders with the new page content. The old bitmap stays visible
-  // on the unchanged DOM canvas until the new one arrives, avoiding a blank flash.
-  useEffect(() => {
-    setRendered(false);
-    setFailed(false);
-  }, [renderKey]);
-
+  const dpr = window.devicePixelRatio || 1;
   const cssWidth = Math.round(pageWidth * THUMBNAIL_SCALE);
   const cssHeight = Math.round(pageHeight * THUMBNAIL_SCALE);
+  const renderWidth = Math.round(cssWidth * dpr);
 
-  const renderThumb = useCallback(async () => {
+  const draw = useCallback(
+    (bitmap: ImageBitmap) => {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      canvas.width = bitmap.width;
+      canvas.height = bitmap.height;
+      canvas.style.width = `${cssWidth}px`;
+      canvas.style.height = `${cssHeight}px`;
+      canvas.getContext("2d")?.drawImage(bitmap, 0, 0);
+    },
+    [cssWidth, cssHeight],
+  );
+
+  // Cache-first render. A cache hit draws synchronously (used by the reorder
+  // repaint below so it lands in the same paint as the transform clear); a miss
+  // fetches from Rust and keeps the old bitmap visible until the new one lands.
+  const render = useCallback(async () => {
     const canvas = canvasRef.current;
-    if (!canvas || rendered || failed) return;
+    if (!canvas || !visibleRef.current) return;
 
-    const dpr = window.devicePixelRatio || 1;
-    const renderWidth = Math.round(cssWidth * dpr);
+    const cached = getThumb(docId, pageNumber, dpr);
+    if (cached) {
+      draw(cached);
+      setFailed(false);
+      return;
+    }
 
     try {
       const buffer = await invoke<ArrayBuffer>("render_page", {
@@ -480,36 +560,43 @@ function PageThumb({
         page: pageNumber,
         width: renderWidth,
       });
-
       const rgba = new Uint8ClampedArray(buffer);
       const actualHeight = rgba.byteLength / (4 * renderWidth);
       const imageData = new ImageData(rgba, renderWidth, actualHeight);
-
-      canvas.width = renderWidth;
-      canvas.height = actualHeight;
-      canvas.style.width = `${cssWidth}px`;
-      canvas.style.height = `${cssHeight}px`;
-
-      const ctx = canvas.getContext("2d");
-      if (ctx) {
-        ctx.putImageData(imageData, 0, 0);
-        setRendered(true);
-      }
+      const bitmap = await createImageBitmap(imageData);
+      putThumb(docId, pageNumber, dpr, bitmap);
+      draw(bitmap);
+      setFailed(false);
     } catch {
       setFailed(true);
     }
-  }, [docId, pageNumber, cssWidth, cssHeight, rendered, failed]);
+  }, [docId, pageNumber, dpr, renderWidth, draw]);
+
+  // Repaint when content changes: renderKey folds in pagesVersion (destructive
+  // reload — cache was evicted, so this re-fetches) and reorderEpoch (in-place
+  // reorder — cache was relabeled, so the cache hit redraws synchronously here,
+  // pre-paint, with no flash). useLayoutEffect keeps the cached redraw in the
+  // same frame the drag transforms are removed.
+  useLayoutEffect(() => {
+    render();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [renderKey]);
 
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
     const observer = new IntersectionObserver(
-      ([entry]) => { if (entry.isIntersecting) renderThumb(); },
+      ([entry]) => {
+        if (entry.isIntersecting) {
+          visibleRef.current = true;
+          render();
+        }
+      },
       { threshold: 0.1 },
     );
     observer.observe(container);
     return () => observer.disconnect();
-  }, [renderThumb]);
+  }, [render]);
 
   return (
     <div

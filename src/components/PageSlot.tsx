@@ -18,6 +18,9 @@ interface PageSlotProps {
   pageHeight: number;
   zoom: number;
   isInRenderWindow: boolean;
+  // Bumped on an in-place reorder. The render cache has been relabeled to match,
+  // so re-running the render effect repaints this slot from cache (no blank).
+  contentEpoch: number;
   displayMode: "normal" | "invert" | "sepia";
   highlightRects: HighlightRect[];
   activeHighlightIndex: number;
@@ -36,6 +39,7 @@ export function PageSlot({
   pageHeight,
   zoom,
   isInRenderWindow,
+  contentEpoch,
   displayMode,
   highlightRects,
   activeHighlightIndex,
@@ -120,7 +124,7 @@ export function PageSlot({
     return () => {
       cancelled = true;
     };
-  }, [docId, pageNumber, zoom, dpr, isInRenderWindow, pixelWidth, cssWidth, cssHeight]);
+  }, [docId, pageNumber, zoom, dpr, isInRenderWindow, contentEpoch, pixelWidth, cssWidth, cssHeight]);
 
   const filter = DISPLAY_FILTERS[displayMode];
 

@@ -14,6 +14,7 @@ function makeTab(overrides: Partial<TabState> = {}): TabState {
     id: "tab-1",
     docId: "doc-1",
     fileName: "test.pdf",
+    filePath: "C:\\Users\\test\\test.pdf",
     pageCount: 1,
     pageDimensions: [{ width: 200, height: 200 }],
     currentPage: 1,
@@ -27,6 +28,7 @@ function makeTab(overrides: Partial<TabState> = {}): TabState {
     metadataDirty: false,
     loading: false,
     pagesVersion: 0,
+    contentEpoch: 0,
     sidebarScrollPage: 1,
     ...overrides,
   };
