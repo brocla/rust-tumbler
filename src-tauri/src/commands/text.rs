@@ -1,9 +1,14 @@
+use crate::commands::ocr::{
+    cache_get, cache_set, map_words, ocr_words_to_text, render_page_for_ocr, OcrCache, OcrEngine,
+    OcrWord,
+};
 use crate::error::AppError;
 use crate::state::{lock_mutex, AppState, DocEntry};
 use pdfium_render::prelude::*;
 use serde::Serialize;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use tauri::State;
+use tauri::{Emitter, State, WebviewWindow};
 
 #[derive(Serialize, Clone)]
 pub struct TextRect {
@@ -34,6 +39,15 @@ pub struct SearchResult {
 #[serde(rename_all = "camelCase")]
 pub struct TextExportResult {
     pub pages: u32,
+    /// How many pages contributed text via OCR (vs. a native text layer).
+    pub ocr_pages: u32,
+    pub cancelled: bool,
+}
+
+#[derive(Serialize, Clone)]
+pub struct ExportProgress {
+    pub page: u32,
+    pub total: u32,
 }
 
 /// Returns the effective left and bottom origin of the page's bounding box.
@@ -159,7 +173,33 @@ fn extract_page_text_impl(
         });
     }
 
+    // Fallback: a page with no native text layer (a scan) yields nothing above.
+    // If OCR has been run for it, serve the recognized words instead so the
+    // text overlay still has something to select/copy.
+    if items.is_empty() {
+        if let Some(words) = state.get_ocr_words(&doc_id, page) {
+            return Ok(words
+                .iter()
+                .map(|w| ocr_word_to_text_item(w, page_height))
+                .collect());
+        }
+    }
+
     Ok(items)
+}
+
+/// Converts a cached OCR word (PDF user space, origin bottom-left) into a
+/// `TextItem` (origin top-left, as the text overlay expects). The font size is
+/// approximated from the box height since OCR has no glyph metrics.
+fn ocr_word_to_text_item(word: &OcrWord, page_height: f32) -> TextItem {
+    TextItem {
+        text: word.text.clone(),
+        x: word.rect.x,
+        y: page_height - (word.rect.y + word.rect.height),
+        width: word.rect.width,
+        height: word.rect.height,
+        font_size: word.rect.height,
+    }
 }
 
 #[tauri::command]
@@ -232,6 +272,25 @@ fn search_document_impl(
             }
         }
 
+        // Fallback: no native hits on this page. If OCR words are cached for
+        // it (a scanned page made searchable), match the query against them.
+        if page_rects.is_empty() {
+            let page_num = (page_idx + 1) as u32;
+            if let Some(words) = state.get_ocr_words(&doc_id, page_num) {
+                let needle = query.to_lowercase();
+                for word in &words {
+                    if word.text.to_lowercase().contains(&needle) {
+                        page_rects.push(TextRect {
+                            x: word.rect.x,
+                            y: page_height - (word.rect.y + word.rect.height),
+                            width: word.rect.width,
+                            height: word.rect.height,
+                        });
+                    }
+                }
+            }
+        }
+
         if !page_rects.is_empty() {
             results.push(SearchResult {
                 page: (page_idx + 1) as u32,
@@ -243,54 +302,148 @@ fn search_document_impl(
     Ok(results)
 }
 
+/// Counts pages whose native text layer is empty (scan candidates). Drives the
+/// frontend's "run OCR on export?" confirmation.
 #[tauri::command]
-pub async fn export_text(
+pub async fn count_pages_without_text(
     state: State<'_, AppState>,
     doc_id: String,
-    dest_path: String,
-) -> Result<TextExportResult, String> {
+) -> Result<u32, String> {
     let entry = state.get_document(&doc_id).map_err(String::from)?;
-    tauri::async_runtime::spawn_blocking(move || export_text_impl(entry, dest_path))
+    tauri::async_runtime::spawn_blocking(move || count_pages_without_text_impl(entry))
         .await
         .map_err(|e| e.to_string())?
         .map_err(String::from)
 }
 
-fn export_text_impl(
-    entry: Arc<Mutex<DocEntry>>,
-    dest_path: String,
-) -> Result<TextExportResult, AppError> {
-    // Hold the lock only long enough to extract all page text, then release
-    // before doing any I/O so other commands (render, search) aren't blocked.
-    let (page_count, output) = {
-        let entry = lock_mutex(&entry)?;
-        let page_count = entry.document.pages().len() as u32;
-        let mut output = String::new();
+fn count_pages_without_text_impl(entry: Arc<Mutex<DocEntry>>) -> Result<u32, AppError> {
+    let entry = lock_mutex(&entry)?;
+    let page_count = entry.document.pages().len();
+    let mut count = 0;
+    for i in 0..page_count {
+        let page = entry
+            .document
+            .pages()
+            .get(i)
+            .map_err(|e| AppError::pdfium(format!("Failed to get page {}", i + 1), e))?;
+        let content = page.text().map(|t| t.all()).unwrap_or_default();
+        if content.trim().is_empty() {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
 
-        for i in 0..page_count {
-            let page_num = i + 1;
+#[tauri::command]
+pub async fn export_text(
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+    doc_id: String,
+    dest_path: String,
+    use_ocr: bool,
+) -> Result<TextExportResult, String> {
+    let entry = state.get_document(&doc_id).map_err(String::from)?;
+    let engine = state.ocr_engine.clone();
+    let cache = state.ocr_cache_handle();
+    let cancel = Arc::new(AtomicBool::new(false));
+    state.set_export_job(cancel.clone());
+
+    // Forward per-page progress to the frontend; the impl stays
+    // WebviewWindow-free so it's unit-testable with a no-op closure.
+    let emit = move |page, total| {
+        let _ = window.emit("export-progress", ExportProgress { page, total });
+    };
+
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        export_text_impl(emit, entry, doc_id, dest_path, use_ocr, engine, cache, cancel)
+    })
+    .await
+    .map_err(|e| e.to_string());
+
+    state.take_export_job();
+    result?.map_err(String::from)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn export_text_impl(
+    emit_progress: impl Fn(u32, u32),
+    entry: Arc<Mutex<DocEntry>>,
+    doc_id: String,
+    dest_path: String,
+    use_ocr: bool,
+    engine: Arc<dyn OcrEngine>,
+    cache: OcrCache,
+    cancel: Arc<AtomicBool>,
+) -> Result<TextExportResult, AppError> {
+    let page_count = lock_mutex(&entry)?.document.pages().len() as u32;
+
+    let mut output = String::new();
+    let mut ocr_pages = 0u32;
+    let mut processed = 0u32;
+
+    for i in 0..page_count {
+        let page_num = i + 1;
+
+        if cancel.load(Ordering::Relaxed) {
+            return Ok(TextExportResult {
+                pages: processed,
+                ocr_pages,
+                cancelled: true,
+            });
+        }
+        emit_progress(page_num, page_count);
+
+        // Hold the doc lock only to read native text and (if needed) rasterize
+        // the page — never across the multi-second OCR call below.
+        let (native, render_data) = {
+            let entry = lock_mutex(&entry)?;
             let page = entry
                 .document
                 .pages()
                 .get(i as i32)
                 .map_err(|e| AppError::pdfium(format!("Failed to get page {page_num}"), e))?;
-            let content = page
-                .text()
-                .map(|t| t.all())
-                .unwrap_or_default();
-
-            if page_num > 1 {
-                output.push_str("\n\n");
-            }
-            output.push_str(&format!("--- Page {page_num} ---\n"));
-            if content.trim().is_empty() {
-                output.push_str("[no extractable text]");
+            let content = page.text().map(|t| t.all()).unwrap_or_default();
+            let render = if content.trim().is_empty() && use_ocr {
+                Some(render_page_for_ocr(&entry.document, page_num)?)
             } else {
-                output.push_str(&content);
+                None
+            };
+            (content, render)
+        }; // lock released here
+
+        let page_text = if !native.trim().is_empty() {
+            native
+        } else if let Some((rgba, bmp_w, bmp_h, page_w, page_h)) = render_data {
+            // Reuse cached OCR (e.g. from a prior search) or recognize now.
+            let words = match cache_get(&cache, &doc_id, page_num) {
+                Some(cached) => cached,
+                None => {
+                    let raw = engine.recognize(&rgba, bmp_w, bmp_h)?;
+                    let mapped = map_words(raw, bmp_w, bmp_h, page_w, page_h);
+                    cache_set(&cache, &doc_id, page_num, mapped.clone());
+                    mapped
+                }
+            };
+            let text = ocr_words_to_text(&words);
+            if !text.trim().is_empty() {
+                ocr_pages += 1;
             }
+            text
+        } else {
+            String::new()
+        };
+
+        if page_num > 1 {
+            output.push_str("\n\n");
         }
-        (page_count, output)
-    }; // lock released here
+        output.push_str(&format!("--- Page {page_num} ---\n"));
+        if page_text.trim().is_empty() {
+            output.push_str("[no extractable text]");
+        } else {
+            output.push_str(&page_text);
+        }
+        processed = page_num;
+    }
 
     // Write via a temp file then atomic rename so a disk-full or crash does
     // not truncate an existing file at dest_path.
@@ -300,7 +453,18 @@ fn export_text_impl(
     std::fs::rename(&tmp_path, &dest_path)
         .map_err(|e| AppError::io(format!("Failed to rename {tmp_path} to {dest_path}"), e))?;
 
-    Ok(TextExportResult { pages: page_count })
+    Ok(TextExportResult {
+        pages: page_count,
+        ocr_pages,
+        cancelled: false,
+    })
+}
+
+/// Signals an in-progress `export_text` to stop after the current page.
+#[tauri::command]
+pub fn cancel_export_text(state: State<'_, AppState>) -> Result<(), String> {
+    state.cancel_export_job();
+    Ok(())
 }
 
 #[cfg(test)]
@@ -408,24 +572,267 @@ mod tests {
         assert!(results.is_empty());
     }
 
+    fn ocr_word(text: &str) -> OcrWord {
+        // Rect in PDF user space (origin bottom-left), as the cache stores it.
+        OcrWord {
+            text: text.to_string(),
+            rect: TextRect {
+                x: 10.0,
+                y: 150.0,
+                width: 40.0,
+                height: 12.0,
+            },
+        }
+    }
+
+    /// When a page has no native hits for the query, `search_document` falls
+    /// back to the OCR cache. Searching the text-only fixture for a word that
+    /// isn't in its text layer ("Banana") returns nothing natively, but a
+    /// cached OCR word for that page makes it a hit.
     #[test]
-    fn export_text_produces_nonempty_output_for_fixture() {
+    fn search_document_falls_back_to_ocr_cache() {
+        let pdfium = crate::test_pdfium();
+        let state = AppState::new(pdfium, None);
+        open_fixture(&state, "doc1");
+        state.set_ocr_words("doc1", 1, vec![ocr_word("Banana")]);
+
+        let results =
+            search_document_impl(&state, "doc1".to_string(), "banana".to_string()).expect("search");
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].page, 1);
+        assert_eq!(results[0].rects.len(), 1);
+        // y is flipped from the bottom-left cache rect into top-left space.
+        let rect = &results[0].rects[0];
+        assert!((rect.y - (200.0 - (150.0 + 12.0))).abs() < 0.1, "y: {}", rect.y);
+    }
+
+    /// A blank page (no text layer) returns no native text, so
+    /// `extract_page_text` falls back to the cached OCR words.
+    #[test]
+    fn extract_page_text_falls_back_to_ocr_cache_on_blank_page() {
+        let _guard = crate::test_pdfium_guard();
+        let pdfium = crate::test_pdfium();
+        let state = AppState::new(pdfium, None);
+
+        let mut doc = pdfium.create_new_pdf().expect("create pdf");
+        doc.pages_mut()
+            .create_page_at_index(
+                PdfPagePaperSize::new_custom(PdfPoints::new(200.0), PdfPoints::new(200.0)),
+                0 as PdfPageIndex,
+            )
+            .expect("create blank page");
+        state
+            .insert_document(
+                "blank".to_string(),
+                DocEntry {
+                    document: doc,
+                    file_path: "blank.pdf".to_string(),
+                },
+            )
+            .expect("insert");
+
+        // Without OCR, a blank page extracts to nothing.
+        let before = extract_page_text_impl(&state, "blank".to_string(), 1).expect("extract");
+        assert!(before.is_empty(), "blank page should have no native text");
+
+        state.set_ocr_words("blank", 1, vec![ocr_word("Scanned")]);
+
+        let after = extract_page_text_impl(&state, "blank".to_string(), 1).expect("extract");
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].text, "Scanned");
+        // Flipped from bottom-left (y=150,h=12) into top-left space.
+        assert!((after[0].y - (200.0 - (150.0 + 12.0))).abs() < 0.1, "y: {}", after[0].y);
+    }
+
+    /// Minimal OCR engine for export tests: returns fixed pixel-space words.
+    struct FakeOcrEngine {
+        words: Vec<OcrWord>,
+    }
+    impl OcrEngine for FakeOcrEngine {
+        fn recognize(&self, _rgba: &[u8], _w: u32, _h: u32) -> Result<Vec<OcrWord>, AppError> {
+            Ok(self.words.clone())
+        }
+    }
+
+    fn no_progress(_page: u32, _total: u32) {}
+
+    /// Inserts an `n`-page blank document (no text layer) under `doc_id`.
+    fn open_blank_doc(state: &AppState, doc_id: &str, pages: u32) {
+        let pdfium = crate::test_pdfium();
+        let mut doc = pdfium.create_new_pdf().expect("create pdf");
+        for i in 0..pages {
+            doc.pages_mut()
+                .create_page_at_index(
+                    PdfPagePaperSize::new_custom(PdfPoints::new(200.0), PdfPoints::new(200.0)),
+                    i as PdfPageIndex,
+                )
+                .expect("create blank page");
+        }
+        state
+            .insert_document(
+                doc_id.to_string(),
+                DocEntry {
+                    document: doc,
+                    file_path: format!("{doc_id}.pdf"),
+                },
+            )
+            .expect("insert");
+    }
+
+    fn temp_txt(name: &str) -> String {
+        std::env::temp_dir()
+            .join(name)
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    #[test]
+    fn export_text_uses_native_text_without_ocr() {
         let pdfium = crate::test_pdfium();
         let state = AppState::new(pdfium, None);
         open_fixture(&state, "doc1");
 
         let entry = state.get_document("doc1").expect("get document");
-        let dest = std::env::temp_dir().join("tumbler_export_text_test.txt");
-        let dest_str = dest.to_string_lossy().into_owned();
+        let dest = temp_txt("tumbler_export_native.txt");
+        let cancel = Arc::new(AtomicBool::new(false));
 
-        let result = export_text_impl(entry, dest_str).expect("export");
+        let result = export_text_impl(
+            no_progress,
+            entry,
+            "doc1".to_string(),
+            dest.clone(),
+            false,
+            state.ocr_engine.clone(),
+            state.ocr_cache_handle(),
+            cancel,
+        )
+        .expect("export");
 
         assert_eq!(result.pages, 1);
+        assert_eq!(result.ocr_pages, 0);
+        assert!(!result.cancelled);
 
-        let content = std::fs::read_to_string(&dest).expect("read output file");
+        let content = std::fs::read_to_string(&dest).expect("read output");
         assert!(content.contains("--- Page 1 ---"), "missing page separator");
-        assert!(!content.trim().is_empty(), "output should not be empty");
-
+        assert!(content.contains("Test Fixture"), "missing native text");
         std::fs::remove_file(&dest).ok();
+    }
+
+    #[test]
+    fn export_text_ocr_fills_blank_page_and_populates_cache() {
+        let _guard = crate::test_pdfium_guard();
+        let pdfium = crate::test_pdfium();
+        let state = AppState::new(pdfium, None);
+        open_blank_doc(&state, "blank", 1);
+
+        let entry = state.get_document("blank").expect("get document");
+        let cache = state.ocr_cache_handle();
+        let engine: Arc<dyn OcrEngine> = Arc::new(FakeOcrEngine {
+            words: vec![ocr_word("Scanned")],
+        });
+        let dest = temp_txt("tumbler_export_ocr.txt");
+        let cancel = Arc::new(AtomicBool::new(false));
+
+        let result = export_text_impl(
+            no_progress,
+            entry,
+            "blank".to_string(),
+            dest.clone(),
+            true,
+            engine,
+            cache.clone(),
+            cancel,
+        )
+        .expect("export");
+
+        assert_eq!(result.pages, 1);
+        assert_eq!(result.ocr_pages, 1);
+
+        let content = std::fs::read_to_string(&dest).expect("read output");
+        assert!(content.contains("Scanned"), "OCR text missing: {content}");
+        assert!(
+            !content.contains("[no extractable text]"),
+            "should not show placeholder when OCR found text"
+        );
+        // Export also primed the cache so search/copy now work for this page.
+        assert!(cache_get(&cache, "blank", 1).is_some(), "cache not populated");
+        std::fs::remove_file(&dest).ok();
+    }
+
+    #[test]
+    fn export_text_without_ocr_keeps_placeholder_on_blank_page() {
+        let _guard = crate::test_pdfium_guard();
+        let pdfium = crate::test_pdfium();
+        let state = AppState::new(pdfium, None);
+        open_blank_doc(&state, "blank", 1);
+
+        let entry = state.get_document("blank").expect("get document");
+        let dest = temp_txt("tumbler_export_no_ocr.txt");
+        let cancel = Arc::new(AtomicBool::new(false));
+
+        let result = export_text_impl(
+            no_progress,
+            entry,
+            "blank".to_string(),
+            dest.clone(),
+            false,
+            state.ocr_engine.clone(),
+            state.ocr_cache_handle(),
+            cancel,
+        )
+        .expect("export");
+
+        assert_eq!(result.ocr_pages, 0);
+        let content = std::fs::read_to_string(&dest).expect("read output");
+        assert!(content.contains("[no extractable text]"), "missing placeholder");
+        std::fs::remove_file(&dest).ok();
+    }
+
+    #[test]
+    fn export_text_cancellation_stops_before_writing() {
+        let _guard = crate::test_pdfium_guard();
+        let pdfium = crate::test_pdfium();
+        let state = AppState::new(pdfium, None);
+        open_blank_doc(&state, "blank", 3);
+
+        let entry = state.get_document("blank").expect("get document");
+        let dest = temp_txt("tumbler_export_cancel.txt");
+        std::fs::remove_file(&dest).ok();
+        // Pre-set the cancel token so the very first page check fires.
+        let cancel = Arc::new(AtomicBool::new(true));
+
+        let result = export_text_impl(
+            no_progress,
+            entry,
+            "blank".to_string(),
+            dest.clone(),
+            false,
+            state.ocr_engine.clone(),
+            state.ocr_cache_handle(),
+            cancel,
+        )
+        .expect("export");
+
+        assert!(result.cancelled, "expected cancelled result");
+        assert!(
+            !std::path::Path::new(&dest).exists(),
+            "cancelled export must not write a file"
+        );
+    }
+
+    #[test]
+    fn count_pages_without_text_counts_blank_pages() {
+        let _guard = crate::test_pdfium_guard();
+        let pdfium = crate::test_pdfium();
+        let state = AppState::new(pdfium, None);
+        open_fixture(&state, "text");
+        open_blank_doc(&state, "blank", 1);
+
+        let text_doc = state.get_document("text").expect("get text doc");
+        let blank_doc = state.get_document("blank").expect("get blank doc");
+
+        assert_eq!(count_pages_without_text_impl(text_doc).expect("count"), 0);
+        assert_eq!(count_pages_without_text_impl(blank_doc).expect("count"), 1);
     }
 }

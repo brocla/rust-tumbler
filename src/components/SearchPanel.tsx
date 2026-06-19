@@ -18,11 +18,16 @@ export function SearchPanel() {
   const [searching, setSearching] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
   const [resultPage, setResultPage] = useState(0);
+  const [ocrRunning, setOcrRunning] = useState(false);
+  const [ocrError, setOcrError] = useState<string | null>(null);
+  // Pages already OCR'd this session, so we don't re-prompt for them.
+  const [ocrDonePages, setOcrDonePages] = useState<Set<number>>(new Set());
   const inputRef = useRef<HTMLInputElement>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout>>();
 
   const docId = activeTab?.docId ?? "";
   const tabId = activeTab?.id ?? "";
+  const currentPage = activeTab?.currentPage ?? 1;
   const searchResults = activeTab?.searchResults ?? [];
 
   const totalMatches = searchResults.reduce((sum, r) => sum + r.rects.length, 0);
@@ -69,6 +74,23 @@ export function SearchPanel() {
     [tabId, docId, updateTab],
   );
 
+  const runOcr = useCallback(async () => {
+    if (!docId || !query) return;
+    setOcrError(null);
+    setOcrRunning(true);
+    try {
+      // Recognize text on the current page; the backend caches it so the
+      // re-run search below can find matches via its OCR fallback.
+      await invoke("ocr_page", { docId, page: currentPage });
+      setOcrDonePages((prev) => new Set(prev).add(currentPage));
+      await doSearch(query);
+    } catch (err) {
+      setOcrError(String(err));
+    } finally {
+      setOcrRunning(false);
+    }
+  }, [docId, query, currentPage, doSearch]);
+
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const val = e.target.value;
     setQuery(val);
@@ -94,9 +116,11 @@ export function SearchPanel() {
     inputRef.current?.select();
   }, []);
 
-  // Clear any stale search error when switching tabs
+  // Clear any stale search/OCR state when switching tabs
   useEffect(() => {
     setSearchError(null);
+    setOcrError(null);
+    setOcrDonePages(new Set());
   }, [tabId]);
 
   const handleResultClick = (page: number) => {
@@ -155,6 +179,29 @@ export function SearchPanel() {
             ? "No matches found"
             : `${resultIndex + 1} of ${totalMatches} matches on ${searchResults.length} pages`}
         </div>
+      )}
+
+      {/* When a search finds nothing, the current page may be a scanned image
+          with no text layer. Offer to OCR it so search/copy can work. */}
+      {!searching &&
+        !searchError &&
+        query.length > 0 &&
+        totalMatches === 0 &&
+        !ocrDonePages.has(currentPage) && (
+          <div className="search-ocr-prompt">
+            <span>Page {currentPage} may be a scan with no text.</span>
+            <button
+              className="search-ocr-button"
+              onClick={runOcr}
+              disabled={ocrRunning}
+            >
+              {ocrRunning ? "Running OCR…" : "Run OCR on this page"}
+            </button>
+          </div>
+        )}
+
+      {ocrError && (
+        <div className="search-status search-error">OCR failed: {ocrError}</div>
       )}
 
       {visibleResults.length > 0 && (

@@ -60,6 +60,7 @@ fn open_document_impl(state: &AppState, path: String) -> Result<DocInfo, AppErro
 
 #[tauri::command]
 pub fn close_document(state: State<'_, AppState>, doc_id: String) -> Result<(), String> {
+    state.clear_ocr_cache_for_doc(&doc_id);
     state.remove_document(&doc_id).map_err(String::from)
 }
 

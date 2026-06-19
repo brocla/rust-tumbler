@@ -1,3 +1,4 @@
+use crate::commands::ocr::{cache_get, cache_set, OcrCache, OcrEngine, OcrWord, WindowsOcrEngine};
 use crate::error::AppError;
 use pdfium_render::prelude::*;
 use std::collections::HashMap;
@@ -14,6 +15,15 @@ pub struct AppState {
     documents: Mutex<HashMap<String, Arc<Mutex<DocEntry>>>>,
     pub startup_file: Mutex<Option<String>>,
     print_job: Mutex<Option<Arc<AtomicBool>>>,
+    export_job: Mutex<Option<Arc<AtomicBool>>>,
+    /// OCR backend behind a trait seam so tests can inject a fake (the real
+    /// `WindowsOcrEngine` needs a WinRT language pack). See `commands::ocr`.
+    pub ocr_engine: Arc<dyn OcrEngine>,
+    /// Recognized words per `(doc_id, page_1based)`. Lets `search_document`,
+    /// `extract_page_text`, and text export fall back to OCR for image-only
+    /// pages without re-running recognition. Shared (`Arc`) so the blocking
+    /// export task can hold a handle without borrowing `AppState`.
+    ocr_cache: OcrCache,
 }
 
 impl AppState {
@@ -23,6 +33,59 @@ impl AppState {
             documents: Mutex::new(HashMap::new()),
             startup_file: Mutex::new(startup_file),
             print_job: Mutex::new(None),
+            export_job: Mutex::new(None),
+            ocr_engine: Arc::new(WindowsOcrEngine::new()),
+            ocr_cache: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Replaces the OCR engine with an injected one. Test-only: production wires
+    /// the real `WindowsOcrEngine` via `new`.
+    #[cfg(test)]
+    pub fn with_ocr_engine(mut self, engine: Arc<dyn OcrEngine>) -> Self {
+        self.ocr_engine = engine;
+        self
+    }
+
+    /// A cloneable handle to the OCR cache, for code that can't borrow
+    /// `AppState` (e.g. the blocking text-export task).
+    pub fn ocr_cache_handle(&self) -> OcrCache {
+        self.ocr_cache.clone()
+    }
+
+    /// Cached OCR words for a page, if any.
+    pub fn get_ocr_words(&self, doc_id: &str, page: u32) -> Option<Vec<OcrWord>> {
+        cache_get(&self.ocr_cache, doc_id, page)
+    }
+
+    pub fn set_ocr_words(&self, doc_id: &str, page: u32, words: Vec<OcrWord>) {
+        cache_set(&self.ocr_cache, doc_id, page, words);
+    }
+
+    /// Drops every cached page for a document. Called on close (and after an
+    /// edit/reload) so the cache neither grows unbounded nor serves words keyed
+    /// to a now-stale page layout.
+    pub fn clear_ocr_cache_for_doc(&self, doc_id: &str) {
+        if let Ok(mut cache) = self.ocr_cache.lock() {
+            cache.retain(|(d, _), _| d != doc_id);
+        }
+    }
+
+    pub fn set_export_job(&self, token: Arc<AtomicBool>) {
+        if let Ok(mut guard) = self.export_job.lock() {
+            *guard = Some(token);
+        }
+    }
+
+    pub fn take_export_job(&self) -> Option<Arc<AtomicBool>> {
+        self.export_job.lock().ok()?.take()
+    }
+
+    pub fn cancel_export_job(&self) {
+        if let Ok(guard) = self.export_job.lock() {
+            if let Some(token) = guard.as_ref() {
+                token.store(true, Ordering::Relaxed);
+            }
         }
     }
 
@@ -87,6 +150,9 @@ impl AppState {
                 .load_pdf_from_file(file_path, None)
                 .map_err(|e| AppError::pdfium("Failed to reload PDF", e))?;
             lock_mutex(&entry)?.document = document;
+            // The page set may have changed (delete/reorder/merge), so any
+            // page-keyed OCR words for this doc are now stale.
+            self.clear_ocr_cache_for_doc(&doc_id);
             reloaded_ids.push(doc_id);
         }
         Ok(reloaded_ids)

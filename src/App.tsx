@@ -27,6 +27,8 @@ interface AccentColors {
 function App() {
   const addTab = usePdfStore((s) => s.addTab);
   const updateTab = usePdfStore((s) => s.updateTab);
+  const exportProgress = usePdfStore((s) => s.exportProgress);
+  const setExportProgress = usePdfStore((s) => s.setExportProgress);
   const openFileRef = useRef<() => Promise<void>>();
   const printRef = useRef<() => Promise<void>>();
   const [printProgress, setPrintProgress] = useState<{ page: number; total: number } | null>(null);
@@ -135,6 +137,14 @@ function App() {
   useEffect(() => {
     const unlisten = listen<{ page: number; total: number }>("print-progress", (event) => {
       setPrintProgress(event.payload);
+    });
+    return () => { unlisten.then((f) => f()); };
+  }, []);
+
+  // Listen for text-export (OCR) progress events from Rust
+  useEffect(() => {
+    const unlisten = listen<{ page: number; total: number }>("export-progress", (event) => {
+      setExportProgress(event.payload);
     });
     return () => { unlisten.then((f) => f()); };
   }, []);
@@ -283,6 +293,18 @@ function App() {
           <div className="print-progress-dialog">
             <p>Printing page {printProgress.page} of {printProgress.total}...</p>
             <button onClick={() => void invoke("cancel_print")}>Cancel</button>
+          </div>
+        </div>
+      )}
+      {exportProgress && (
+        <div className="print-progress-overlay">
+          <div className="print-progress-dialog">
+            <p>
+              {exportProgress.page === 0
+                ? "Preparing OCR..."
+                : `OCR page ${exportProgress.page} of ${exportProgress.total}...`}
+            </p>
+            <button onClick={() => void invoke("cancel_export_text")}>Cancel</button>
           </div>
         </div>
       )}

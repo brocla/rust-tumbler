@@ -1,5 +1,5 @@
 import { BookOpen, ChevronLeft, ChevronRight, Moon, Printer, ScrollText, Sun, ZoomIn, ZoomOut } from "lucide-react";
-import { save, message } from "@tauri-apps/plugin-dialog";
+import { save, message, ask } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { usePdfStore } from "../store/usePdfStore";
 import type { DisplayMode } from "../store/usePdfStore";
@@ -7,6 +7,8 @@ import { ZOOM_PRESETS } from "../utils/zoomConstants";
 
 interface TextExportResult {
   pages: number;
+  ocrPages: number;
+  cancelled: boolean;
 }
 
 interface ToolbarProps {
@@ -27,6 +29,7 @@ export function Toolbar({ onOpenFile, onPrint }: ToolbarProps) {
     s.tabs.find((t) => t.id === s.activeTabId),
   );
   const updateTab = usePdfStore((s) => s.updateTab);
+  const setExportProgress = usePdfStore((s) => s.setExportProgress);
 
   const handlePrevPage = () => {
     if (!activeTab || activeTab.currentPage <= 1) return;
@@ -91,17 +94,52 @@ export function Toolbar({ onOpenFile, onPrint }: ToolbarProps) {
       defaultPath: `${dir}/${baseName}.txt`,
     });
     if (!destPath) return;
+
+    // Offer OCR only when there are pages with no text layer (likely scans).
+    let useOcr = false;
+    try {
+      const missing = await invoke<number>("count_pages_without_text", {
+        docId: activeTab.docId,
+      });
+      if (missing > 0) {
+        useOcr = await ask(
+          `${missing} page${missing === 1 ? " has" : "s have"} no text layer ` +
+            `and may be scanned images.\n\nRun OCR on ${
+              missing === 1 ? "it" : "them"
+            } so the exported text includes their content? ` +
+            `This takes roughly 1–3 seconds per page.`,
+          { title: "Export Text", kind: "info" },
+        );
+      }
+    } catch (err) {
+      await message(String(err), { title: "Export Failed", kind: "error" });
+      return;
+    }
+
+    // Show the progress overlay only when OCR (the slow path) will run.
+    if (useOcr) {
+      setExportProgress({ page: 0, total: activeTab.pageCount });
+    }
     try {
       const result = await invoke<TextExportResult>("export_text", {
         docId: activeTab.docId,
         destPath,
+        useOcr,
       });
-      await message(`Exported ${result.pages} pages.`, {
-        title: "Export Complete",
-        kind: "info",
-      });
+      if (result.cancelled) {
+        await message("Export cancelled.", { title: "Export Text", kind: "info" });
+      } else {
+        const ocrNote =
+          result.ocrPages > 0 ? ` (${result.ocrPages} via OCR)` : "";
+        await message(`Exported ${result.pages} pages${ocrNote}.`, {
+          title: "Export Complete",
+          kind: "info",
+        });
+      }
     } catch (err) {
       await message(String(err), { title: "Export Failed", kind: "error" });
+    } finally {
+      setExportProgress(null);
     }
   };
 

@@ -18,6 +18,7 @@ Built with Tauri v2
   Ctrl+scroll)
 - Native Windows printing at printer-native resolution, with in-progress cancellation
 - Text layer with copy-to-clipboard and full-document search
+- OCR for scanned pages — make image-only pages searchable and selectable
 - Export all page text to a `.txt` file
 - Thumbnail sidebar for quick page navigation
 - Document metadata viewing and editing
@@ -28,11 +29,32 @@ Built with Tauri v2
 
 ## UI
 
+### Search
+
+Click the **magnifying-glass icon** in the left rail to open the search panel. Type a query — search runs as you type (300 ms debounce) across the whole document, listing every page that has a hit with its match count and jumping to the first result. Step through matches with **Enter / Shift+Enter** (or the up/down arrows); each match is highlighted on the page.
+
+**OCR for scans:** search reads the PDF's text layer, so a scanned, image-only page has nothing to match. When a search returns no results, an inline prompt appears for the page you're currently viewing:
+
+> Page *N* may be a scan with no text.
+> **[ Run OCR on this page ]**
+
+Click it to recognize text on that page — roughly 1–3 seconds (the page is rendered at 300 DPI and handed to the Windows OCR engine). The search then re-runs automatically, so any matches now show up in the results, and the recognized words also become selectable/copyable in the text layer.
+
+Results are cached for the rest of the session, so re-searching that page is instant and the prompt won't reappear for a page you've already processed. Nothing is written to the PDF file — this OCR text lives only inside Tumbler. (To bake recognized text into the exported file, see **Export Text** below.)
+
+**Requirements:** OCR uses the engine built into Windows 10/11, which needs a language pack installed. If none is available you'll see:
+
+> OCR failed: OCR is not available — install an OCR language pack in Windows Settings → Time & Language → Language.
+
+Add one under **Settings → Time & Language → Language → (your language) → Language options → Optional features**.
+
 ### Export Text
 
 Click the **scroll icon** in the toolbar (left of the print button) to export the document's text layer to a `.txt` file.
 
-A save dialog opens defaulting to the same folder as the source PDF. Each page is written with a `--- Page N ---` header. Pages with no text layer (scanned images) get a `[no extractable text]` placeholder so every page is accounted for. A confirmation shows the number of pages exported when done.
+A save dialog opens defaulting to the same folder as the source PDF. Each page is written with a `--- Page N ---` header.
+
+**OCR for scanned pages:** if the document has pages with no text layer (likely scans), after you choose the destination Tumbler asks whether to run OCR on those pages so their recognized text is included in the export. (OCR takes ~1–3s per page, so a progress overlay with a **Cancel** button appears while it runs.) Pages where OCR still finds nothing — and all text-less pages when you decline OCR — get a `[no extractable text]` placeholder so every page is accounted for. OCR results are also cached, so search and copy light up for those pages afterward. A confirmation shows the number of pages exported (and how many came from OCR) when done.
 
 ### Page operations
 
@@ -89,7 +111,8 @@ rust-tumbler/
 │   │   ├── commands/
 │   │   │   ├── document.rs       # open/close document
 │   │   │   ├── render.rs         # page rendering
-│   │   │   ├── text.rs           # text extraction + search
+│   │   │   ├── text.rs           # text extraction + search (with OCR fallback)
+│   │   │   ├── ocr.rs            # OCR via Windows.Media.Ocr (Make Searchable)
 │   │   │   ├── metadata.rs       # metadata read/write (lopdf)
 │   │   │   ├── pages.rs          # page operations (delete/rotate/reorder/merge/split)
 │   │   │   ├── print.rs          # native printing (GDI)
@@ -125,7 +148,9 @@ Planned enhancements:
 
 - **Form Filling** — Enumerate form fields via pdfium's form API, render
   interactive overlays, and save filled forms.
-- **OCR** - Enables Search and Copy
+- **OCR — Save Searchable Copy** — Persist recognized text as an invisible
+  layer so the OCR'd document is searchable in any PDF reader (the in-app
+  ephemeral OCR above already ships).
 - **Web Optimization** - Compress, Linearize
  
 

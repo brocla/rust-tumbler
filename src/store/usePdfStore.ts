@@ -55,11 +55,17 @@ interface PdfStore {
   // Global state
   activeSidebarTool: "thumbnails" | "search" | "metadata" | "pages" | null;
   sidebarWidth: number;
+  // Progress of an in-flight "Export Text" run (driven by Tauri
+  // `export-progress` events). Null when no export is running. Shared here so
+  // the Toolbar (which triggers export) and App (which renders the overlay)
+  // can both reach it.
+  exportProgress: { page: number; total: number } | null;
 
   // Actions
   setActiveTab: (id: string) => void;
   setSidebarTool: (tool: PdfStore["activeSidebarTool"]) => void;
   setSidebarWidth: (width: number) => void;
+  setExportProgress: (progress: { page: number; total: number } | null) => void;
 
   addTab: (tab: TabState) => void;
   removeTab: (id: string) => void;
@@ -78,8 +84,11 @@ export const usePdfStore = create<PdfStore>((set, get) => ({
   activeTabId: null,
   activeSidebarTool: "thumbnails",
   sidebarWidth: 250,
+  exportProgress: null,
 
   setActiveTab: (id) => set({ activeTabId: id }),
+
+  setExportProgress: (progress) => set({ exportProgress: progress }),
 
   setSidebarTool: (tool) =>
     set((state) => ({

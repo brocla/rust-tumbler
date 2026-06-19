@@ -36,4 +36,11 @@ windows = { version = "0.61", features = [
     "Win32_System_WinRT",
     "Win32_UI_Controls_Dialogs",
     "UI_ViewManagement",
+    # OCR via Windows.Media.Ocr (see commands/ocr.rs)
+    "Foundation",
+    "Foundation_Collections",
+    "Globalization",
+    "Media_Ocr",
+    "Graphics_Imaging",
+    "Storage_Streams",
 ] }
