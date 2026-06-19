@@ -27,8 +27,8 @@ interface AccentColors {
 function App() {
   const addTab = usePdfStore((s) => s.addTab);
   const updateTab = usePdfStore((s) => s.updateTab);
-  const exportProgress = usePdfStore((s) => s.exportProgress);
-  const setExportProgress = usePdfStore((s) => s.setExportProgress);
+  const ocrProgress = usePdfStore((s) => s.ocrProgress);
+  const setOcrProgress = usePdfStore((s) => s.setOcrProgress);
   const openFileRef = useRef<() => Promise<void>>();
   const printRef = useRef<() => Promise<void>>();
   const [printProgress, setPrintProgress] = useState<{ page: number; total: number } | null>(null);
@@ -59,6 +59,7 @@ function App() {
         pagesVersion: 0,
         contentEpoch: 0,
         sidebarScrollPage: 1,
+        ocrEpoch: 0,
       });
     } catch (err) {
       await message(String(err), { title: "Failed to Open PDF", kind: "error" });
@@ -141,10 +142,10 @@ function App() {
     return () => { unlisten.then((f) => f()); };
   }, []);
 
-  // Listen for text-export (OCR) progress events from Rust
+  // Listen for document-wide OCR progress (Make Searchable / Export Text)
   useEffect(() => {
-    const unlisten = listen<{ page: number; total: number }>("export-progress", (event) => {
-      setExportProgress(event.payload);
+    const unlisten = listen<{ page: number; total: number }>("ocr-progress", (event) => {
+      setOcrProgress(event.payload);
     });
     return () => { unlisten.then((f) => f()); };
   }, []);
@@ -296,15 +297,15 @@ function App() {
           </div>
         </div>
       )}
-      {exportProgress && (
+      {ocrProgress && (
         <div className="print-progress-overlay">
           <div className="print-progress-dialog">
             <p>
-              {exportProgress.page === 0
+              {ocrProgress.page === 0
                 ? "Preparing OCR..."
-                : `OCR page ${exportProgress.page} of ${exportProgress.total}...`}
+                : `OCR page ${ocrProgress.page} of ${ocrProgress.total}...`}
             </p>
-            <button onClick={() => void invoke("cancel_export_text")}>Cancel</button>
+            <button onClick={() => void invoke("cancel_ocr")}>Cancel</button>
           </div>
         </div>
       )}

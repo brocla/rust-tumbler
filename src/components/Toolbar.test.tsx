@@ -34,6 +34,7 @@ function makeTab(overrides: Partial<TabState> = {}): TabState {
     pagesVersion: 0,
     contentEpoch: 0,
     sidebarScrollPage: 1,
+    ocrEpoch: 0,
     ...overrides,
   };
 }
@@ -42,7 +43,7 @@ function renderToolbar() {
   usePdfStore.setState({
     tabs: [makeTab()],
     activeTabId: "tab-1",
-    exportProgress: null,
+    ocrProgress: null,
   });
   return render(<Toolbar onOpenFile={vi.fn()} onPrint={vi.fn()} />);
 }
@@ -50,6 +51,13 @@ function renderToolbar() {
 async function clickExport() {
   await act(async () => {
     fireEvent.click(screen.getByTitle("Export Text..."));
+    await new Promise((r) => setTimeout(r, 0));
+  });
+}
+
+async function clickMakeSearchable() {
+  await act(async () => {
+    fireEvent.click(screen.getByTitle("OCR - Make Text Searchable"));
     await new Promise((r) => setTimeout(r, 0));
   });
 }
@@ -129,5 +137,50 @@ describe("Toolbar export text", () => {
       destPath: "C:\\out.txt",
       useOcr: false,
     });
+  });
+});
+
+describe("Toolbar make searchable", () => {
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset();
+    vi.mocked(message).mockReset();
+    vi.mocked(message).mockResolvedValue(undefined as never);
+  });
+
+  it("OCRs the document and bumps ocrEpoch when pages lack text", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === "count_pages_without_text") return Promise.resolve(2);
+      if (cmd === "ocr_document")
+        return Promise.resolve({ pagesOcred: 2, cancelled: false });
+      return Promise.resolve(undefined);
+    });
+
+    renderToolbar();
+    await clickMakeSearchable();
+
+    expect(invoke).toHaveBeenCalledWith("ocr_document", { docId: "doc-1" });
+    expect(message).toHaveBeenCalledWith(
+      expect.stringContaining("Made 2 pages searchable"),
+      expect.objectContaining({ title: "Make Searchable" }),
+    );
+    // Text overlay refresh signal bumped.
+    expect(usePdfStore.getState().tabs[0].ocrEpoch).toBe(1);
+  });
+
+  it("does nothing but inform when every page already has text", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === "count_pages_without_text") return Promise.resolve(0);
+      return Promise.resolve(undefined);
+    });
+
+    renderToolbar();
+    await clickMakeSearchable();
+
+    expect(invoke).not.toHaveBeenCalledWith("ocr_document", expect.anything());
+    expect(message).toHaveBeenCalledWith(
+      expect.stringContaining("already has a text layer"),
+      expect.objectContaining({ title: "Make Searchable" }),
+    );
+    expect(usePdfStore.getState().tabs[0].ocrEpoch).toBe(0);
   });
 });

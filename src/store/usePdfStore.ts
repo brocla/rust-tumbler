@@ -31,6 +31,10 @@ export interface TabState {
   // slots repaint from the (relabeled) cache instead of blanking.
   contentEpoch: number;
   sidebarScrollPage: number;
+  // Bumped when OCR populates the cache for this doc (per-page via Search, or
+  // whole-doc via "Make Searchable"), so the text overlay re-fetches and the
+  // newly-recognized pages become selectable/copyable.
+  ocrEpoch: number;
 }
 
 /**
@@ -55,17 +59,17 @@ interface PdfStore {
   // Global state
   activeSidebarTool: "thumbnails" | "search" | "metadata" | "pages" | null;
   sidebarWidth: number;
-  // Progress of an in-flight "Export Text" run (driven by Tauri
-  // `export-progress` events). Null when no export is running. Shared here so
-  // the Toolbar (which triggers export) and App (which renders the overlay)
-  // can both reach it.
-  exportProgress: { page: number; total: number } | null;
+  // Progress of an in-flight document-wide OCR run — "Make Searchable" or
+  // Export Text's OCR pass (driven by Tauri `ocr-progress` events). Null when
+  // none is running. Shared here so the Toolbar (which triggers the run) and
+  // App (which renders the overlay) can both reach it.
+  ocrProgress: { page: number; total: number } | null;
 
   // Actions
   setActiveTab: (id: string) => void;
   setSidebarTool: (tool: PdfStore["activeSidebarTool"]) => void;
   setSidebarWidth: (width: number) => void;
-  setExportProgress: (progress: { page: number; total: number } | null) => void;
+  setOcrProgress: (progress: { page: number; total: number } | null) => void;
 
   addTab: (tab: TabState) => void;
   removeTab: (id: string) => void;
@@ -84,11 +88,11 @@ export const usePdfStore = create<PdfStore>((set, get) => ({
   activeTabId: null,
   activeSidebarTool: "thumbnails",
   sidebarWidth: 250,
-  exportProgress: null,
+  ocrProgress: null,
 
   setActiveTab: (id) => set({ activeTabId: id }),
 
-  setExportProgress: (progress) => set({ exportProgress: progress }),
+  setOcrProgress: (progress) => set({ ocrProgress: progress }),
 
   setSidebarTool: (tool) =>
     set((state) => ({

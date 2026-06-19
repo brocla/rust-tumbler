@@ -1,11 +1,12 @@
 use crate::error::AppError;
-use crate::state::{lock_mutex, AppState};
+use crate::state::{lock_mutex, AppState, DocEntry};
 use crate::commands::text::TextRect;
 use pdfium_render::prelude::*;
 use serde::Serialize;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use tauri::State;
+use tauri::{Emitter, State, WebviewWindow};
 
 /// Recognized words per `(doc_id, page_1based)`, shared (`Arc`) so a blocking
 /// task that can't borrow `&AppState` (e.g. text export) can still read/write it.
@@ -136,13 +137,24 @@ pub fn cache_set(cache: &OcrCache, doc_id: &str, page: u32, words: Vec<OcrWord>)
     }
 }
 
-/// Reconstructs readable text from recognized words for text export. Words are
-/// in PDF user space (origin bottom-left), so a larger `y` sits higher on the
-/// page. Groups words into lines by vertical proximity, orders lines top→bottom
-/// and words left→right, joining words with spaces and lines with `\n`.
-pub fn ocr_words_to_text(words: &[OcrWord]) -> String {
+/// One reconstructed line of OCR text plus its bounding box (PDF user space,
+/// origin bottom-left). Used to build line-level `TextItem`s for the
+/// selectable text overlay and to serialize export text. Note the *cache*
+/// stays per-word (`OcrWord`) — line grouping is a presentation concern, while
+/// per-word boxes are what a future persisted `Tr 3` text layer needs.
+#[derive(Clone)]
+pub struct OcrLine {
+    pub text: String,
+    pub rect: TextRect,
+}
+
+/// Groups recognized words into visual lines. Words are in PDF user space
+/// (origin bottom-left), so a larger `y` sits higher on the page. Lines are
+/// ordered top→bottom, words within a line left→right; each line's text joins
+/// its words with single spaces and its rect is the union of their boxes.
+pub fn ocr_words_to_lines(words: &[OcrWord]) -> Vec<OcrLine> {
     if words.is_empty() {
-        return String::new();
+        return Vec::new();
     }
 
     // Top-to-bottom (descending y), then left-to-right (ascending x), so words
@@ -161,22 +173,22 @@ pub fn ocr_words_to_text(words: &[OcrWord]) -> String {
             )
     });
 
-    let mut lines: Vec<Vec<&OcrWord>> = Vec::new();
+    let mut groups: Vec<Vec<&OcrWord>> = Vec::new();
     for word in sorted {
         // Same line if its baseline is within half a line-height of the line's
         // first (topmost) word.
-        let on_current = lines.last().and_then(|l| l.first()).is_some_and(|first| {
+        let on_current = groups.last().and_then(|l| l.first()).is_some_and(|first| {
             let tol = first.rect.height.max(word.rect.height) * 0.5;
             (first.rect.y - word.rect.y).abs() <= tol
         });
         if on_current {
-            lines.last_mut().unwrap().push(word);
+            groups.last_mut().unwrap().push(word);
         } else {
-            lines.push(vec![word]);
+            groups.push(vec![word]);
         }
     }
 
-    lines
+    groups
         .into_iter()
         .map(|mut line| {
             line.sort_by(|a, b| {
@@ -185,11 +197,40 @@ pub fn ocr_words_to_text(words: &[OcrWord]) -> String {
                     .partial_cmp(&b.rect.x)
                     .unwrap_or(std::cmp::Ordering::Equal)
             });
-            line.iter()
+            let text = line
+                .iter()
                 .map(|w| w.text.as_str())
                 .collect::<Vec<_>>()
-                .join(" ")
+                .join(" ");
+            let left = line.iter().map(|w| w.rect.x).fold(f32::INFINITY, f32::min);
+            let right = line
+                .iter()
+                .map(|w| w.rect.x + w.rect.width)
+                .fold(f32::NEG_INFINITY, f32::max);
+            let bottom = line.iter().map(|w| w.rect.y).fold(f32::INFINITY, f32::min);
+            let top = line
+                .iter()
+                .map(|w| w.rect.y + w.rect.height)
+                .fold(f32::NEG_INFINITY, f32::max);
+            OcrLine {
+                text,
+                rect: TextRect {
+                    x: left,
+                    y: bottom,
+                    width: right - left,
+                    height: top - bottom,
+                },
+            }
         })
+        .collect()
+}
+
+/// Reconstructs readable text from recognized words for text export: line
+/// texts joined with `\n`, top to bottom.
+pub fn ocr_words_to_text(words: &[OcrWord]) -> String {
+    ocr_words_to_lines(words)
+        .into_iter()
+        .map(|line| line.text)
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -204,26 +245,149 @@ pub fn ocr_page(
 }
 
 fn ocr_page_impl(state: &AppState, doc_id: String, page: u32) -> Result<Vec<OcrWord>, AppError> {
-    // 1. Serve from cache so a re-run (or search/extract fallback) is instant.
-    if let Some(cached) = state.get_ocr_words(&doc_id, page) {
+    let entry = state.get_document(&doc_id)?;
+    ocr_page_into_cache(
+        &entry,
+        &doc_id,
+        page,
+        &state.ocr_engine,
+        &state.ocr_cache_handle(),
+    )
+}
+
+/// Recognizes one page into the OCR cache (or returns the already-cached
+/// words). Takes the engine and cache explicitly rather than `&AppState` so it
+/// can run inside a blocking task — shared by `ocr_page`, the document-level
+/// "Make Searchable" action, and (eventually) "Save Searchable Copy".
+///
+/// The doc lock is held only to rasterize the page; the multi-second
+/// `recognize` call runs after it's released.
+pub fn ocr_page_into_cache(
+    entry: &Arc<Mutex<DocEntry>>,
+    doc_id: &str,
+    page: u32,
+    engine: &Arc<dyn OcrEngine>,
+    cache: &OcrCache,
+) -> Result<Vec<OcrWord>, AppError> {
+    if let Some(cached) = cache_get(cache, doc_id, page) {
         return Ok(cached);
     }
 
-    // 2. Rasterize the page at OCR DPI. The doc lock is dropped before the OCR
-    //    call, which spawns its own thread and can run for seconds.
-    let entry = state.get_document(&doc_id)?;
     let (rgba, bmp_w, bmp_h, page_w, page_h) = {
-        let entry = lock_mutex(&entry)?;
+        let entry = lock_mutex(entry)?;
         render_page_for_ocr(&entry.document, page)?
     };
 
-    // 3. Recognize, then map pixel coords → PDF points.
-    let raw_words = state.ocr_engine.recognize(&rgba, bmp_w, bmp_h)?;
+    let raw_words = engine.recognize(&rgba, bmp_w, bmp_h)?;
     let words = map_words(raw_words, bmp_w, bmp_h, page_w, page_h);
 
-    // 4. Cache for subsequent searches/extractions of this page.
-    state.set_ocr_words(&doc_id, page, words.clone());
+    cache_set(cache, doc_id, page, words.clone());
     Ok(words)
+}
+
+/// Per-page progress for any document-wide OCR run (Make Searchable, and the
+/// OCR pass of Export Text). Emitted on the `ocr-progress` event.
+#[derive(Serialize, Clone)]
+pub struct OcrProgress {
+    pub page: u32,
+    pub total: u32,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OcrDocumentResult {
+    /// Text-less pages on which OCR produced recognized words this run.
+    pub pages_ocred: u32,
+    pub cancelled: bool,
+}
+
+/// Document-level "Make Searchable": OCRs every page with no native text layer
+/// into the cache, so search, selection/copy, and a later export all benefit.
+/// Nothing is written to disk — this is the ephemeral tier.
+#[tauri::command]
+pub async fn ocr_document(
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+    doc_id: String,
+) -> Result<OcrDocumentResult, String> {
+    let entry = state.get_document(&doc_id).map_err(String::from)?;
+    let engine = state.ocr_engine.clone();
+    let cache = state.ocr_cache_handle();
+    let cancel = Arc::new(AtomicBool::new(false));
+    state.set_ocr_job(cancel.clone());
+
+    let emit = move |page, total| {
+        let _ = window.emit("ocr-progress", OcrProgress { page, total });
+    };
+
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        ocr_document_impl(emit, entry, doc_id, engine, cache, cancel)
+    })
+    .await
+    .map_err(|e| e.to_string());
+
+    state.take_ocr_job();
+    result?.map_err(String::from)
+}
+
+fn ocr_document_impl(
+    emit_progress: impl Fn(u32, u32),
+    entry: Arc<Mutex<DocEntry>>,
+    doc_id: String,
+    engine: Arc<dyn OcrEngine>,
+    cache: OcrCache,
+    cancel: Arc<AtomicBool>,
+) -> Result<OcrDocumentResult, AppError> {
+    let page_count = lock_mutex(&entry)?.document.pages().len() as u32;
+    let mut pages_ocred = 0u32;
+
+    for i in 0..page_count {
+        let page_num = i + 1;
+
+        if cancel.load(Ordering::Relaxed) {
+            return Ok(OcrDocumentResult {
+                pages_ocred,
+                cancelled: true,
+            });
+        }
+        emit_progress(page_num, page_count);
+
+        // Skip pages that already have a native text layer — only scans need OCR.
+        let native_empty = {
+            let entry = lock_mutex(&entry)?;
+            let page = entry
+                .document
+                .pages()
+                .get(i as i32)
+                .map_err(|e| AppError::pdfium(format!("Failed to get page {page_num}"), e))?;
+            page.text()
+                .map(|t| t.all())
+                .unwrap_or_default()
+                .trim()
+                .is_empty()
+        };
+        if !native_empty {
+            continue;
+        }
+
+        let words = ocr_page_into_cache(&entry, &doc_id, page_num, &engine, &cache)?;
+        if !words.is_empty() {
+            pages_ocred += 1;
+        }
+    }
+
+    Ok(OcrDocumentResult {
+        pages_ocred,
+        cancelled: false,
+    })
+}
+
+/// Signals an in-progress document-wide OCR run (Make Searchable or Export
+/// Text's OCR pass) to stop after the current page.
+#[tauri::command]
+pub fn cancel_ocr(state: State<'_, AppState>) -> Result<(), String> {
+    state.cancel_ocr_job();
+    Ok(())
 }
 
 // ── WindowsOcrEngine (WinRT) ────────────────────────────────────────────────
@@ -453,6 +617,94 @@ mod tests {
         // Same visual line: baselines differ by less than half the line height.
         let words = vec![pt_word("a", 10.0, 100.0), pt_word("b", 50.0, 103.0)];
         assert_eq!(ocr_words_to_text(&words), "a b");
+    }
+
+    #[test]
+    fn ocr_words_to_lines_unions_word_boxes_per_line() {
+        // One line, two words: "Hello" at x=10 (w=30) and "World" at x=50 (w=30).
+        let lines = ocr_words_to_lines(&[pt_word("World", 50.0, 100.0), pt_word("Hello", 10.0, 100.0)]);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].text, "Hello World");
+        // Bounding box spans x=10..80 (left of first word to right of last).
+        assert!((lines[0].rect.x - 10.0).abs() < 0.01, "x: {}", lines[0].rect.x);
+        assert!((lines[0].rect.width - 70.0).abs() < 0.01, "w: {}", lines[0].rect.width);
+    }
+
+    fn open_blank_doc(state: &AppState, doc_id: &str, pages: u32) {
+        let pdfium = crate::test_pdfium();
+        let mut doc = pdfium.create_new_pdf().expect("create pdf");
+        for i in 0..pages {
+            doc.pages_mut()
+                .create_page_at_index(
+                    PdfPagePaperSize::new_custom(PdfPoints::new(200.0), PdfPoints::new(200.0)),
+                    i as PdfPageIndex,
+                )
+                .expect("create blank page");
+        }
+        state
+            .insert_document(
+                doc_id.to_string(),
+                DocEntry {
+                    document: doc,
+                    file_path: format!("{doc_id}.pdf"),
+                },
+            )
+            .expect("insert");
+    }
+
+    fn no_progress(_page: u32, _total: u32) {}
+
+    /// "Make Searchable" OCRs every text-less page into the cache.
+    #[test]
+    fn ocr_document_ocrs_blank_pages_into_cache() {
+        let _guard = crate::test_pdfium_guard();
+        let pdfium = crate::test_pdfium();
+        let fake: Arc<dyn OcrEngine> = Arc::new(FakeOcrEngine {
+            words: vec![word("scanned")],
+            call_count: AtomicUsize::new(0),
+        });
+        let state = AppState::new(pdfium, None).with_ocr_engine(fake);
+        open_blank_doc(&state, "blank", 2);
+
+        let entry = state.get_document("blank").expect("get");
+        let cache = state.ocr_cache_handle();
+        let result = ocr_document_impl(
+            no_progress,
+            entry,
+            "blank".to_string(),
+            state.ocr_engine.clone(),
+            cache.clone(),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .expect("ocr document");
+
+        assert_eq!(result.pages_ocred, 2);
+        assert!(!result.cancelled);
+        assert!(cache_get(&cache, "blank", 1).is_some());
+        assert!(cache_get(&cache, "blank", 2).is_some());
+    }
+
+    /// A pre-set cancel token stops the run before any page is processed.
+    #[test]
+    fn ocr_document_honors_cancellation() {
+        let _guard = crate::test_pdfium_guard();
+        let pdfium = crate::test_pdfium();
+        let state = AppState::new(pdfium, None);
+        open_blank_doc(&state, "blank", 3);
+
+        let entry = state.get_document("blank").expect("get");
+        let result = ocr_document_impl(
+            no_progress,
+            entry,
+            "blank".to_string(),
+            state.ocr_engine.clone(),
+            state.ocr_cache_handle(),
+            Arc::new(AtomicBool::new(true)),
+        )
+        .expect("ocr document");
+
+        assert!(result.cancelled);
+        assert_eq!(result.pages_ocred, 0);
     }
 
     /// First `ocr_page` runs the engine and caches the result; the second call

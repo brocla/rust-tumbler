@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { groupIntoLines } from "../utils/textSelection";
+import { usePdfStore } from "../store/usePdfStore";
 
 interface TextItem {
   text: string;
@@ -40,6 +41,11 @@ export function TextLayer({
   zoom,
 }: TextLayerProps) {
   const [textItems, setTextItems] = useState<TextItem[]>([]);
+  // Re-fetch when OCR populates the cache for this doc, so a scanned page's
+  // newly-recognized text becomes selectable without a remount.
+  const ocrEpoch = usePdfStore(
+    (s) => s.tabs.find((t) => t.docId === docId)?.ocrEpoch ?? 0,
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -59,7 +65,7 @@ export function TextLayer({
     return () => {
       cancelled = true;
     };
-  }, [docId, pageNumber]);
+  }, [docId, pageNumber, ocrEpoch]);
 
   const scale = zoom / 100;
 

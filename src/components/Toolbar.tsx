@@ -1,4 +1,4 @@
-import { BookOpen, ChevronLeft, ChevronRight, Moon, Printer, ScrollText, Sun, ZoomIn, ZoomOut } from "lucide-react";
+import { BookOpen, ChevronLeft, ChevronRight, Moon, Printer, ScanSearch, ScrollText, Sun, ZoomIn, ZoomOut } from "lucide-react";
 import { save, message, ask } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { usePdfStore } from "../store/usePdfStore";
@@ -29,7 +29,7 @@ export function Toolbar({ onOpenFile, onPrint }: ToolbarProps) {
     s.tabs.find((t) => t.id === s.activeTabId),
   );
   const updateTab = usePdfStore((s) => s.updateTab);
-  const setExportProgress = usePdfStore((s) => s.setExportProgress);
+  const setOcrProgress = usePdfStore((s) => s.setOcrProgress);
 
   const handlePrevPage = () => {
     if (!activeTab || activeTab.currentPage <= 1) return;
@@ -118,7 +118,7 @@ export function Toolbar({ onOpenFile, onPrint }: ToolbarProps) {
 
     // Show the progress overlay only when OCR (the slow path) will run.
     if (useOcr) {
-      setExportProgress({ page: 0, total: activeTab.pageCount });
+      setOcrProgress({ page: 0, total: activeTab.pageCount });
     }
     try {
       const result = await invoke<TextExportResult>("export_text", {
@@ -139,7 +139,59 @@ export function Toolbar({ onOpenFile, onPrint }: ToolbarProps) {
     } catch (err) {
       await message(String(err), { title: "Export Failed", kind: "error" });
     } finally {
-      setExportProgress(null);
+      setOcrProgress(null);
+    }
+  };
+
+  // Document-level "Make Searchable": OCR every page that has no text layer so
+  // search, selection/copy, and a later text export all work on scanned pages.
+  const handleMakeSearchable = async () => {
+    if (!activeTab) return;
+
+    let missing = 0;
+    try {
+      missing = await invoke<number>("count_pages_without_text", {
+        docId: activeTab.docId,
+      });
+    } catch (err) {
+      await message(String(err), { title: "Make Searchable", kind: "error" });
+      return;
+    }
+    if (missing === 0) {
+      await message("Every page already has a text layer — nothing to OCR.", {
+        title: "Make Searchable",
+        kind: "info",
+      });
+      return;
+    }
+
+    setOcrProgress({ page: 0, total: activeTab.pageCount });
+    try {
+      const result = await invoke<{ pagesOcred: number; cancelled: boolean }>(
+        "ocr_document",
+        { docId: activeTab.docId },
+      );
+      // Refresh the text overlay so the newly-recognized pages are selectable.
+      updateTab(activeTab.id, { ocrEpoch: activeTab.ocrEpoch + 1 });
+      if (result.cancelled) {
+        await message(
+          `Cancelled after making ${result.pagesOcred} page${
+            result.pagesOcred === 1 ? "" : "s"
+          } searchable.`,
+          { title: "Make Searchable", kind: "info" },
+        );
+      } else {
+        await message(
+          `Made ${result.pagesOcred} page${
+            result.pagesOcred === 1 ? "" : "s"
+          } searchable. You can now search, select, and copy their text.`,
+          { title: "Make Searchable", kind: "info" },
+        );
+      }
+    } catch (err) {
+      await message(String(err), { title: "Make Searchable", kind: "error" });
+    } finally {
+      setOcrProgress(null);
     }
   };
 
@@ -232,6 +284,13 @@ export function Toolbar({ onOpenFile, onPrint }: ToolbarProps) {
           })()}
 
           <div className="toolbar-separator" />
+          <button
+            className="toolbar-button"
+            onClick={handleMakeSearchable}
+            title="OCR - Make Text Searchable"
+          >
+            <ScanSearch size={18} />
+          </button>
           <button
             className="toolbar-button"
             onClick={handleExportText}

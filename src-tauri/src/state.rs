@@ -15,7 +15,10 @@ pub struct AppState {
     documents: Mutex<HashMap<String, Arc<Mutex<DocEntry>>>>,
     pub startup_file: Mutex<Option<String>>,
     print_job: Mutex<Option<Arc<AtomicBool>>>,
-    export_job: Mutex<Option<Arc<AtomicBool>>>,
+    /// Cancel token for the current document-wide OCR run, shared by the
+    /// "Make Searchable" action and Export Text's OCR pass (only one runs at a
+    /// time — both are modal).
+    ocr_job: Mutex<Option<Arc<AtomicBool>>>,
     /// OCR backend behind a trait seam so tests can inject a fake (the real
     /// `WindowsOcrEngine` needs a WinRT language pack). See `commands::ocr`.
     pub ocr_engine: Arc<dyn OcrEngine>,
@@ -33,7 +36,7 @@ impl AppState {
             documents: Mutex::new(HashMap::new()),
             startup_file: Mutex::new(startup_file),
             print_job: Mutex::new(None),
-            export_job: Mutex::new(None),
+            ocr_job: Mutex::new(None),
             ocr_engine: Arc::new(WindowsOcrEngine::new()),
             ocr_cache: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -71,18 +74,18 @@ impl AppState {
         }
     }
 
-    pub fn set_export_job(&self, token: Arc<AtomicBool>) {
-        if let Ok(mut guard) = self.export_job.lock() {
+    pub fn set_ocr_job(&self, token: Arc<AtomicBool>) {
+        if let Ok(mut guard) = self.ocr_job.lock() {
             *guard = Some(token);
         }
     }
 
-    pub fn take_export_job(&self) -> Option<Arc<AtomicBool>> {
-        self.export_job.lock().ok()?.take()
+    pub fn take_ocr_job(&self) -> Option<Arc<AtomicBool>> {
+        self.ocr_job.lock().ok()?.take()
     }
 
-    pub fn cancel_export_job(&self) {
-        if let Ok(guard) = self.export_job.lock() {
+    pub fn cancel_ocr_job(&self) {
+        if let Ok(guard) = self.ocr_job.lock() {
             if let Some(token) = guard.as_ref() {
                 token.store(true, Ordering::Relaxed);
             }

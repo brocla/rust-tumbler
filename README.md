@@ -18,7 +18,7 @@ Built with Tauri v2
   Ctrl+scroll)
 - Native Windows printing at printer-native resolution, with in-progress cancellation
 - Text layer with copy-to-clipboard and full-document search
-- OCR for scanned pages — make image-only pages searchable and selectable
+- OCR for scanned pages — make image-only pages searchable, selectable, and copyable (per page or whole-document)
 - Export all page text to a `.txt` file
 - Thumbnail sidebar for quick page navigation
 - Document metadata viewing and editing
@@ -47,6 +47,14 @@ Results are cached for the rest of the session, so re-searching that page is ins
 > OCR failed: OCR is not available — install an OCR language pack in Windows Settings → Time & Language → Language.
 
 Add one under **Settings → Time & Language → Language → (your language) → Language options → Optional features**.
+
+### Make Searchable (whole document)
+
+The per-page prompt above handles one scan at a time. To OCR an entire scanned document at once, click the **Make Text Searchable** button (scan-with-magnifier icon) in the toolbar, left of the Export Text button. Tumbler first checks how many pages lack a text layer; if there are none it says so and stops, otherwise it OCRs every text-less page, showing the same **OCR page X of Y** progress overlay with a **Cancel** button.
+
+Once a document has been made searchable, Export Text reuses those cached results — so it won't prompt you to run OCR again, and the exported `.txt` includes the recognized text automatically.
+
+When it finishes, those pages are searchable, and their text is selectable and copyable directly on the page — drag to select, then Ctrl+C (copied text preserves line breaks). As with per-page OCR this is in-app only and cached for the session; nothing is written to the PDF until you use Export Text or (in a future release) save a searchable copy.
 
 ### Export Text
 
@@ -86,7 +94,7 @@ All operations save the document immediately and reload every open tab that shar
 rust-tumbler/
 ├── src/                          # React frontend
 │   ├── components/
-│   │   ├── Toolbar.tsx           # Navigation, zoom, print, export text, display mode
+│   │   ├── Toolbar.tsx           # Navigation, zoom, print, make searchable, export text, display mode
 │   │   ├── TabBar.tsx            # Multi-document tabs
 │   │   ├── IconRail.tsx          # Sidebar tool switcher
 │   │   ├── Sidebar.tsx           # Tab container for panels

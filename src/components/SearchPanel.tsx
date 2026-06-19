@@ -83,13 +83,15 @@ export function SearchPanel() {
       // re-run search below can find matches via its OCR fallback.
       await invoke("ocr_page", { docId, page: currentPage });
       setOcrDonePages((prev) => new Set(prev).add(currentPage));
+      // Refresh the text overlay so the recognized words are selectable/copyable.
+      if (activeTab) updateTab(tabId, { ocrEpoch: activeTab.ocrEpoch + 1 });
       await doSearch(query);
     } catch (err) {
       setOcrError(String(err));
     } finally {
       setOcrRunning(false);
     }
-  }, [docId, query, currentPage, doSearch]);
+  }, [docId, query, currentPage, doSearch, activeTab, tabId, updateTab]);
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const val = e.target.value;

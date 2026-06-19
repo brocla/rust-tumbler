@@ -30,6 +30,7 @@ function makeTab(overrides: Partial<TabState> = {}): TabState {
     pagesVersion: 0,
     contentEpoch: 0,
     sidebarScrollPage: 1,
+    ocrEpoch: 0,
     ...overrides,
   };
 }
