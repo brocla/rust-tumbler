@@ -8,7 +8,7 @@ import { IconRail } from "./components/IconRail";
 import { Sidebar } from "./components/Sidebar";
 import { ViewerArea } from "./components/ViewerArea";
 import { usePdfStore, suppressedReloadDocs } from "./store/usePdfStore";
-import type { PageDimension } from "./store/usePdfStore";
+import type { PageDimension, CompressProgress } from "./store/usePdfStore";
 import { contrastTextColor } from "./utils/color";
 import { reconstructCopyText, type CopyToken } from "./utils/textSelection";
 import { evictDoc, evictPages } from "./utils/renderCache";
@@ -29,6 +29,8 @@ function App() {
   const updateTab = usePdfStore((s) => s.updateTab);
   const ocrProgress = usePdfStore((s) => s.ocrProgress);
   const setOcrProgress = usePdfStore((s) => s.setOcrProgress);
+  const compressProgress = usePdfStore((s) => s.compressProgress);
+  const setCompressProgress = usePdfStore((s) => s.setCompressProgress);
   const openFileRef = useRef<() => Promise<void>>();
   const printRef = useRef<() => Promise<void>>();
   const [printProgress, setPrintProgress] = useState<{ page: number; total: number } | null>(null);
@@ -146,6 +148,14 @@ function App() {
   useEffect(() => {
     const unlisten = listen<{ page: number; total: number }>("ocr-progress", (event) => {
       setOcrProgress(event.payload);
+    });
+    return () => { unlisten.then((f) => f()); };
+  }, []);
+
+  // Listen for compression progress (Compress panel "Run")
+  useEffect(() => {
+    const unlisten = listen<CompressProgress>("compress-progress", (event) => {
+      setCompressProgress(event.payload);
     });
     return () => { unlisten.then((f) => f()); };
   }, []);
@@ -309,8 +319,32 @@ function App() {
           </div>
         </div>
       )}
+      {compressProgress && (
+        <div className="print-progress-overlay">
+          <div className="print-progress-dialog">
+            <p>{describeCompress(compressProgress)}</p>
+            <button onClick={() => void invoke("cancel_compress")}>Cancel</button>
+          </div>
+        </div>
+      )}
     </div>
   );
+}
+
+const COMPRESS_STEP_LABELS: Record<string, string> = {
+  recompress_streams: "Recompressing streams",
+  prune_unused: "Pruning unused objects",
+  delete_zero_length: "Deleting empty streams",
+  strip_extras: "Stripping extras",
+  recompress_images: "Downsampling images",
+};
+
+function describeCompress(p: CompressProgress): string {
+  if (p.step === "recompress_images" && p.imageTotal > 0) {
+    return `Compressing — image ${p.image} of ${p.imageTotal}...`;
+  }
+  const label = COMPRESS_STEP_LABELS[p.step] ?? "Compressing";
+  return `${label} (step ${p.stepIndex} of ${p.stepCount})...`;
 }
 
 export default App;

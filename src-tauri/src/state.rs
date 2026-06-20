@@ -19,6 +19,9 @@ pub struct AppState {
     /// "Make Searchable" action and Export Text's OCR pass (only one runs at a
     /// time — both are modal).
     ocr_job: Mutex<Option<Arc<AtomicBool>>>,
+    /// Cancel token for the current compression run (the Compress panel's "Run"),
+    /// so the modal progress overlay's Cancel button can stop it mid-pass.
+    compress_job: Mutex<Option<Arc<AtomicBool>>>,
     /// OCR backend behind a trait seam so tests can inject a fake (the real
     /// `WindowsOcrEngine` needs a WinRT language pack). See `commands::ocr`.
     pub ocr_engine: Arc<dyn OcrEngine>,
@@ -42,6 +45,7 @@ impl AppState {
             startup_file: Mutex::new(startup_file),
             print_job: Mutex::new(None),
             ocr_job: Mutex::new(None),
+            compress_job: Mutex::new(None),
             ocr_engine: Arc::new(WindowsOcrEngine::new()),
             ocr_cache: Arc::new(Mutex::new(HashMap::new())),
             pending_optimized: Mutex::new(HashMap::new()),
@@ -92,6 +96,24 @@ impl AppState {
 
     pub fn cancel_ocr_job(&self) {
         if let Ok(guard) = self.ocr_job.lock() {
+            if let Some(token) = guard.as_ref() {
+                token.store(true, Ordering::Relaxed);
+            }
+        }
+    }
+
+    pub fn set_compress_job(&self, token: Arc<AtomicBool>) {
+        if let Ok(mut guard) = self.compress_job.lock() {
+            *guard = Some(token);
+        }
+    }
+
+    pub fn take_compress_job(&self) -> Option<Arc<AtomicBool>> {
+        self.compress_job.lock().ok()?.take()
+    }
+
+    pub fn cancel_compress_job(&self) {
+        if let Ok(guard) = self.compress_job.lock() {
             if let Some(token) = guard.as_ref() {
                 token.store(true, Ordering::Relaxed);
             }

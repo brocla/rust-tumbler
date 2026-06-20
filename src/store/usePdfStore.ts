@@ -51,6 +51,14 @@ export interface SearchResult {
   rects: { x: number; y: number; width: number; height: number }[];
 }
 
+export interface CompressProgress {
+  step: string;
+  stepIndex: number;
+  stepCount: number;
+  image: number;
+  imageTotal: number;
+}
+
 interface PdfStore {
   // Tab state
   tabs: TabState[];
@@ -64,12 +72,17 @@ interface PdfStore {
   // none is running. Shared here so the Toolbar (which triggers the run) and
   // App (which renders the overlay) can both reach it.
   ocrProgress: { page: number; total: number } | null;
+  // Progress of an in-flight compression run (the Compress panel's "Run"),
+  // driven by Tauri `compress-progress` events. Null when none is running.
+  // Shared here so the panel triggers the run while App renders the overlay.
+  compressProgress: CompressProgress | null;
 
   // Actions
   setActiveTab: (id: string) => void;
   setSidebarTool: (tool: PdfStore["activeSidebarTool"]) => void;
   setSidebarWidth: (width: number) => void;
   setOcrProgress: (progress: { page: number; total: number } | null) => void;
+  setCompressProgress: (progress: CompressProgress | null) => void;
 
   addTab: (tab: TabState) => void;
   removeTab: (id: string) => void;
@@ -89,10 +102,13 @@ export const usePdfStore = create<PdfStore>((set, get) => ({
   activeSidebarTool: "thumbnails",
   sidebarWidth: 250,
   ocrProgress: null,
+  compressProgress: null,
 
   setActiveTab: (id) => set({ activeTabId: id }),
 
   setOcrProgress: (progress) => set({ ocrProgress: progress }),
+
+  setCompressProgress: (progress) => set({ compressProgress: progress }),
 
   setSidebarTool: (tool) =>
     set((state) => ({

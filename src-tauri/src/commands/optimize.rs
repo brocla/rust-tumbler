@@ -17,7 +17,9 @@ use crate::state::{lock_mutex, AppState};
 use lopdf::{Dictionary, Document, Object, ObjectId};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use tauri::State;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use tauri::{Emitter, State, WebviewWindow};
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Hash, Debug)]
 #[serde(rename_all = "snake_case")]
@@ -52,6 +54,22 @@ pub struct SkippedImages {
 pub struct OptimizationReport {
     pub results: Vec<StepResult>,
     pub skipped_images: Vec<SkippedImages>,
+    /// True if the run was cancelled before completing. When cancelled, no
+    /// output is staged and the frontend discards `results`.
+    pub cancelled: bool,
+}
+
+/// Progress for an in-flight compression run, emitted on `compress-progress`.
+/// During the image step `image`/`image_total` count images; for the other
+/// steps they're 0.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct CompressProgress {
+    pub step: StepId,
+    pub step_index: u32,
+    pub step_count: u32,
+    pub image: u32,
+    pub image_total: u32,
 }
 
 // --- Step functions -------------------------------------------------------
@@ -452,28 +470,38 @@ fn plan_one(
     PlanResult::Replace { content: out, w: new_w, h: new_h, gray }
 }
 
+/// Returns `true` if the run was cancelled partway (in which case the document
+/// is left unmodified by this step).
 fn step_recompress_images(
     doc: &mut Document,
     target_dpi: f32,
     jpeg_quality: u8,
     skipped: &mut Vec<SkippedImages>,
-) {
+    emit: &dyn Fn(u32, u32),
+    cancel: &AtomicBool,
+) -> bool {
     let image_ids: Vec<ObjectId> = doc
         .objects
         .iter()
         .filter_map(|(id, obj)| is_image_xobject(obj).then_some(*id))
         .collect();
     if image_ids.is_empty() {
-        return;
+        return false;
     }
     let id_set: HashSet<ObjectId> = image_ids.iter().copied().collect();
     let widths = measure_displayed_widths(doc, &id_set);
 
     // Plan with shared borrows, then write with a single mutable pass — an image
-    // can't be re-encoded while we're iterating the object map.
+    // can't be re-encoded while we're iterating the object map. Decoding/encoding
+    // is the slow part, so progress and cancellation are checked here.
+    let total = image_ids.len() as u32;
     let mut plans: Vec<(ObjectId, Vec<u8>, u32, u32, bool)> = Vec::new();
     let mut counts: HashMap<&'static str, u32> = HashMap::new();
-    for id in &image_ids {
+    for (i, id) in image_ids.iter().enumerate() {
+        if cancel.load(Ordering::Relaxed) {
+            return true;
+        }
+        emit(i as u32 + 1, total);
         match plan_one(doc, *id, widths.get(id).copied(), target_dpi, jpeg_quality) {
             PlanResult::Replace { content, w, h, gray } => plans.push((*id, content, w, h, gray)),
             PlanResult::Skip(reason) => *counts.entry(reason).or_insert(0) += 1,
@@ -497,23 +525,19 @@ fn step_recompress_images(
     for (reason, count) in counts {
         skipped.push(SkippedImages { reason: reason.to_string(), count });
     }
+    false
 }
 
-/// Apply a single step. `target_dpi`/`jpeg_quality`/`skipped` are only consumed
-/// by the image step; the lopdf-only steps ignore them.
-fn apply_step(
-    doc: &mut Document,
-    step: &StepId,
-    target_dpi: f32,
-    jpeg_quality: u8,
-    skipped: &mut Vec<SkippedImages>,
-) {
+/// Apply one of the fast, lopdf-only steps. The image step is driven separately
+/// by the pipeline because it reports per-image progress and honors cancellation.
+fn apply_lopdf_step(doc: &mut Document, step: &StepId) {
     match step {
         StepId::RecompressStreams => step_recompress_streams(doc),
         StepId::PruneUnused => step_prune_unused(doc),
         StepId::DeleteZeroLength => step_delete_zero_length(doc),
         StepId::StripExtras => step_strip_extras(doc),
-        StepId::RecompressImages => step_recompress_images(doc, target_dpi, jpeg_quality, skipped),
+        // Driven by `run_optimization_steps_impl` with progress + cancel.
+        StepId::RecompressImages => {}
     }
 }
 
@@ -534,43 +558,112 @@ fn serialized_size(doc: &Document) -> u64 {
 // --- Commands -------------------------------------------------------------
 
 #[tauri::command]
-pub fn run_optimization_steps(
+pub async fn run_optimization_steps(
+    window: WebviewWindow,
     state: State<'_, AppState>,
     doc_id: String,
     steps: Vec<StepId>,
     target_dpi: f32,
     jpeg_quality: u8,
 ) -> Result<OptimizationReport, String> {
-    run_optimization_steps_impl(&state, doc_id, steps, target_dpi, jpeg_quality).map_err(String::from)
-}
-
-fn run_optimization_steps_impl(
-    state: &AppState,
-    doc_id: String,
-    steps: Vec<StepId>,
-    target_dpi: f32,
-    jpeg_quality: u8,
-) -> Result<OptimizationReport, AppError> {
     // The file on disk is the source of truth (in-place edits like page ops and
     // metadata already write through to it); load from there rather than the
-    // pdfium handle.
+    // pdfium handle. Resolve the path before the blocking work so the closure
+    // captures only owned, `Send` data.
     let file_path = {
-        let entry = state.get_document(&doc_id)?;
-        let entry = lock_mutex(&entry)?;
+        let entry = state.get_document(&doc_id).map_err(String::from)?;
+        let entry = lock_mutex(&entry).map_err(String::from)?;
         entry.file_path.clone()
     };
 
+    let cancel = Arc::new(AtomicBool::new(false));
+    state.set_compress_job(cancel.clone());
+
+    let emit = move |p: CompressProgress| {
+        let _ = window.emit("compress-progress", p);
+    };
+
+    // The work is CPU-bound (image decode/resize/re-encode), so run it off the
+    // async runtime to keep the app responsive and let progress events flow.
+    let outcome = tauri::async_runtime::spawn_blocking(move || {
+        run_optimization_steps_impl(&emit, &file_path, steps, target_dpi, jpeg_quality, &cancel)
+    })
+    .await
+    .map_err(|e| e.to_string());
+
+    state.take_compress_job();
+
+    let (report, output) = outcome?.map_err(String::from)?;
+    // Only stage output for a completed run; a cancelled run leaves nothing to
+    // save.
+    if let Some(bytes) = output {
+        state.set_pending_optimized(doc_id, bytes);
+    }
+    Ok(report)
+}
+
+/// Runs the pipeline against the file at `file_path`, reporting progress via
+/// `emit` and bailing out when `cancel` is set. Returns the report plus the
+/// serialized output bytes to stage (`None` if cancelled). Pure with respect to
+/// `AppState` so it can run inside `spawn_blocking`.
+#[allow(clippy::type_complexity)]
+fn run_optimization_steps_impl(
+    emit: &dyn Fn(CompressProgress),
+    file_path: &str,
+    steps: Vec<StepId>,
+    target_dpi: f32,
+    jpeg_quality: u8,
+    cancel: &AtomicBool,
+) -> Result<(OptimizationReport, Option<Vec<u8>>), AppError> {
     let pdf_bytes =
-        std::fs::read(&file_path).map_err(|e| AppError::io("Failed to read PDF for optimization", e))?;
+        std::fs::read(file_path).map_err(|e| AppError::io("Failed to read PDF for optimization", e))?;
     let mut doc = Document::load_mem(&pdf_bytes)
         .map_err(|e| AppError::lopdf("Failed to parse PDF for optimization", e))?;
 
+    let step_count = steps.len() as u32;
     let mut results = Vec::with_capacity(steps.len());
     let mut skipped_images = Vec::new();
+    let mut cancelled = false;
 
-    for step in &steps {
+    for (i, step) in steps.iter().enumerate() {
+        if cancel.load(Ordering::Relaxed) {
+            cancelled = true;
+            break;
+        }
+        let step_index = i as u32 + 1;
+        emit(CompressProgress {
+            step: step.clone(),
+            step_index,
+            step_count,
+            image: 0,
+            image_total: 0,
+        });
+
         let size_before = serialized_size(&doc);
-        apply_step(&mut doc, step, target_dpi, jpeg_quality, &mut skipped_images);
+        if *step == StepId::RecompressImages {
+            let img_emit = |image: u32, image_total: u32| {
+                emit(CompressProgress {
+                    step: StepId::RecompressImages,
+                    step_index,
+                    step_count,
+                    image,
+                    image_total,
+                });
+            };
+            if step_recompress_images(
+                &mut doc,
+                target_dpi,
+                jpeg_quality,
+                &mut skipped_images,
+                &img_emit,
+                cancel,
+            ) {
+                cancelled = true;
+                break;
+            }
+        } else {
+            apply_lopdf_step(&mut doc, step);
+        }
         let size_after = serialized_size(&doc);
         results.push(StepResult {
             step: step.clone(),
@@ -579,15 +672,34 @@ fn run_optimization_steps_impl(
         });
     }
 
+    if cancelled {
+        return Ok((
+            OptimizationReport {
+                results,
+                skipped_images,
+                cancelled: true,
+            },
+            None,
+        ));
+    }
+
     let mut out = Vec::new();
     doc.save_to(&mut out)
         .map_err(|e| AppError::io("Failed to serialize optimized PDF", e))?;
-    state.set_pending_optimized(doc_id, out);
 
-    Ok(OptimizationReport {
-        results,
-        skipped_images,
-    })
+    Ok((
+        OptimizationReport {
+            results,
+            skipped_images,
+            cancelled: false,
+        },
+        Some(out),
+    ))
+}
+
+#[tauri::command]
+pub fn cancel_compress(state: State<'_, AppState>) {
+    state.cancel_compress_job();
 }
 
 #[tauri::command]
@@ -628,7 +740,6 @@ fn save_optimized_copy_impl(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::DocEntry;
     use lopdf::{Dictionary, Object, Stream};
 
     /// A decodable JPEG of the given size, for building image fixtures.
@@ -736,19 +847,17 @@ mod tests {
     #[test]
     fn lopdf_steps_keep_document_loadable() {
         let mut doc = load_fixture();
-        let mut skipped = Vec::new();
         for step in [
             StepId::RecompressStreams,
             StepId::PruneUnused,
             StepId::DeleteZeroLength,
             StepId::StripExtras,
         ] {
-            apply_step(&mut doc, &step, 150.0, 80, &mut skipped);
+            apply_lopdf_step(&mut doc, &step);
         }
         let mut out = Vec::new();
         doc.save_to(&mut out).expect("serialize");
         Document::load_mem(&out).expect("optimized output should be valid PDF");
-        assert!(skipped.is_empty());
     }
 
     /// `step_strip_extras` must remove the catalog's `/Metadata` and
@@ -802,26 +911,11 @@ mod tests {
     /// output for Save As, and clears the staged bytes once saved (so a second
     /// save with nothing pending errors).
     #[test]
-    fn pipeline_records_steps_stages_and_saves_output() {
+    fn pipeline_records_steps_and_returns_stageable_output() {
         let src = crate::fixture_path();
         let tmp = std::env::temp_dir().join("tumbler_optimize_in.pdf");
         std::fs::copy(&src, &tmp).expect("copy fixture");
         let file_path = tmp.to_string_lossy().into_owned();
-
-        let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None);
-        let document = pdfium
-            .load_pdf_from_file(&file_path, None)
-            .expect("load pdf");
-        state
-            .insert_document(
-                "doc-1".to_string(),
-                DocEntry {
-                    document,
-                    file_path: file_path.clone(),
-                },
-            )
-            .expect("insert");
 
         let steps = vec![
             StepId::RecompressStreams,
@@ -829,12 +923,20 @@ mod tests {
             StepId::DeleteZeroLength,
             StepId::StripExtras,
         ];
-        let report = run_optimization_steps_impl(&state, "doc-1".to_string(), steps, 150.0, 80)
-            .expect("run optimization");
+        let cancel = AtomicBool::new(false);
+        let (report, output) =
+            run_optimization_steps_impl(&|_p| {}, &file_path, steps, 150.0, 80, &cancel)
+                .expect("run optimization");
 
         assert_eq!(report.results.len(), 4);
         assert!(report.skipped_images.is_empty());
+        assert!(!report.cancelled);
         assert_eq!(report.results[0].step, StepId::RecompressStreams);
+
+        // Stage as the command would, then exercise Save As.
+        let pdfium = crate::test_pdfium();
+        let state = AppState::new(pdfium, None);
+        state.set_pending_optimized("doc-1".to_string(), output.expect("output bytes"));
 
         let dest = std::env::temp_dir().join("tumbler_optimize_out.pdf");
         let dest_path = dest.to_string_lossy().into_owned();
@@ -852,6 +954,27 @@ mod tests {
 
         std::fs::remove_file(&tmp).ok();
         std::fs::remove_file(&dest).ok();
+    }
+
+    /// A pre-cancelled run produces a cancelled report and no stageable output.
+    #[test]
+    fn pipeline_reports_cancellation_and_stages_nothing() {
+        let src = crate::fixture_path();
+        let tmp = std::env::temp_dir().join("tumbler_optimize_cancel.pdf");
+        std::fs::copy(&src, &tmp).expect("copy fixture");
+        let file_path = tmp.to_string_lossy().into_owned();
+
+        let steps = vec![StepId::RecompressStreams, StepId::StripExtras];
+        let cancel = AtomicBool::new(true); // already cancelled
+        let (report, output) =
+            run_optimization_steps_impl(&|_p| {}, &file_path, steps, 150.0, 80, &cancel)
+                .expect("run optimization");
+
+        assert!(report.cancelled);
+        assert!(report.results.is_empty());
+        assert!(output.is_none());
+
+        std::fs::remove_file(&tmp).ok();
     }
 
     /// A 600px image shown across 1 inch (600 DPI) recompresses smaller when
@@ -872,7 +995,7 @@ mod tests {
 
         let before = serialized_size(&doc);
         let mut skipped = Vec::new();
-        step_recompress_images(&mut doc, 150.0, 75, &mut skipped);
+        step_recompress_images(&mut doc, 150.0, 75, &mut skipped, &|_, _| {}, &AtomicBool::new(false));
         let after = serialized_size(&doc);
 
         assert!(after < before, "expected shrink: after={after} before={before}");
@@ -900,7 +1023,7 @@ mod tests {
 
         let before = serialized_size(&doc);
         let mut skipped = Vec::new();
-        step_recompress_images(&mut doc, 150.0, 75, &mut skipped);
+        step_recompress_images(&mut doc, 150.0, 75, &mut skipped, &|_, _| {}, &AtomicBool::new(false));
         let after = serialized_size(&doc);
 
         assert!(skipped.is_empty());
@@ -925,7 +1048,7 @@ mod tests {
         );
 
         let mut skipped = Vec::new();
-        step_recompress_images(&mut doc, 150.0, 75, &mut skipped);
+        step_recompress_images(&mut doc, 150.0, 75, &mut skipped, &|_, _| {}, &AtomicBool::new(false));
 
         assert_eq!(skipped.len(), 1);
         assert_eq!(skipped[0].reason, "jpx");
@@ -951,7 +1074,7 @@ mod tests {
         );
 
         let mut skipped = Vec::new();
-        step_recompress_images(&mut doc, 150.0, 75, &mut skipped);
+        step_recompress_images(&mut doc, 150.0, 75, &mut skipped, &|_, _| {}, &AtomicBool::new(false));
 
         assert_eq!(skipped.len(), 1);
         assert_eq!(skipped[0].reason, "bilevel");
@@ -966,7 +1089,7 @@ mod tests {
             doc_with_image("DCTDecode", 8, "DeviceRGB", 600, 600, jpeg, 72.0, None);
 
         let mut skipped = Vec::new();
-        step_recompress_images(&mut doc, 150.0, 75, &mut skipped);
+        step_recompress_images(&mut doc, 150.0, 75, &mut skipped, &|_, _| {}, &AtomicBool::new(false));
 
         assert_eq!(skipped.len(), 1);
         assert_eq!(skipped[0].reason, "unreferenced");

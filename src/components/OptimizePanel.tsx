@@ -83,6 +83,7 @@ interface SkippedImages {
 interface OptimizationReport {
   results: StepResult[];
   skippedImages: SkippedImages[];
+  cancelled: boolean;
 }
 
 function formatBytes(bytes: number): string {
@@ -157,11 +158,13 @@ export function OptimizePanel() {
         targetDpi,
         jpegQuality,
       });
-      setReport(result);
+      // A cancelled run kept no output, so leave the panel in its pre-run state.
+      setReport(result.cancelled ? null : result);
     } catch (err) {
-      await message(String(err), { title: "Optimization Failed", kind: "error" });
+      await message(String(err), { title: "Compression Failed", kind: "error" });
     } finally {
       setRunning(false);
+      usePdfStore.getState().setCompressProgress(null);
     }
   };
 

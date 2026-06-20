@@ -57,6 +57,7 @@ pub fn run() {
             commands::pages::split_document,
             commands::optimize::run_optimization_steps,
             commands::optimize::save_optimized_copy,
+            commands::optimize::cancel_compress,
             commands::print::print_document,
             commands::print::cancel_print,
             commands::startup::take_startup_file,

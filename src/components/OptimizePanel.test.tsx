@@ -43,6 +43,7 @@ const REPORT = {
     { step: "strip_extras", sizeBefore: 700, sizeAfter: 600 },
   ],
   skippedImages: [],
+  cancelled: false,
 };
 
 describe("OptimizePanel", () => {
@@ -115,6 +116,19 @@ describe("OptimizePanel", () => {
     });
     await waitFor(() => expect(screen.getByText(/JPEG2000/)).toBeTruthy());
     expect(screen.getByText(/2 images/)).toBeTruthy();
+  });
+
+  it("shows no results when the run reports cancellation", async () => {
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === "run_optimization_steps") return { ...REPORT, cancelled: true };
+      return undefined;
+    });
+    render(<OptimizePanel />);
+    await act(async () => {
+      fireEvent.click(screen.getByText("Run"));
+    });
+    expect(screen.queryByText(/Total:/)).toBeNull();
+    expect(screen.queryByText("Save As…")).toBeNull();
   });
 
   it("runs the four checked steps in declared order and shows results", async () => {
