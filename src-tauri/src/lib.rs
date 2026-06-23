@@ -1,6 +1,7 @@
 mod commands;
 mod error;
 mod state;
+mod thumbnailer_reg;
 
 use pdfium_render::prelude::*;
 use state::AppState;
@@ -16,6 +17,8 @@ pub fn run() {
             .unwrap_or_else(|e| panic!("Failed to load pdfium.dll from {pdfium_path}: {e}"));
         Box::leak(Box::new(Pdfium::new(bindings)))
     };
+
+    thumbnailer_reg::ensure_registered();
 
     let startup_file = pdf_path_from_args(&std::env::args().collect::<Vec<_>>());
 

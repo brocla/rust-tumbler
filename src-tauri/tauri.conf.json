@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "npm run build",
+    "beforeBuildCommand": "cargo build --release --manifest-path src-tauri/Cargo.toml -p tumbler-thumbnailer && cmd /c copy /y src-tauri\\target\\release\\tumbler_thumbnailer.dll src-tauri\\resources\\tumbler-thumbnailer.dll && npm run build",
     "frontendDist": "../dist"
   },
   "app": {
@@ -28,7 +28,7 @@
   "bundle": {
     "active": true,
     "targets": ["nsis", "msi"],
-    "resources": ["resources/pdfium.dll"],
+    "resources": ["resources/pdfium.dll", "resources/tumbler-thumbnailer.dll"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
