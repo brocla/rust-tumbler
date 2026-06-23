@@ -8,7 +8,8 @@ use std::path::PathBuf;
 #[cfg(target_os = "windows")]
 use windows::Win32::System::Registry::{
     RegCloseKey, RegCreateKeyW, RegDeleteTreeW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
-    HKEY, HKEY_CLASSES_ROOT, HKEY_CURRENT_USER, KEY_QUERY_VALUE, REG_SZ, REG_VALUE_TYPE,
+    HKEY, HKEY_CLASSES_ROOT, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_QUERY_VALUE, REG_DWORD,
+    REG_SZ, REG_VALUE_TYPE,
 };
 #[cfg(target_os = "windows")]
 use windows::core::PCWSTR;
@@ -51,11 +52,16 @@ pub fn unregister() {
     }
 }
 
-/// Look for `tumbler-thumbnailer.dll` next to the running executable.
+/// Look for `tumbler-thumbnailer.dll` next to the exe or in its resources/ subdir.
+/// Tauri bundles resources at `{install_dir}\resources\` for both NSIS and MSI.
 fn find_thumbnailer_dll() -> Option<PathBuf> {
     let exe_dir = std::env::current_exe().ok()?.parent().map(PathBuf::from)?;
-    let candidate = exe_dir.join("tumbler-thumbnailer.dll");
-    candidate.exists().then_some(candidate)
+    [
+        exe_dir.join("tumbler-thumbnailer.dll"),
+        exe_dir.join("resources").join("tumbler-thumbnailer.dll"),
+    ]
+    .into_iter()
+    .find(|p| p.exists())
 }
 
 /// Read a REG_SZ default value (or named value) from `root\subkey`.
@@ -100,37 +106,51 @@ fn read_reg_sz(root: HKEY, subkey: &str, value_name: &str) -> Option<String> {
     )
 }
 
-/// Returns true if Tumbler's executable is the registered handler for .pdf files.
+/// Returns true if Tumbler's executable is the registered open handler for
+/// .pdf files.
 ///
-/// Checks the Windows 10/11 UserChoice key first (the authoritative source set
-/// by "Default Apps" settings), then falls back to the classic HKCU association.
-/// Either way, resolves the ProgID's open command and compares it against our
-/// own exe path so we don't accidentally match a ProgID that happens to contain
-/// "Tumbler" in its name.
+/// The `.pdf` extension can carry several ProgId associations at once — the
+/// Windows 10/11 UserChoice key, a per-user (HKCU) association, and a
+/// per-machine (HKLM) one from an MSI install — and any of them may be stale
+/// or dangling (e.g. an HKCU `.pdf` pointing at a "PDF Document" ProgId that
+/// no longer has a class registered). Explorer tolerates this by falling
+/// through to whichever association actually resolves, so we do the same:
+/// gather every candidate ProgId and return true if *any* resolves to an open
+/// command that runs our own exe. Matching on the resolved exe path (not the
+/// ProgId name) avoids both false negatives from dead ProgIds and false
+/// positives from an unrelated app whose ProgId merely contains "Tumbler".
 #[cfg(target_os = "windows")]
 fn tumbler_is_default_pdf_handler() -> bool {
-    fn check() -> Option<bool> {
-        // Windows 10/11 UserChoice — authoritative default-app selection.
-        let prog_id = read_reg_sz(
+    let exe = match std::env::current_exe() {
+        Ok(e) => e.to_string_lossy().to_lowercase(),
+        Err(_) => return false,
+    };
+
+    // Every source Explorer might consult for the .pdf ProgId.
+    let candidates = [
+        read_reg_sz(
             HKEY_CURRENT_USER,
             r"Software\Microsoft\Windows\Shell\Associations\FileAssociations\.pdf\UserChoice",
             "ProgId",
-        )
-        // Older / pre-UserChoice path.
-        .or_else(|| read_reg_sz(HKEY_CURRENT_USER, r"Software\Classes\.pdf", ""))?;
+        ),
+        read_reg_sz(HKEY_CURRENT_USER, r"Software\Classes\.pdf", ""),
+        read_reg_sz(HKEY_CLASSES_ROOT, ".pdf", ""),
+        read_reg_sz(HKEY_LOCAL_MACHINE, r"Software\Classes\.pdf", ""),
+    ];
 
-        // Resolve the open command for that ProgId.  Check HKCU first (per-user
-        // installs like Tumbler), then HKCR (the merged HKCU+HKLM view) for
-        // system-wide installs of other apps.
-        let cmd_subkey = format!(r"Software\Classes\{}\shell\open\command", prog_id);
-        let command = read_reg_sz(HKEY_CURRENT_USER, &cmd_subkey, "")
-            .or_else(|| read_reg_sz(HKEY_CLASSES_ROOT, &cmd_subkey, ""))?;
-
-        let exe = std::env::current_exe().ok()?;
-        let exe_lower = exe.to_string_lossy().to_lowercase();
-        Some(command.to_lowercase().contains(exe_lower.as_str()))
-    }
-    check().unwrap_or(false)
+    candidates.into_iter().flatten().any(|prog_id| {
+        // HKCU/HKLM classes live under Software\Classes\<ProgId>; HKCR maps
+        // directly onto <ProgId>.
+        let hkcu = format!(r"Software\Classes\{}\shell\open\command", prog_id);
+        let hkcr = format!(r"{}\shell\open\command", prog_id);
+        let hklm = hkcu.clone();
+        let command = read_reg_sz(HKEY_CURRENT_USER, &hkcu, "")
+            .or_else(|| read_reg_sz(HKEY_CLASSES_ROOT, &hkcr, ""))
+            .or_else(|| read_reg_sz(HKEY_LOCAL_MACHINE, &hklm, ""));
+        command
+            .map(|c| c.to_lowercase().contains(&exe))
+            .unwrap_or(false)
+    })
 }
 
 /// True if `InprocServer32` already points to `dll_path`.
@@ -196,6 +216,11 @@ fn write_registration(dll_path: &str) -> Result<(), windows::core::Error> {
         "",
         "Tumbler PDF Thumbnail Provider",
     )?;
+    // Run the handler in-process rather than in Explorer's sandboxed surrogate.
+    // The surrogate (a low-integrity dllhost.exe) cannot LoadLibrary our
+    // pdfium.dll from Program Files, so GetThumbnail silently fails and Explorer
+    // falls back to the file-type icon. Running in-process avoids that.
+    reg_set_dword(HKEY_CURRENT_USER, &clsid_key, "DisableProcessIsolation", 1)?;
     let inproc_key = format!("{}\\InprocServer32", clsid_key);
     reg_set(HKEY_CURRENT_USER, &inproc_key, "", dll_path)?;
     reg_set(HKEY_CURRENT_USER, &inproc_key, "ThreadingModel", "Apartment")?;
@@ -233,6 +258,34 @@ fn reg_set(
             None,
             REG_SZ,
             Some(data_bytes),
+        )
+    };
+    unsafe { RegCloseKey(hkey) }.ok()?;
+    result.ok()
+}
+
+#[cfg(target_os = "windows")]
+fn reg_set_dword(
+    root: HKEY,
+    subkey: &str,
+    value_name: &str,
+    data: u32,
+) -> Result<(), windows::core::Error> {
+    let subkey_w: Vec<u16> = subkey.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut hkey = HKEY::default();
+    unsafe { RegCreateKeyW(root, PCWSTR(subkey_w.as_ptr()), &mut hkey) }.ok()?;
+    let name_w: Vec<u16> = value_name
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let data_bytes = data.to_le_bytes();
+    let result = unsafe {
+        RegSetValueExW(
+            hkey,
+            PCWSTR(name_w.as_ptr()),
+            None,
+            REG_DWORD,
+            Some(&data_bytes),
         )
     };
     unsafe { RegCloseKey(hkey) }.ok()?;

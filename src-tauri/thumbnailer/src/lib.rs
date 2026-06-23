@@ -28,7 +28,8 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::Com::{IClassFactory, IClassFactory_Impl};
 use windows::Win32::System::LibraryLoader::GetModuleFileNameW;
 use windows::Win32::System::Registry::{
-    RegCloseKey, RegCreateKeyW, RegDeleteTreeW, RegSetValueExW, HKEY, HKEY_CURRENT_USER, REG_SZ,
+    RegCloseKey, RegCreateKeyW, RegDeleteTreeW, RegSetValueExW, HKEY, HKEY_CURRENT_USER, REG_DWORD,
+    REG_SZ,
 };
 use windows::Win32::UI::Shell::{
     IThumbnailProvider, IThumbnailProvider_Impl, WTS_ALPHATYPE, WTSAT_ARGB,
@@ -120,7 +121,12 @@ impl TumblerThumbnailer {
 impl IInitializeWithFile_Impl for TumblerThumbnailer_Impl {
     fn Initialize(&self, pszfilepath: &PCWSTR, _grfmode: u32) -> windows::core::Result<()> {
         let path = unsafe { pszfilepath.to_string() }?;
-        *self.path.lock().unwrap() = Some(path);
+        // Recover from a poisoned lock rather than panicking — a panic in a
+        // prior call must not permanently break this object.
+        match self.path.lock() {
+            Ok(mut g) => *g = Some(path),
+            Err(p) => *p.into_inner() = Some(path),
+        }
         Ok(())
     }
 }
@@ -136,42 +142,24 @@ impl IThumbnailProvider_Impl for TumblerThumbnailer_Impl {
             return Err(windows::core::Error::from(E_POINTER));
         }
 
-        let path = self
-            .path
-            .lock()
-            .unwrap()
-            .clone()
-            .ok_or_else(|| windows::core::Error::from(E_FAIL))?;
+        let path = match self.path.lock() {
+            Ok(g) => g.clone(),
+            Err(p) => p.into_inner().clone(),
+        };
+        let path = path.ok_or_else(|| windows::core::Error::from(E_FAIL))?;
 
-        let pdfium = get_pdfium().ok_or_else(|| windows::core::Error::from(E_FAIL))?;
-
-        let doc = pdfium
-            .load_pdf_from_file(&path, None)
-            .map_err(|_| windows::core::Error::from(E_FAIL))?;
-
-        let page = doc
-            .pages()
-            .get(0)
-            .map_err(|_| windows::core::Error::from(E_FAIL))?;
-
-        let page_w = page.width().value;
-        let page_h = page.height().value;
-
-        // Scale to fit within cx×cx, preserving aspect ratio.
-        let scale = (cx as f32) / page_w.max(page_h);
-        let target_w = ((page_w * scale).round() as i32).max(1);
-        let target_h = ((page_h * scale).round() as i32).max(1);
-
-        let bitmap = page
-            .render_with_config(
-                &PdfRenderConfig::new()
-                    .set_target_width(target_w as Pixels)
-                    .set_target_height(target_h as Pixels),
-            )
-            .map_err(|_| windows::core::Error::from(E_FAIL))?;
-
-        let rgba = bitmap.as_rgba_bytes();
-        let hbitmap = rgba_to_hbitmap(&rgba, target_w, target_h)?;
+        // Render under catch_unwind. We run in-process in Explorer
+        // (DisableProcessIsolation), so a panic on a malformed PDF would
+        // otherwise abort Explorer and get the handler disabled for the
+        // session. Convert any panic into a clean E_FAIL instead.
+        let rendered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            render_to_hbitmap(&path, cx)
+        }));
+        let hbitmap = match rendered {
+            Ok(Ok(h)) => h,
+            Ok(Err(e)) => return Err(e),
+            Err(_) => return Err(windows::core::Error::from(E_FAIL)),
+        };
 
         unsafe {
             *phbmp = hbitmap;
@@ -181,6 +169,49 @@ impl IThumbnailProvider_Impl for TumblerThumbnailer_Impl {
     }
 }
 
+/// Render page 1 of `path` to a 32-bpp `HBITMAP` no larger than `cx` on its
+/// longest side. Pure helper (no COM state) so it can run inside `catch_unwind`.
+fn render_to_hbitmap(path: &str, cx: u32) -> windows::core::Result<HBITMAP> {
+    let pdfium = get_pdfium().ok_or_else(|| windows::core::Error::from(E_FAIL))?;
+
+    let doc = pdfium
+        .load_pdf_from_file(path, None)
+        .map_err(|_| windows::core::Error::from(E_FAIL))?;
+
+    let page = doc
+        .pages()
+        .get(0)
+        .map_err(|_| windows::core::Error::from(E_FAIL))?;
+
+    let page_w = page.width().value;
+    let page_h = page.height().value;
+    if !(page_w.is_finite() && page_h.is_finite() && page_w > 0.0 && page_h > 0.0) {
+        return Err(windows::core::Error::from(E_FAIL));
+    }
+
+    // Scale to fit within cx×cx, preserving aspect ratio. Clamp to a sane
+    // ceiling so a pathological page size can't request a huge allocation.
+    let cx = (cx.clamp(1, 2048)) as f32;
+    let scale = cx / page_w.max(page_h);
+    let target_w = ((page_w * scale).round() as i32).clamp(1, 2048);
+    let target_h = ((page_h * scale).round() as i32).clamp(1, 2048);
+
+    let bitmap = page
+        .render_with_config(
+            &PdfRenderConfig::new()
+                .set_target_width(target_w as Pixels)
+                .set_target_height(target_h as Pixels),
+        )
+        .map_err(|_| windows::core::Error::from(E_FAIL))?;
+
+    // Use the bitmap's actual dimensions (not the requested target) so the
+    // pixel buffer length always matches what we iterate over.
+    let bmp_w = bitmap.width() as i32;
+    let bmp_h = bitmap.height() as i32;
+    let rgba = bitmap.as_rgba_bytes();
+    rgba_to_hbitmap(&rgba, bmp_w, bmp_h)
+}
+
 /// Convert a pdfium RGBA byte slice into a 32-bpp ARGB `HBITMAP`.
 /// Windows DIBs store pixels bottom-up and in BGRA order; pdfium gives RGBA top-down.
 fn rgba_to_hbitmap(
@@ -188,6 +219,16 @@ fn rgba_to_hbitmap(
     width: i32,
     height: i32,
 ) -> windows::core::Result<HBITMAP> {
+    if width <= 0 || height <= 0 {
+        return Err(windows::core::Error::from(E_FAIL));
+    }
+    // Overflow-safe pixel/byte counts, and refuse to read past the source.
+    let pixel_count = (width as usize).saturating_mul(height as usize);
+    let byte_count = pixel_count.saturating_mul(4);
+    if rgba.len() < byte_count {
+        return Err(windows::core::Error::from(E_FAIL));
+    }
+
     let bmi = BITMAPINFO {
         bmiHeader: BITMAPINFOHEADER {
             biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
@@ -211,10 +252,12 @@ fn rgba_to_hbitmap(
         CreateDIBSection(None, &bmi, DIB_RGB_COLORS, &mut bits, None, 0)
     }
     .map_err(|_| windows::core::Error::from(E_FAIL))?;
+    if bits.is_null() {
+        return Err(windows::core::Error::from(E_FAIL));
+    }
 
     // Copy pixels, swapping R↔B (pdfium RGBA → Windows BGRA).
-    let pixel_count = (width * height) as usize;
-    let dst = unsafe { std::slice::from_raw_parts_mut(bits as *mut u8, pixel_count * 4) };
+    let dst = unsafe { std::slice::from_raw_parts_mut(bits as *mut u8, byte_count) };
     for i in 0..pixel_count {
         let s = i * 4;
         dst[s] = rgba[s + 2]; // B
@@ -317,6 +360,11 @@ fn register(install: bool) -> windows::core::Result<()> {
         let clsid_path = format!("Software\\Classes\\CLSID\\{}", guid_str);
         reg_set(HKEY_CURRENT_USER, &clsid_path, "", "Tumbler PDF Thumbnail Provider")?;
 
+        // Run in-process rather than in Explorer's sandboxed surrogate, which
+        // cannot LoadLibrary our pdfium.dll from Program Files (GetThumbnail
+        // would silently fail and Explorer would show the file-type icon).
+        reg_set_dword(HKEY_CURRENT_USER, &clsid_path, "DisableProcessIsolation", 1)?;
+
         // HKCU\Software\Classes\CLSID\{guid}\InprocServer32
         let inproc_path = format!("{}\\InprocServer32", clsid_path);
         reg_set(HKEY_CURRENT_USER, &inproc_path, "", &dll_str)?;
@@ -360,6 +408,25 @@ fn reg_set(root: HKEY, subkey: &str, value_name: &str, data: &str) -> windows::c
             None,
             REG_SZ,
             Some(data_bytes),
+        )
+    };
+    unsafe { RegCloseKey(hkey) }.ok()?;
+    result.ok()
+}
+
+fn reg_set_dword(root: HKEY, subkey: &str, value_name: &str, data: u32) -> windows::core::Result<()> {
+    let subkey_w: Vec<u16> = subkey.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut hkey = HKEY::default();
+    unsafe { RegCreateKeyW(root, PCWSTR(subkey_w.as_ptr()), &mut hkey) }.ok()?;
+    let name_w: Vec<u16> = value_name.encode_utf16().chain(std::iter::once(0)).collect();
+    let data_bytes = data.to_le_bytes();
+    let result = unsafe {
+        RegSetValueExW(
+            hkey,
+            PCWSTR(name_w.as_ptr()),
+            None,
+            REG_DWORD,
+            Some(&data_bytes),
         )
     };
     unsafe { RegCloseKey(hkey) }.ok()?;
