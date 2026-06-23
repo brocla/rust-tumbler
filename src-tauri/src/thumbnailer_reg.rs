@@ -8,7 +8,7 @@ use std::path::PathBuf;
 #[cfg(target_os = "windows")]
 use windows::Win32::System::Registry::{
     RegCloseKey, RegCreateKeyW, RegDeleteTreeW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
-    HKEY, HKEY_CURRENT_USER, KEY_QUERY_VALUE, REG_SZ, REG_VALUE_TYPE,
+    HKEY, HKEY_CLASSES_ROOT, HKEY_CURRENT_USER, KEY_QUERY_VALUE, REG_SZ, REG_VALUE_TYPE,
 };
 #[cfg(target_os = "windows")]
 use windows::core::PCWSTR;
@@ -17,11 +17,15 @@ const CLSID: &str = "{0E3D8445-C38C-45EE-9FD3-A5EA0B089DEE}";
 const THUMBNAIL_HANDLER_IID: &str = "{e357fccd-a995-4576-b01f-234630154e96}";
 
 /// Called from `lib.rs::run()` before the Tauri window is built.
-/// Silently skips registration if pdfium.dll or the thumbnailer DLL is absent
-/// (e.g. dev builds without the DLL in resources/).
+/// Registers the thumbnail handler only when Tumbler is the default PDF app,
+/// so we don't clobber another app's handler when the user opens Tumbler
+/// occasionally while something else (e.g. Acrobat, Foxit) is the default.
 pub fn ensure_registered() {
     #[cfg(target_os = "windows")]
     {
+        if !tumbler_is_default_pdf_handler() {
+            return;
+        }
         if let Some(dll_path) = find_thumbnailer_dll() {
             let dll_str = dll_path.to_string_lossy().into_owned();
             if !already_registered(&dll_str) {
@@ -52,6 +56,81 @@ fn find_thumbnailer_dll() -> Option<PathBuf> {
     let exe_dir = std::env::current_exe().ok()?.parent().map(PathBuf::from)?;
     let candidate = exe_dir.join("tumbler-thumbnailer.dll");
     candidate.exists().then_some(candidate)
+}
+
+/// Read a REG_SZ default value (or named value) from `root\subkey`.
+/// Returns `None` if the key or value is absent or not a string type.
+#[cfg(target_os = "windows")]
+fn read_reg_sz(root: HKEY, subkey: &str, value_name: &str) -> Option<String> {
+    let subkey_w: Vec<u16> = subkey.encode_utf16().chain(std::iter::once(0)).collect();
+    let name_w: Vec<u16> = value_name.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut hkey = HKEY::default();
+    unsafe {
+        RegOpenKeyExW(root, PCWSTR(subkey_w.as_ptr()), None, KEY_QUERY_VALUE, &mut hkey)
+    }
+    .ok()
+    .ok()?;
+    let mut data = vec![0u8; 2048];
+    let mut data_len = data.len() as u32;
+    let mut kind = REG_VALUE_TYPE::default();
+    let ok = unsafe {
+        RegQueryValueExW(
+            hkey,
+            PCWSTR(name_w.as_ptr()),
+            None,
+            Some(&mut kind as *mut REG_VALUE_TYPE),
+            Some(data.as_mut_ptr()),
+            Some(&mut data_len),
+        )
+    }
+    .is_ok();
+    let _ = unsafe { RegCloseKey(hkey) };
+    if !ok || kind != REG_SZ {
+        return None;
+    }
+    let chars = data_len as usize / 2;
+    let words: Vec<u16> = data[..chars * 2]
+        .chunks_exact(2)
+        .map(|b| u16::from_le_bytes([b[0], b[1]]))
+        .collect();
+    Some(
+        String::from_utf16_lossy(&words)
+            .trim_end_matches('\0')
+            .to_string(),
+    )
+}
+
+/// Returns true if Tumbler's executable is the registered handler for .pdf files.
+///
+/// Checks the Windows 10/11 UserChoice key first (the authoritative source set
+/// by "Default Apps" settings), then falls back to the classic HKCU association.
+/// Either way, resolves the ProgID's open command and compares it against our
+/// own exe path so we don't accidentally match a ProgID that happens to contain
+/// "Tumbler" in its name.
+#[cfg(target_os = "windows")]
+fn tumbler_is_default_pdf_handler() -> bool {
+    fn check() -> Option<bool> {
+        // Windows 10/11 UserChoice — authoritative default-app selection.
+        let prog_id = read_reg_sz(
+            HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\Shell\Associations\FileAssociations\.pdf\UserChoice",
+            "ProgId",
+        )
+        // Older / pre-UserChoice path.
+        .or_else(|| read_reg_sz(HKEY_CURRENT_USER, r"Software\Classes\.pdf", ""))?;
+
+        // Resolve the open command for that ProgId.  Check HKCU first (per-user
+        // installs like Tumbler), then HKCR (the merged HKCU+HKLM view) for
+        // system-wide installs of other apps.
+        let cmd_subkey = format!(r"Software\Classes\{}\shell\open\command", prog_id);
+        let command = read_reg_sz(HKEY_CURRENT_USER, &cmd_subkey, "")
+            .or_else(|| read_reg_sz(HKEY_CLASSES_ROOT, &cmd_subkey, ""))?;
+
+        let exe = std::env::current_exe().ok()?;
+        let exe_lower = exe.to_string_lossy().to_lowercase();
+        Some(command.to_lowercase().contains(exe_lower.as_str()))
+    }
+    check().unwrap_or(false)
 }
 
 /// True if `InprocServer32` already points to `dll_path`.
