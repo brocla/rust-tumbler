@@ -1,6 +1,6 @@
 use crate::commands::ocr::{
     cache_get, ocr_page_into_cache, ocr_words_to_lines, ocr_words_to_text, OcrCache, OcrEngine,
-    OcrLine, OcrProgress, OcrWord,
+    OcrLine, OcrProgress,
 };
 use crate::error::AppError;
 use crate::state::{lock_mutex, AppState, DocEntry};
@@ -464,6 +464,7 @@ fn export_text_impl(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::ocr::OcrWord;
     use crate::state::DocEntry;
 
     /// Loads the checked-in fixture into `state` under `doc_id`.

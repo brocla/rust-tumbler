@@ -5,7 +5,7 @@
 
 [![CI](https://github.com/brocla/rust-tumbler/actions/workflows/ci.yml/badge.svg)](https://github.com/brocla/rust-tumbler/actions/workflows/ci.yml)
 
-A personal PDF viewer for Windows. 
+A PDF toolbox for Windows. 
 
 Built with Tauri v2
 (Rust backend, React/TypeScript frontend) and pdfium.
@@ -14,17 +14,14 @@ Built with Tauri v2
 
 ## Features
 
+- Page operations: delete, rotate, reorder (drag-and-drop), merge, and split pages
+- Text layer with copy-to-clipboard and full-document search
 - Continuous-scroll page viewer with smooth zoom (presets, +/-, and
   Ctrl+scroll)
-- Native Windows printing at printer-native resolution, with in-progress cancellation
-- Text layer with copy-to-clipboard and full-document search
 - OCR for scanned pages — make image-only pages searchable, selectable, and copyable (per page or whole-document)
 - Export all page text to a `.txt` file
-- Thumbnail sidebar for quick page navigation
 - Document metadata viewing and editing
-- Page operations: delete, rotate, reorder (drag-and-drop), merge, and split pages
-- Multiple documents open in draggable, reorderable tabs
-- Display modes: normal, inverted, and sepia
+- Native Windows printing at printer-native resolution, with in-progress cancellation
 
 
 ## UI
@@ -160,6 +157,10 @@ Planned enhancements:
   layer so the OCR'd document is searchable in any PDF reader (the in-app
   ephemeral OCR above already ships).
 - **Web Optimization** - Compress, Linearize
+- **open password protected files**
+- **CLI**
+- **Detect ISO Standard**
+- **Verify Digital Signatures**
  
 
 
