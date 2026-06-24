@@ -1,4 +1,4 @@
-use crate::commands::ocr::{cache_get, cache_set, OcrCache, OcrEngine, OcrWord, WindowsOcrEngine};
+use crate::commands::ocr::{cache_get, OcrCache, OcrEngine, OcrWord, WindowsOcrEngine};
 use crate::error::AppError;
 use pdfium_render::prelude::*;
 use std::collections::HashMap;
@@ -71,8 +71,9 @@ impl AppState {
         cache_get(&self.ocr_cache, doc_id, page)
     }
 
+    #[cfg(test)]
     pub fn set_ocr_words(&self, doc_id: &str, page: u32, words: Vec<OcrWord>) {
-        cache_set(&self.ocr_cache, doc_id, page, words);
+        crate::commands::ocr::cache_set(&self.ocr_cache, doc_id, page, words);
     }
 
     /// Drops every cached page for a document. Called on close (and after an
