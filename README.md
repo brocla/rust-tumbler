@@ -3,12 +3,14 @@
 
 # Tumbler
 
-[![CI](https://github.com/brocla/rust-tumbler/actions/workflows/ci.yml/badge.svg)](https://github.com/brocla/rust-tumbler/actions/workflows/ci.yml)
 
-A PDF toolbox for Windows. 
+
+## A PDF toolbox for Windows. 
 
 Built with Tauri v2
-(Rust backend, React/TypeScript frontend) and pdfium.
+(Rust backend, React/TypeScript frontend) and pdfium. 
+
+[![CI](https://github.com/brocla/rust-tumbler/actions/workflows/ci.yml/badge.svg)](https://github.com/brocla/rust-tumbler/actions/workflows/ci.yml)
 
 </div>
 
