@@ -91,6 +91,9 @@ describe("SearchPanel", () => {
     expect(invoke).toHaveBeenCalledWith("search_document", {
       docId: "doc-1",
       query: "banana",
+      matchCase: false,
+      wholeWord: false,
+      useRegex: false,
     });
     // The re-search surfaced a match via the OCR fallback.
     expect(usePdfStore.getState().tabs[0].searchResults).toHaveLength(1);
@@ -114,5 +117,166 @@ describe("SearchPanel", () => {
 
     expect(screen.getByText(/OCR failed:/)).toBeInTheDocument();
     expect(screen.getByText(/install an OCR language pack/)).toBeInTheDocument();
+  });
+
+  // ── Search mode toggle tests (issue #6) ────────────────────────────────────
+  // These tests describe the three toggle buttons that will be added to the
+  // SearchPanel: "Match case", "Whole word", and "Regular expression".
+  // They will fail until the feature is implemented.
+
+  it("renders three search-mode toggle buttons", () => {
+    setTab();
+    render(<SearchPanel />);
+
+    expect(screen.getByTitle("Match case")).toBeInTheDocument();
+    expect(screen.getByTitle("Whole word")).toBeInTheDocument();
+    expect(screen.getByTitle("Regular expression")).toBeInTheDocument();
+  });
+
+  it("Match case toggle starts unpressed and becomes pressed on click", () => {
+    setTab();
+    render(<SearchPanel />);
+
+    const btn = screen.getByTitle("Match case");
+    expect(btn).toHaveAttribute("aria-pressed", "false");
+
+    fireEvent.click(btn);
+
+    expect(btn).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("Whole word toggle starts unpressed and becomes pressed on click", () => {
+    setTab();
+    render(<SearchPanel />);
+
+    const btn = screen.getByTitle("Whole word");
+    expect(btn).toHaveAttribute("aria-pressed", "false");
+
+    fireEvent.click(btn);
+
+    expect(btn).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("Regular expression toggle starts unpressed and becomes pressed on click", () => {
+    setTab();
+    render(<SearchPanel />);
+
+    const btn = screen.getByTitle("Regular expression");
+    expect(btn).toHaveAttribute("aria-pressed", "false");
+
+    fireEvent.click(btn);
+
+    expect(btn).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("enabling Match case passes matchCase:true to search_document", async () => {
+    setTab({ searchQuery: "Test" });
+    vi.mocked(invoke).mockResolvedValue([]);
+
+    render(<SearchPanel />);
+
+    // Enable match-case then trigger a new search via input change.
+    fireEvent.click(screen.getByTitle("Match case"));
+
+    const input = screen.getByPlaceholderText("Search...");
+    await act(async () => {
+      fireEvent.change(input, { target: { value: "Test" } });
+      // Advance past the 300 ms debounce.
+      await new Promise((r) => setTimeout(r, 350));
+    });
+
+    expect(invoke).toHaveBeenCalledWith("search_document", {
+      docId: "doc-1",
+      query: "Test",
+      matchCase: true,
+      wholeWord: false,
+      useRegex: false,
+    });
+  });
+
+  it("enabling Whole word passes wholeWord:true to search_document", async () => {
+    setTab({ searchQuery: "Test" });
+    vi.mocked(invoke).mockResolvedValue([]);
+
+    render(<SearchPanel />);
+
+    fireEvent.click(screen.getByTitle("Whole word"));
+
+    const input = screen.getByPlaceholderText("Search...");
+    await act(async () => {
+      fireEvent.change(input, { target: { value: "Test" } });
+      await new Promise((r) => setTimeout(r, 350));
+    });
+
+    expect(invoke).toHaveBeenCalledWith("search_document", {
+      docId: "doc-1",
+      query: "Test",
+      matchCase: false,
+      wholeWord: true,
+      useRegex: false,
+    });
+  });
+
+  it("enabling Regular expression passes useRegex:true to search_document", async () => {
+    setTab({ searchQuery: "Test" });
+    vi.mocked(invoke).mockResolvedValue([]);
+
+    render(<SearchPanel />);
+
+    fireEvent.click(screen.getByTitle("Regular expression"));
+
+    const input = screen.getByPlaceholderText("Search...");
+    await act(async () => {
+      fireEvent.change(input, { target: { value: "Test" } });
+      await new Promise((r) => setTimeout(r, 350));
+    });
+
+    expect(invoke).toHaveBeenCalledWith("search_document", {
+      docId: "doc-1",
+      query: "Test",
+      matchCase: false,
+      wholeWord: false,
+      useRegex: true,
+    });
+  });
+
+  it("toggling a flag after a tab switch does not fire a cross-tab search", async () => {
+    // Start on tab A with an active query.
+    usePdfStore.setState({
+      tabs: [
+        makeTab({ id: "tab-a", docId: "doc-a", searchQuery: "foo" }),
+        makeTab({ id: "tab-b", docId: "doc-b", searchQuery: "" }),
+      ],
+      activeTabId: "tab-a",
+      activeSidebarTool: "search",
+      sidebarWidth: 250,
+    });
+    vi.mocked(invoke).mockResolvedValue([]);
+
+    const { rerender } = render(<SearchPanel />);
+
+    // Switch to tab B — this should reset isMountedRef so the next toggle
+    // skips the search (avoids a cross-tab invoke with doc-a's query).
+    await act(async () => {
+      usePdfStore.setState({ activeTabId: "tab-b" });
+      rerender(<SearchPanel />);
+    });
+
+    vi.mocked(invoke).mockClear();
+
+    // Toggle a flag on tab B. Because isMountedRef was reset, the effect
+    // skips this first run and does NOT call invoke.
+    await act(async () => {
+      fireEvent.click(screen.getByTitle("Match case"));
+      await new Promise((r) => setTimeout(r, 50));
+    });
+
+    // invoke must not have been called with doc-a's stale query.
+    const crossTabCall = vi.mocked(invoke).mock.calls.find(
+      (call) =>
+        call[0] === "search_document" &&
+        (call[1] as Record<string, unknown>)["docId"] === "doc-a",
+    );
+    expect(crossTabCall).toBeUndefined();
   });
 });

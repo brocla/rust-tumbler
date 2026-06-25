@@ -190,6 +190,11 @@ body {
   border-color: transparent;
 }
 
+.toolbar-button.active {
+  color: var(--accent, #0078d4);
+  background: color-mix(in srgb, var(--accent, #0078d4) 12%, transparent);
+}
+
 .toolbar-button-text {
   width: auto;
   padding: 0 10px;

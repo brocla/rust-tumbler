@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { ChevronUp, ChevronDown } from "lucide-react";
+import { ChevronUp, ChevronDown, CaseSensitive, WholeWord, Regex } from "lucide-react";
 import { usePdfStore } from "../store/usePdfStore";
 import type { SearchResult } from "../store/usePdfStore";
 
@@ -22,8 +22,14 @@ export function SearchPanel() {
   const [ocrError, setOcrError] = useState<string | null>(null);
   // Pages already OCR'd this session, so we don't re-prompt for them.
   const [ocrDonePages, setOcrDonePages] = useState<Set<number>>(new Set());
+  const [matchCase, setMatchCase] = useState(false);
+  const [wholeWord, setWholeWord] = useState(false);
+  const [useRegex, setUseRegex] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout>>();
+  // Tracks whether the component has completed its first render so the
+  // search-mode effect can skip the initial (no-op) run.
+  const isMountedRef = useRef(false);
 
   const docId = activeTab?.docId ?? "";
   const tabId = activeTab?.id ?? "";
@@ -53,6 +59,9 @@ export function SearchPanel() {
         const results = await invoke<SearchResult[]>("search_document", {
           docId,
           query: q,
+          matchCase,
+          wholeWord,
+          useRegex,
         });
         updateTab(tabId, {
           searchQuery: q,
@@ -71,7 +80,7 @@ export function SearchPanel() {
         setSearching(false);
       }
     },
-    [tabId, docId, updateTab],
+    [tabId, docId, updateTab, matchCase, wholeWord, useRegex],
   );
 
   const runOcr = useCallback(async () => {
@@ -118,12 +127,29 @@ export function SearchPanel() {
     inputRef.current?.select();
   }, []);
 
-  // Clear any stale search/OCR state when switching tabs
+  // Clear any stale search/OCR state when switching tabs.
+  // Also reset isMountedRef so the toggle-mode effect does not fire a
+  // cross-tab search on the first toggle after a tab switch.
   useEffect(() => {
     setSearchError(null);
     setOcrError(null);
     setOcrDonePages(new Set());
+    isMountedRef.current = false;
   }, [tabId]);
+
+  // Re-run search when a mode toggle changes (if there is an active query).
+  // Skip the initial mount — the effect only matters when the user toggles
+  // a mode after the component is already showing results.
+  useEffect(() => {
+    if (!isMountedRef.current) {
+      isMountedRef.current = true;
+      return;
+    }
+    if (query.length > 0) {
+      doSearch(query);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [matchCase, wholeWord, useRegex]);
 
   const handleResultClick = (page: number) => {
     if (!tabId) return;
@@ -164,6 +190,33 @@ export function SearchPanel() {
           title="Next (Enter)"
         >
           <ChevronDown size={16} />
+        </button>
+      </div>
+
+      <div className="search-mode-row">
+        <button
+          className={`toolbar-button${matchCase ? " active" : ""}`}
+          onClick={() => setMatchCase(v => !v)}
+          title="Match case"
+          aria-pressed={matchCase}
+        >
+          <CaseSensitive size={16} />
+        </button>
+        <button
+          className={`toolbar-button${wholeWord ? " active" : ""}`}
+          onClick={() => setWholeWord(v => !v)}
+          title="Whole word"
+          aria-pressed={wholeWord}
+        >
+          <WholeWord size={16} />
+        </button>
+        <button
+          className={`toolbar-button${useRegex ? " active" : ""}`}
+          onClick={() => setUseRegex(v => !v)}
+          title="Regular expression"
+          aria-pressed={useRegex}
+        >
+          <Regex size={16} />
         </button>
       </div>
 

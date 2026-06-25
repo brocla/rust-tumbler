@@ -2,6 +2,7 @@ use crate::commands::ocr::{
     cache_get, ocr_page_into_cache, ocr_words_to_lines, ocr_words_to_text, OcrCache, OcrEngine,
     OcrLine, OcrProgress,
 };
+use regex::Regex;
 use crate::error::AppError;
 use crate::state::{lock_mutex, AppState, DocEntry};
 use pdfium_render::prelude::*;
@@ -202,18 +203,36 @@ pub fn search_document(
     state: State<'_, AppState>,
     doc_id: String,
     query: String,
+    match_case: bool,
+    whole_word: bool,
+    use_regex: bool,
 ) -> Result<Vec<SearchResult>, String> {
-    search_document_impl(&state, doc_id, query).map_err(String::from)
+    search_document_impl(&state, doc_id, query, match_case, whole_word, use_regex)
+        .map_err(String::from)
 }
 
 fn search_document_impl(
     state: &AppState,
     doc_id: String,
     query: String,
+    match_case: bool,
+    whole_word: bool,
+    use_regex: bool,
 ) -> Result<Vec<SearchResult>, AppError> {
     if query.is_empty() {
         return Ok(Vec::new());
     }
+
+    // Compile the regex once (before any page loop) if regex mode is active.
+    // An invalid pattern returns an error immediately.
+    let regex_pattern = if use_regex {
+        Some(
+            Regex::new(&query)
+                .map_err(|e| AppError::Other(format!("Invalid regex: {e}")))?,
+        )
+    } else {
+        None
+    };
 
     let entry = state.get_document(&doc_id)?;
     let entry = lock_mutex(&entry)?;
@@ -221,8 +240,9 @@ fn search_document_impl(
     let page_count = entry.document.pages().len();
     let mut results = Vec::new();
 
-    // Case-insensitive search (the default for PdfSearchOptions)
-    let options = PdfSearchOptions::new();
+    let options = PdfSearchOptions::new()
+        .match_case(match_case)
+        .match_whole_word(whole_word);
 
     for page_idx in 0..page_count {
         let pdf_page = match entry.document.pages().get(page_idx as i32) {
@@ -238,31 +258,70 @@ fn search_document_impl(
             Err(_) => continue,
         };
 
-        let search = match text.search(&query, &options) {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
         let mut page_rects = Vec::new();
 
-        // Each match returns PdfPageTextSegments — one or more visual
-        // rectangles (e.g. a match that spans a line break yields two rects).
-        // These rects come from FPDFText_GetRect, which is the canonical
-        // pdfium function for computing highlight positions.
-        for match_segments in search.iter(PdfSearchDirection::SearchForward) {
-            for i in 0..match_segments.len() {
-                if let Ok(segment) = match_segments.get(i) {
-                    let bounds = segment.bounds();
-                    let x = bounds.left().value - origin_x;
-                    let y = page_height - (bounds.top().value - origin_y);
-                    let w = bounds.right().value - bounds.left().value;
-                    let h = bounds.top().value - bounds.bottom().value;
+        if let Some(ref re) = regex_pattern {
+            // Regex mode: extract the full page text, find all matches,
+            // then use pdfium's text.search() on each unique literal matched
+            // string to obtain the highlight rectangles.
+            // Deduplication prevents calling text.search() N times for the
+            // same string, which would return all page-wide occurrences each
+            // time and produce duplicate rects.
+            let full_text = text.all();
+            let unique_matches: std::collections::HashSet<&str> =
+                re.find_iter(&full_text).map(|m| m.as_str()).collect();
+            // Use match_case(true): matched_str is the exact string the regex
+            // found, so the rect lookup must be case-exact so it does not also
+            // return rects for case-variants the regex did not select.
+            let lit_options = PdfSearchOptions::new().match_case(true);
+            for matched_str in &unique_matches {
+                if let Ok(search) = text.search(matched_str, &lit_options) {
+                    for match_segments in search.iter(PdfSearchDirection::SearchForward) {
+                        for i in 0..match_segments.len() {
+                            if let Ok(segment) = match_segments.get(i) {
+                                let bounds = segment.bounds();
+                                let x = bounds.left().value - origin_x;
+                                let y = page_height - (bounds.top().value - origin_y);
+                                let w = bounds.right().value - bounds.left().value;
+                                let h = bounds.top().value - bounds.bottom().value;
+                                page_rects.push(TextRect {
+                                    x,
+                                    y,
+                                    width: w,
+                                    height: h,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            // Non-regex mode: delegate match_case / whole_word to pdfium.
+            let search = match text.search(&query, &options) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
 
-                    page_rects.push(TextRect {
-                        x,
-                        y,
-                        width: w,
-                        height: h,
-                    });
+            // Each match returns PdfPageTextSegments — one or more visual
+            // rectangles (e.g. a match that spans a line break yields two rects).
+            // These rects come from FPDFText_GetRect, which is the canonical
+            // pdfium function for computing highlight positions.
+            for match_segments in search.iter(PdfSearchDirection::SearchForward) {
+                for i in 0..match_segments.len() {
+                    if let Ok(segment) = match_segments.get(i) {
+                        let bounds = segment.bounds();
+                        let x = bounds.left().value - origin_x;
+                        let y = page_height - (bounds.top().value - origin_y);
+                        let w = bounds.right().value - bounds.left().value;
+                        let h = bounds.top().value - bounds.bottom().value;
+
+                        page_rects.push(TextRect {
+                            x,
+                            y,
+                            width: w,
+                            height: h,
+                        });
+                    }
                 }
             }
         }
@@ -272,15 +331,64 @@ fn search_document_impl(
         if page_rects.is_empty() {
             let page_num = (page_idx + 1) as u32;
             if let Some(words) = state.get_ocr_words(&doc_id, page_num) {
-                let needle = query.to_lowercase();
-                for word in &words {
-                    if word.text.to_lowercase().contains(&needle) {
-                        page_rects.push(TextRect {
-                            x: word.rect.x,
-                            y: page_height - (word.rect.y + word.rect.height),
-                            width: word.rect.width,
-                            height: word.rect.height,
-                        });
+                if let Some(ref re) = regex_pattern {
+                    // Regex mode: reconstruct page text with per-word byte
+                    // offsets so patterns spanning multiple tokens (e.g.
+                    // `Test\s+Fixture`) can match across word boundaries.
+                    let mut page_text = String::new();
+                    let mut word_spans: Vec<(usize, usize)> = Vec::new();
+                    for word in &words {
+                        let start = page_text.len();
+                        page_text.push_str(&word.text);
+                        word_spans.push((start, page_text.len()));
+                        page_text.push(' ');
+                    }
+                    for mat in re.find_iter(&page_text) {
+                        let (ms, me) = (mat.start(), mat.end());
+                        for (i, &(ws, we)) in word_spans.iter().enumerate() {
+                            if ws < me && we > ms {
+                                let word = &words[i];
+                                page_rects.push(TextRect {
+                                    x: word.rect.x,
+                                    y: page_height - (word.rect.y + word.rect.height),
+                                    width: word.rect.width,
+                                    height: word.rect.height,
+                                });
+                            }
+                        }
+                    }
+                } else {
+                    // Non-regex mode: test each word token.
+                    // Compute needle once outside the loop to avoid a heap
+                    // allocation per word for the lowercased query string.
+                    let needle = if match_case {
+                        query.clone()
+                    } else {
+                        query.to_lowercase()
+                    };
+                    for word in &words {
+                        let matches = if match_case {
+                            if whole_word {
+                                word.text == needle
+                            } else {
+                                word.text.contains(&needle)
+                            }
+                        } else {
+                            let haystack = word.text.to_lowercase();
+                            if whole_word {
+                                haystack == needle
+                            } else {
+                                haystack.contains(&needle)
+                            }
+                        };
+                        if matches {
+                            page_rects.push(TextRect {
+                                x: word.rect.x,
+                                y: page_height - (word.rect.y + word.rect.height),
+                                width: word.rect.width,
+                                height: word.rect.height,
+                            });
+                        }
                     }
                 }
             }
@@ -530,8 +638,15 @@ mod tests {
         let state = AppState::new(pdfium, None);
         open_fixture(&state, "doc1");
 
-        let results =
-            search_document_impl(&state, "doc1".to_string(), "Test".to_string()).expect("search");
+        let results = search_document_impl(
+            &state,
+            "doc1".to_string(),
+            "Test".to_string(),
+            false,
+            false,
+            false,
+        )
+        .expect("search");
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].page, 1);
@@ -549,8 +664,15 @@ mod tests {
         let state = AppState::new(pdfium, None);
         open_fixture(&state, "doc1");
 
-        let results = search_document_impl(&state, "doc1".to_string(), "Nonexistent".to_string())
-            .expect("search");
+        let results = search_document_impl(
+            &state,
+            "doc1".to_string(),
+            "Nonexistent".to_string(),
+            false,
+            false,
+            false,
+        )
+        .expect("search");
 
         assert!(results.is_empty());
     }
@@ -561,8 +683,15 @@ mod tests {
         let state = AppState::new(pdfium, None);
         open_fixture(&state, "doc1");
 
-        let results =
-            search_document_impl(&state, "doc1".to_string(), String::new()).expect("search");
+        let results = search_document_impl(
+            &state,
+            "doc1".to_string(),
+            String::new(),
+            false,
+            false,
+            false,
+        )
+        .expect("search");
 
         assert!(results.is_empty());
     }
@@ -591,8 +720,15 @@ mod tests {
         open_fixture(&state, "doc1");
         state.set_ocr_words("doc1", 1, vec![ocr_word("Banana")]);
 
-        let results =
-            search_document_impl(&state, "doc1".to_string(), "banana".to_string()).expect("search");
+        let results = search_document_impl(
+            &state,
+            "doc1".to_string(),
+            "banana".to_string(),
+            false,
+            false,
+            false,
+        )
+        .expect("search");
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].page, 1);
@@ -847,6 +983,246 @@ mod tests {
         assert!(content.contains("Scanned"), "cached OCR text missing: {content}");
         assert!(!content.contains("[no extractable text]"));
         std::fs::remove_file(&dest).ok();
+    }
+
+    // ── Search mode flag tests (issue #6) ──────────────────────────────────
+    // These tests call `search_document_impl` with the new `match_case`,
+    // `whole_word`, and `use_regex` parameters that will be added by the
+    // implementation.  They will not compile until those parameters exist —
+    // that is intentional (TDD red phase).
+
+    /// Default (case-insensitive) search finds "Test Fixture" via lowercase query.
+    #[test]
+    fn test_search_case_insensitive_default() {
+        let pdfium = crate::test_pdfium();
+        let state = AppState::new(pdfium, None);
+        open_fixture(&state, "doc1");
+
+        let results = search_document_impl(
+            &state,
+            "doc1".to_string(),
+            "test fixture".to_string(),
+            false, // match_case
+            false, // whole_word
+            false, // use_regex
+        )
+        .expect("search");
+
+        assert_eq!(results.len(), 1, "expected one page of results");
+    }
+
+    /// With match_case=true the lowercase query must not match "Test Fixture".
+    #[test]
+    fn test_search_match_case_rejects_wrong_case() {
+        let pdfium = crate::test_pdfium();
+        let state = AppState::new(pdfium, None);
+        open_fixture(&state, "doc1");
+
+        let results = search_document_impl(
+            &state,
+            "doc1".to_string(),
+            "test fixture".to_string(),
+            true,  // match_case
+            false, // whole_word
+            false, // use_regex
+        )
+        .expect("search");
+
+        assert!(
+            results.is_empty(),
+            "case-sensitive search should find no results for wrong case"
+        );
+    }
+
+    /// With match_case=true the correctly-cased query must match.
+    #[test]
+    fn test_search_match_case_accepts_right_case() {
+        let pdfium = crate::test_pdfium();
+        let state = AppState::new(pdfium, None);
+        open_fixture(&state, "doc1");
+
+        let results = search_document_impl(
+            &state,
+            "doc1".to_string(),
+            "Test Fixture".to_string(),
+            true,  // match_case
+            false, // whole_word
+            false, // use_regex
+        )
+        .expect("search");
+
+        assert_eq!(results.len(), 1, "expected one page of results");
+    }
+
+    /// With whole_word=true a prefix substring of a word must not match.
+    #[test]
+    fn test_search_whole_word_rejects_substring() {
+        let pdfium = crate::test_pdfium();
+        let state = AppState::new(pdfium, None);
+        open_fixture(&state, "doc1");
+
+        let results = search_document_impl(
+            &state,
+            "doc1".to_string(),
+            "Te".to_string(),
+            false, // match_case
+            true,  // whole_word
+            false, // use_regex
+        )
+        .expect("search");
+
+        assert!(
+            results.is_empty(),
+            "whole-word search should not match a substring"
+        );
+    }
+
+    /// A regex pattern matching the fixture text must return one result.
+    #[test]
+    fn test_search_regex_finds_pattern() {
+        let pdfium = crate::test_pdfium();
+        let state = AppState::new(pdfium, None);
+        open_fixture(&state, "doc1");
+
+        let results = search_document_impl(
+            &state,
+            "doc1".to_string(),
+            r"Test\s+Fixture".to_string(),
+            false, // match_case
+            false, // whole_word
+            true,  // use_regex
+        )
+        .expect("search");
+
+        assert_eq!(results.len(), 1, "regex should match the fixture text");
+    }
+
+    /// An invalid regex pattern must return Err rather than panic or silently
+    /// returning empty results.
+    #[test]
+    fn test_search_invalid_regex_returns_err() {
+        let pdfium = crate::test_pdfium();
+        let state = AppState::new(pdfium, None);
+        open_fixture(&state, "doc1");
+
+        let result = search_document_impl(
+            &state,
+            "doc1".to_string(),
+            "[invalid".to_string(),
+            false, // match_case
+            false, // whole_word
+            true,  // use_regex
+        );
+
+        assert!(result.is_err(), "invalid regex should return an error");
+    }
+
+    /// The regex path deduplicates matched strings before calling
+    /// text.search(), so each unique literal is searched once.  The fixture
+    /// contains two 'e' characters; with dedup, text.search("e") is called
+    /// once and returns 2 rects — not 4 (which would result from calling it
+    /// once per regex match without deduplication).
+    #[test]
+    fn test_search_regex_dedup_prevents_duplicate_rects() {
+        let pdfium = crate::test_pdfium();
+        let state = AppState::new(pdfium, None);
+        open_fixture(&state, "doc1");
+
+        // "e" (case-sensitive) matches twice in "Test Fixture" (positions 1 and 11).
+        let results = search_document_impl(
+            &state,
+            "doc1".to_string(),
+            "e".to_string(),
+            false, // match_case — regex itself is case-sensitive by default
+            false, // whole_word
+            true,  // use_regex
+        )
+        .expect("search");
+
+        assert_eq!(results.len(), 1, "should find matches on page 1");
+        assert_eq!(
+            results[0].rects.len(),
+            2,
+            "exactly 2 rects expected (one per 'e'); got {} — dedup may be broken",
+            results[0].rects.len()
+        );
+    }
+
+    /// OCR regex fallback reconstructs page text from word tokens so patterns
+    /// spanning multiple words (e.g. `Hello\s+World`) match correctly.
+    #[test]
+    fn test_search_ocr_regex_matches_across_word_tokens() {
+        let pdfium = crate::test_pdfium();
+        let state = AppState::new(pdfium, None);
+        open_fixture(&state, "doc1");
+        // "Hello" and "World" are not in the native fixture text, so pdfium
+        // returns no hits and the OCR fallback runs.
+        state.set_ocr_words(
+            "doc1",
+            1,
+            vec![ocr_word("Hello"), ocr_word("World")],
+        );
+
+        let results = search_document_impl(
+            &state,
+            "doc1".to_string(),
+            r"Hello\s+World".to_string(),
+            false, // match_case
+            false, // whole_word
+            true,  // use_regex
+        )
+        .expect("search");
+
+        assert_eq!(results.len(), 1, "regex should find the cross-word OCR match");
+        assert_eq!(
+            results[0].rects.len(),
+            2,
+            "both word tokens (Hello, World) should be highlighted"
+        );
+    }
+
+    /// OCR whole-word mode uses token equality (not split_whitespace) so a
+    /// query does not accidentally match a longer token that merely starts
+    /// with the same characters.
+    #[test]
+    fn test_search_ocr_whole_word_matches_exact_token() {
+        let pdfium = crate::test_pdfium();
+        let state = AppState::new(pdfium, None);
+        open_fixture(&state, "doc1");
+
+        // Use words that are absent from the pdfium fixture ("Test Fixture")
+        // so pdfium returns no hits and the OCR fallback runs.
+        // "Bananasplit" is not in the fixture; querying "Banana" must NOT
+        // match it under whole_word=true.
+        state.set_ocr_words("doc1", 1, vec![ocr_word("Bananasplit")]);
+
+        let no_match = search_document_impl(
+            &state,
+            "doc1".to_string(),
+            "Banana".to_string(),
+            false, // match_case
+            true,  // whole_word
+            false, // use_regex
+        )
+        .expect("search");
+        assert!(
+            no_match.is_empty(),
+            "whole_word should not match a prefix of a longer token"
+        );
+
+        // Swap in the exact token — now it must match.
+        state.set_ocr_words("doc1", 1, vec![ocr_word("Banana")]);
+
+        let matched = search_document_impl(
+            &state,
+            "doc1".to_string(),
+            "Banana".to_string(),
+            false, // match_case
+            true,  // whole_word
+            false, // use_regex
+        )
+        .expect("search");
+        assert_eq!(matched.len(), 1, "whole_word should match the exact token");
     }
 
     #[test]

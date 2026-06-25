@@ -4145,6 +4145,7 @@ dependencies = [
  "libloading",
  "lopdf",
  "pdfium-render",
+ "regex",
  "serde",
  "serde_json",
  "tauri",
