@@ -24,6 +24,7 @@ uuid = { version = "1", features = ["v4"] }
 pdfium-render = { version = "0.9", features = ["pdfium_use_win32", "thread_safe"] }
 libloading = "0.7"
 lopdf = "0.34"
+regex = "1"
 thiserror = "2"
 # Image decode/resize/JPEG re-encode for the image-recompression step.
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
