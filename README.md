@@ -11,6 +11,12 @@ Built with Tauri v2
 (Rust backend, React/TypeScript frontend) and pdfium. 
 
 [![CI](https://github.com/brocla/rust-tumbler/actions/workflows/ci.yml/badge.svg)](https://github.com/brocla/rust-tumbler/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+![Rust Edition](https://img.shields.io/badge/Rust-Edition%202021-orange)
+<!-- [![dependency status](https://deps.rs/repo/github/brocla/rust-tumbler/status.svg?path=src-tauri)](https://deps.rs/repo/github/brocla/rust-tumbler?path=src-tauri) -->
+
+
+
 
 </div>
 
@@ -18,13 +24,27 @@ Built with Tauri v2
 
 - Page operations: delete, rotate, reorder (drag-and-drop), merge, and split pages
 - Text layer with copy-to-clipboard and full-document search
-- Continuous-scroll page viewer with smooth zoom (presets, +/-, and
-  Ctrl+scroll)
-- OCR for scanned pages — make image-only pages searchable, selectable, and copyable (per page or whole-document)
-- Export all page text to a `.txt` file
-- Document metadata viewing and editing
-- Native Windows printing at printer-native resolution, with in-progress cancellation
+- OCR for scanned pages — make image-only pages searchable, selectable, and copyable
+- Exptract text to a file
+- View and Edit metadata
+- Native Windows printing at printer-native resolution
 
+
+## Futures
+
+Planned enhancements:
+
+- **Form Filling** — Enumerate form fields via pdfium's form API, render
+  interactive overlays, and save filled forms.
+- **OCR — Save Searchable Copy** — Persist recognized text as an invisible
+  layer so the OCR'd document is searchable in any PDF reader (the in-app
+  ephemeral OCR above already ships).
+- **Web Optimization** - Compress, Linearize
+- **open password protected files**
+- **CLI**
+- **Detect ISO Standard**
+- **Verify Digital Signatures**
+ 
 
 ## UI
 
@@ -149,21 +169,7 @@ rust-tumbler/
   [pdfium-binaries](https://github.com/bblanchon/pdfium-binaries) releases),
   placed at `src-tauri/resources/pdfium.dll` (not checked into the repo)
 
-## Future
 
-Planned enhancements:
-
-- **Form Filling** — Enumerate form fields via pdfium's form API, render
-  interactive overlays, and save filled forms.
-- **OCR — Save Searchable Copy** — Persist recognized text as an invisible
-  layer so the OCR'd document is searchable in any PDF reader (the in-app
-  ephemeral OCR above already ships).
-- **Web Optimization** - Compress, Linearize
-- **open password protected files**
-- **CLI**
-- **Detect ISO Standard**
-- **Verify Digital Signatures**
- 
 
 
 ### Setup
@@ -203,3 +209,4 @@ Version is set in three places — keep them in sync:
 - `src-tauri/tauri.conf.json` → `"version"`
 - `src-tauri/Cargo.toml` → `version`
 
+THe output 
