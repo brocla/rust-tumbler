@@ -549,6 +549,24 @@ body {
   align-items: center;
 }
 
+.search-mode-row {
+  display: flex;
+  gap: 4px;
+}
+
+.search-mode-row .toolbar-button {
+  border-color: var(--color-border);
+  background: var(--color-bg-secondary);
+}
+
+.search-mode-row .toolbar-button:hover {
+  background: var(--color-bg-tertiary);
+}
+
+.search-mode-row .toolbar-button.active {
+  border-color: var(--color-accent, #0078d4);
+}
+
 .search-input {
   flex: 1;
   height: 28px;

@@ -1,6 +1,42 @@
 import { useEffect, useRef, useCallback, useMemo } from "react";
 import { usePdfStore } from "../store/usePdfStore";
 import { PageSlot } from "./PageSlot";
+import type { SearchResult } from "../store/usePdfStore";
+
+/** Returns the {page, rect} for a given global result index, or null. */
+export function activeSearchRect(
+  results: SearchResult[],
+  index: number,
+): { page: number; rect: { x: number; y: number; width: number; height: number } } | null {
+  if (index < 0) return null;
+  let offset = 0;
+  for (const result of results) {
+    const end = offset + result.rects.length;
+    if (index >= offset && index < end) {
+      return { page: result.page, rect: result.rects[index - offset] };
+    }
+    offset += result.rects.length;
+  }
+  return null;
+}
+
+/**
+ * Returns the scrollTop needed to center a rect in the viewport, or null if
+ * the rect is already fully visible (no scroll needed).
+ */
+export function scrollTargetForRect(
+  pageSlotOffsetTop: number,
+  rect: { y: number; height: number },
+  zoom: number,
+  scrollTop: number,
+  clientHeight: number,
+): number | null {
+  const scale = zoom / 100;
+  const rectTop = pageSlotOffsetTop + rect.y * scale;
+  const rectBottom = rectTop + rect.height * scale;
+  if (rectTop >= scrollTop && rectBottom <= scrollTop + clientHeight) return null;
+  return Math.max(0, (rectTop + rectBottom) / 2 - clientHeight / 2);
+}
 
 // Floor for the render radius, used before the container has been measured
 // and as a sane minimum at high zoom where few pages are visible.
@@ -174,6 +210,34 @@ export function ContinuousViewer() {
       }, 1000);
     }
   }, [currentPage]);
+
+  // When the active search result changes, scroll so the matched rect is
+  // visible — not just the page. This handles the case where the page is
+  // zoomed large enough that the match is off-screen even though the page
+  // itself is partly in view.
+  useEffect(() => {
+    const hit = activeSearchRect(searchResults, searchResultIndex);
+    if (!hit) return;
+
+    const pageSlot = pageRefsMap.current.get(hit.page);
+    const container = containerRef.current;
+    if (!pageSlot || !container) return;
+
+    const target = scrollTargetForRect(
+      pageSlot.offsetTop,
+      hit.rect,
+      zoom,
+      container.scrollTop,
+      container.clientHeight,
+    );
+    if (target === null) return;
+
+    suppressObserver.current = true;
+    container.scrollTo({ top: target, behavior: "smooth" });
+    setTimeout(() => {
+      suppressObserver.current = false;
+    }, 1000);
+  }, [searchResultIndex, searchResults, zoom]);
 
   // Save/restore scroll position when switching tabs
   useEffect(() => {
