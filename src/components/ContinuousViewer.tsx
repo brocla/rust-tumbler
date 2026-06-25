@@ -76,6 +76,7 @@ export function ContinuousViewer() {
   const pageDimensions = activeTab?.pageDimensions ?? [];
   const currentPage = activeTab?.currentPage ?? 1;
   const zoom = activeTab?.zoom ?? 100;
+  const zoomMode = activeTab?.zoomMode ?? "numeric";
   const displayMode = activeTab?.displayMode ?? "normal";
   const tabId = activeTab?.id ?? "";
   const pagesVersion = activeTab?.pagesVersion ?? 0;
@@ -123,6 +124,31 @@ export function ContinuousViewer() {
   useEffect(() => {
     currentPageRef.current = currentPage;
   }, [currentPage]);
+
+  // Fit-mode: recompute zoom whenever the container or current page changes.
+  useEffect(() => {
+    if (zoomMode === "numeric") return;
+    const container = containerRef.current;
+    if (!container || pageDimensions.length === 0 || !tabId) return;
+
+    const PADDING = 32; // 16px each side (--page-gap)
+
+    const recalc = () => {
+      const dim = pageDimensions[Math.min(currentPage - 1, pageDimensions.length - 1)];
+      if (!dim) return;
+      const fitW = ((container.clientWidth - PADDING) / dim.width) * 100;
+      const newZoom =
+        zoomMode === "fit-width"
+          ? fitW
+          : ((container.clientHeight - PADDING) / dim.height) * 100;
+      updateTab(tabId, { zoom: Math.max(10, Math.min(400, Math.round(newZoom))) });
+    };
+
+    recalc();
+    const ro = new ResizeObserver(recalc);
+    ro.observe(container);
+    return () => ro.disconnect();
+  }, [zoomMode, pageDimensions, currentPage, tabId, updateTab]);
 
   // IntersectionObserver to track the topmost visible page.
   // We pick the minimum page number among all currently-intersecting pages
@@ -265,7 +291,7 @@ export function ContinuousViewer() {
 
       const delta = e.deltaY > 0 ? -12 : 12;
       const newZoom = Math.max(10, Math.min(400, activeTab.zoom + delta));
-      if (newZoom !== activeTab.zoom) {
+      if (newZoom !== activeTab.zoom || activeTab.zoomMode !== "numeric") {
         updateTab(tabId, { zoom: newZoom, zoomMode: "numeric" });
       }
     },

@@ -1,4 +1,4 @@
-import { BookOpen, ChevronLeft, ChevronRight, Moon, Printer, ScanSearch, ScrollText, Sun, ZoomIn, ZoomOut } from "lucide-react";
+import { BookOpen, ChevronLeft, ChevronRight, Moon, MoveHorizontal, MoveVertical, Printer, ScanSearch, ScrollText, Sun, ZoomIn, ZoomOut } from "lucide-react";
 import { save, message, ask } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { usePdfStore } from "../store/usePdfStore";
@@ -67,6 +67,16 @@ export function Toolbar({ onOpenFile, onPrint }: ToolbarProps) {
     if (!isNaN(val)) {
       updateTab(activeTab.id, { zoom: val, zoomMode: "numeric" });
     }
+  };
+
+  const handleFitWidth = () => {
+    if (!activeTab) return;
+    updateTab(activeTab.id, { zoomMode: activeTab.zoomMode === "fit-width" ? "numeric" : "fit-width" });
+  };
+
+  const handleFitPage = () => {
+    if (!activeTab) return;
+    updateTab(activeTab.id, { zoomMode: activeTab.zoomMode === "fit-page" ? "numeric" : "fit-page" });
   };
 
   // Wheel-zoom moves in fixed increments and isn't snapped to ZOOM_PRESETS,
@@ -266,6 +276,20 @@ export function Toolbar({ onOpenFile, onPrint }: ToolbarProps) {
               title="Zoom in"
             >
               <ZoomIn size={18} />
+            </button>
+            <button
+              className={`toolbar-button${activeTab.zoomMode === "fit-width" ? " active" : ""}`}
+              onClick={handleFitWidth}
+              title="Fit to width"
+            >
+              <MoveHorizontal size={18} />
+            </button>
+            <button
+              className={`toolbar-button${activeTab.zoomMode === "fit-page" ? " active" : ""}`}
+              onClick={handleFitPage}
+              title="Fit to height"
+            >
+              <MoveVertical size={18} />
             </button>
           </div>
 
