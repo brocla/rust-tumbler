@@ -17,4 +17,14 @@ let cargo = readFileSync(cargoPath, "utf8");
 cargo = cargo.replace(/^version = ".*"/m, `version = "${version}"`);
 writeFileSync(cargoPath, cargo);
 
+// Cargo.lock — update only this crate's [[package]] entry. Scoped to the line
+// immediately after `name = "tumbler"` so it never touches dependency versions.
+const lockPath = "src-tauri/Cargo.lock";
+let lock = readFileSync(lockPath, "utf8");
+lock = lock.replace(
+  /(name = "tumbler"\r?\nversion = ")[^"]*"/,
+  `$1${version}"`,
+);
+writeFileSync(lockPath, lock);
+
 console.log(`Version synced to ${version}`);
