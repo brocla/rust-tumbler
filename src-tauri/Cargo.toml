@@ -34,6 +34,12 @@ flate2 = "1"
 
 # Pin time to avoid blanket impl conflict with cookie 0.18
 time = "=0.3.41"
+cms = "0.2.3"
+der = "0.7"
+const-oid = "0.9"
+x509-cert = "0.2.5"
+sha2 = "0.10"
+hex = "0.4.3"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.61", features = [

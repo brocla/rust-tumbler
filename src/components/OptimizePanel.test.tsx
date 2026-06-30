@@ -274,6 +274,25 @@ describe("OptimizePanel", () => {
     ).toBeTruthy();
   });
 
+  it("warns before compressing a signed document and aborts if declined", async () => {
+    usePdfStore.setState({
+      tabs: [makeTab({ signatureStatus: "verified" })],
+      activeTabId: "tab-1",
+    });
+    vi.mocked(confirm).mockResolvedValue(false); // user cancels
+
+    render(<OptimizePanel />);
+    await act(async () => {
+      fireEvent.click(screen.getByText("Run"));
+    });
+
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(String(vi.mocked(confirm).mock.calls[0][0])).toMatch(/signed/i);
+    expect(
+      vi.mocked(invoke).mock.calls.find((c) => c[0] === "run_optimization_steps"),
+    ).toBeUndefined();
+  });
+
   it("does not warn when the file declares no PDF/A or PDF/X conformance", async () => {
     render(<OptimizePanel />); // default mock: declared: []
     await act(async () => {

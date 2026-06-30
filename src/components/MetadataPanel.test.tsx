@@ -150,6 +150,37 @@ describe("MetadataPanel", () => {
     expect(value).toBeTruthy();
   });
 
+  it("shows a read-only signature summary with honest wording", async () => {
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === "get_metadata") return metadataFixture("Doc");
+      if (cmd === "get_conformance") return { declared: [] };
+      if (cmd === "get_signature_info")
+        return {
+          count: 1,
+          status: "verified",
+          signatures: [
+            {
+              signerName: "Jane Doe",
+              reason: "",
+              location: "",
+              signingTime: "",
+              integrityOk: true,
+              modifiedAfter: false,
+            },
+          ],
+        };
+      return undefined;
+    });
+
+    render(<MetadataPanel />);
+
+    // "intact", not "trusted"; and it's a value cell, not an input.
+    const value = await screen.findByText("Signed by Jane Doe — intact");
+    expect(value).toBeTruthy();
+    expect(value.tagName).not.toBe("INPUT");
+    expect(screen.getByText("Signature")).toBeTruthy();
+  });
+
   it("shows an em dash when no conformance is declared", async () => {
     vi.mocked(invoke).mockImplementation(async (cmd: string) => {
       if (cmd === "get_metadata") return metadataFixture("Doc");

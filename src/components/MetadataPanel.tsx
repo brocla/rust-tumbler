@@ -2,6 +2,29 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { usePdfStore } from "../store/usePdfStore";
+import { confirmBreakingEdit } from "../utils/confirmBreakingEdit";
+import {
+  isSigned,
+  SIGNATURE_EDIT_WARNING,
+  type SignatureInfo,
+} from "../utils/signature";
+
+/** One read-only line summarising the document's signatures, honest about
+ * meaning intact (not trusted). "" when unsigned. */
+function describeSignatures(info: SignatureInfo | null): string {
+  if (!info || !info.count || !info.signatures) return "";
+  return info.signatures
+    .map((s) => {
+      const who = s.signerName || "Unknown signer";
+      const state = !s.integrityOk
+        ? "could not be verified"
+        : s.modifiedAfter
+          ? "intact, but modified after signing"
+          : "intact";
+      return `Signed by ${who} — ${state}`;
+    })
+    .join("; ");
+}
 
 interface DocumentMetadata {
   title: string;
@@ -65,6 +88,7 @@ export function MetadataPanel() {
   const [metadata, setMetadata] = useState<DocumentMetadata | null>(null);
   const [edited, setEdited] = useState<EditableValues | null>(null);
   const [conformance, setConformance] = useState<string[]>([]);
+  const [signature, setSignature] = useState<SignatureInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
@@ -95,6 +119,13 @@ export function MetadataPanel() {
         if (!cancelled) setConformance(claims?.declared ?? []);
       } catch {
         if (!cancelled) setConformance([]);
+      }
+      // Signature verification is likewise read-only/derived.
+      try {
+        const sig = await invoke<SignatureInfo>("get_signature_info", { docId });
+        if (!cancelled) setSignature(sig);
+      } catch {
+        if (!cancelled) setSignature(null);
       }
     };
 
@@ -136,6 +167,12 @@ export function MetadataPanel() {
   };
 
   const handleSave = async () => {
+    // Saving rewrites the file, which invalidates any digital signature. Warn
+    // first; the warning is overridable.
+    if (isSigned(activeTab.signatureStatus)) {
+      const proceed = await confirmBreakingEdit(SIGNATURE_EDIT_WARNING);
+      if (!proceed) return;
+    }
     setSaving(true);
     try {
       const updated = await invoke<DocumentMetadata>("set_metadata", {
@@ -146,6 +183,17 @@ export function MetadataPanel() {
       setEdited(pickEditable(updated));
       updateTab(activeTab.id, { metadataDirty: false });
       setError(null);
+      // The file changed — re-verify so the panel and badge reflect that the
+      // signature (if any) is now broken.
+      try {
+        const sig = await invoke<SignatureInfo>("get_signature_info", {
+          docId: activeTab.docId,
+        });
+        setSignature(sig);
+        updateTab(activeTab.id, { signatureStatus: sig.status });
+      } catch {
+        /* best-effort */
+      }
     } catch (err) {
       setError(String(err));
     } finally {
@@ -166,6 +214,9 @@ export function MetadataPanel() {
           ? `Declares ${conformance.map(describeClaim).join(", ")}`
           : "",
     },
+    // Read-only signature summary. Honest: "intact" means cryptographically
+    // unchanged, not that the signer is trusted.
+    { label: "Signature", value: describeSignatures(signature) },
   ];
 
   return (

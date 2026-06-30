@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import type { SignatureStatus } from "../utils/signature";
 
 export interface PageDimension {
   width: number;
@@ -35,6 +36,10 @@ export interface TabState {
   // whole-doc via "Make Searchable"), so the text overlay re-fetches and the
   // newly-recognized pages become selectable/copyable.
   ocrEpoch: number;
+  // Digital-signature status for the bottom status-bar badge and the
+  // edit-invalidation guards. Populated on open and refreshed after edits;
+  // undefined until the first verification completes. (issue #17)
+  signatureStatus?: SignatureStatus;
 }
 
 /**

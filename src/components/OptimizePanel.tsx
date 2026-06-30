@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { save, message } from "@tauri-apps/plugin-dialog";
 import { usePdfStore } from "../store/usePdfStore";
 import { confirmBreakingEdit } from "../utils/confirmBreakingEdit";
+import { isSigned, SIGNATURE_EDIT_WARNING } from "../utils/signature";
 
 interface ConformanceClaims {
   declared: string[];
@@ -161,6 +162,13 @@ export function OptimizePanel() {
     // Preserve the declared step order rather than checkbox-click order.
     const steps = STEPS.filter((s) => checked.has(s.id)).map((s) => s.id);
     if (steps.length === 0) return;
+
+    // Guard: a signed document's optimized output won't carry a valid
+    // signature. Warn first (overridable).
+    if (isSigned(activeTab.signatureStatus)) {
+      const proceed = await confirmBreakingEdit(SIGNATURE_EDIT_WARNING);
+      if (!proceed) return;
+    }
 
     // Guard: compressing a file that declares PDF/A or PDF/X will void that
     // conformance (XMP removal + lossy image re-encode). Warn before running;

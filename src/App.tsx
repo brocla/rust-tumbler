@@ -7,8 +7,10 @@ import { TabBar } from "./components/TabBar";
 import { IconRail } from "./components/IconRail";
 import { Sidebar } from "./components/Sidebar";
 import { ViewerArea } from "./components/ViewerArea";
+import { StatusBar } from "./components/StatusBar";
 import { usePdfStore, suppressedReloadDocs } from "./store/usePdfStore";
 import type { PageDimension, CompressProgress } from "./store/usePdfStore";
+import type { SignatureInfo } from "./utils/signature";
 import { contrastTextColor } from "./utils/color";
 import { reconstructCopyText, type CopyToken } from "./utils/textSelection";
 import { evictDoc, evictPages } from "./utils/renderCache";
@@ -34,6 +36,15 @@ function App() {
   const openFileRef = useRef<() => Promise<void>>();
   const printRef = useRef<() => Promise<void>>();
   const [printProgress, setPrintProgress] = useState<{ page: number; total: number } | null>(null);
+
+  // Verify the document's digital signatures and store the status for the
+  // bottom badge + edit guards. Best-effort: a failure just leaves the status
+  // unset (no badge), never blocks anything.
+  const refreshSignatureStatus = (docId: string, tabId: string) => {
+    invoke<SignatureInfo>("get_signature_info", { docId })
+      .then((sig) => updateTab(tabId, { signatureStatus: sig.status }))
+      .catch(() => {});
+  };
 
   // Open a PDF by path in a new tab. Used by the file picker, the startup
   // file-association path, and "open-file" events from a second instance.
@@ -63,6 +74,7 @@ function App() {
         sidebarScrollPage: 1,
         ocrEpoch: 0,
       });
+      refreshSignatureStatus(info.docId, tabId);
     } catch (err) {
       await message(String(err), { title: "Failed to Open PDF", kind: "error" });
     }
@@ -210,6 +222,9 @@ function App() {
             contentEpoch: tab.contentEpoch + 1,
           });
         }
+        // A page operation rewrote the file, so any signature is now invalid —
+        // re-verify so the badge reflects reality.
+        refreshSignatureStatus(tab.docId, tab.id);
       }
     });
     return () => { unlisten.then((f) => f()); };
@@ -299,6 +314,7 @@ function App() {
           <ViewerArea />
         </div>
       </div>
+      <StatusBar />
       {printProgress && (
         <div className="print-progress-overlay">
           <div className="print-progress-dialog">
