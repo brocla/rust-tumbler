@@ -54,6 +54,7 @@ pub fn run() {
             commands::metadata::get_metadata,
             commands::metadata::set_metadata,
             commands::conformance::get_conformance,
+            commands::signature::get_signature_info,
             commands::pages::delete_pages,
             commands::pages::rotate_pages,
             commands::pages::reorder_pages,

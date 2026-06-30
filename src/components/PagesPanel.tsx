@@ -5,6 +5,8 @@ import { message } from "@tauri-apps/plugin-dialog";
 import { ImageOff, RotateCw, RotateCcw, Trash2, Scissors, FileInput, GripVertical } from "lucide-react";
 import { usePdfStore, suppressedReloadDocs } from "../store/usePdfStore";
 import { permuteDoc, getThumb, putThumb, evictDoc } from "../utils/renderCache";
+import { confirmBreakingEdit } from "../utils/confirmBreakingEdit";
+import { isSigned, SIGNATURE_EDIT_WARNING } from "../utils/signature";
 
 const THUMBNAIL_SCALE = 0.18;
 
@@ -113,7 +115,7 @@ export function PagesPanel() {
 
   if (!activeTab) return null;
 
-  const { docId, pageDimensions, pagesVersion } = activeTab;
+  const { docId, pageDimensions, pagesVersion, signatureStatus } = activeTab;
   const pageCount = activeTab.pageCount;
   pageCountRef.current = pageCount;
   docIdRef.current = docId;
@@ -133,6 +135,12 @@ export function PagesPanel() {
   const clearSelection = () => setSelected(new Set());
 
   async function runOp(op: () => Promise<PageInfo | void>) {
+    // Page operations rewrite the file, invalidating any signature. Warn first
+    // (overridable).
+    if (isSigned(signatureStatus)) {
+      const proceed = await confirmBreakingEdit(SIGNATURE_EDIT_WARNING);
+      if (!proceed) return;
+    }
     setBusy(true);
     try {
       await op();
