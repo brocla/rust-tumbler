@@ -1,8 +1,12 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { StatusBar } from "./StatusBar";
 import { usePdfStore } from "../store/usePdfStore";
 import type { TabState } from "../store/usePdfStore";
+
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: vi.fn(() => Promise.resolve("2.3.0")),
+}));
 
 function makeTab(overrides: Partial<TabState> = {}): TabState {
   return {
@@ -87,5 +91,34 @@ describe("StatusBar", () => {
     usePdfStore.setState({ activeTabId: "tab-1" });
     rerender(<StatusBar />);
     expect(screen.getByText("Verified Signed Document")).toBeTruthy();
+  });
+
+  it("shows the app version, even with no signature", async () => {
+    usePdfStore.setState({
+      tabs: [makeTab({ signatureStatus: "unsigned" })],
+      activeTabId: "tab-1",
+    });
+    render(<StatusBar />);
+    const version = await screen.findByText("v2.3.0");
+    expect(version).toBeTruthy();
+    expect(version.className).toContain("status-version");
+  });
+
+  it("keeps the version rightmost, with the signing statement to its left", async () => {
+    usePdfStore.setState({
+      tabs: [makeTab({ signatureStatus: "verified" })],
+      activeTabId: "tab-1",
+    });
+    const { container } = render(<StatusBar />);
+    await screen.findByText("v2.3.0");
+
+    const bar = container.querySelector(".app-status-bar")!;
+    const children = Array.from(bar.children);
+    const badgeIdx = children.findIndex((c) => c.classList.contains("signature-badge"));
+    const versionIdx = children.findIndex((c) => c.classList.contains("status-version"));
+    // Right-justified flex row: later in DOM order == further right. Version last.
+    expect(badgeIdx).toBeGreaterThanOrEqual(0);
+    expect(versionIdx).toBe(children.length - 1);
+    expect(versionIdx).toBeGreaterThan(badgeIdx);
   });
 });
