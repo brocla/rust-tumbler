@@ -14,6 +14,12 @@ interface DocumentMetadata {
   modDate: string;
 }
 
+interface ConformanceClaims {
+  // Honest, display-ready labels, e.g. "PDF/A-2b". Empty when the file declares
+  // no recognized ISO sub-format conformance.
+  declared: string[];
+}
+
 const EDITABLE_FIELDS = [
   { field: "title", label: "Title" },
   { field: "author", label: "Author" },
@@ -24,6 +30,22 @@ const EDITABLE_FIELDS = [
 
 type EditableField = (typeof EDITABLE_FIELDS)[number]["field"];
 type EditableValues = Record<EditableField, string>;
+
+// One-word plain-language gloss for each ISO sub-format family, matched by code
+// prefix, so the Conformance row is meaningful to people who don't know the
+// codes. PDF/UA is listed before PDF/A only for readability; the prefixes don't
+// overlap ("PDF/UA-1" does not start with "PDF/A").
+const STANDARD_GLOSS: { prefix: string; gloss: string }[] = [
+  { prefix: "PDF/A", gloss: "archiving" },
+  { prefix: "PDF/X", gloss: "print" },
+  { prefix: "PDF/UA", gloss: "accessibility" },
+  { prefix: "PDF/E", gloss: "engineering" },
+];
+
+function describeClaim(code: string): string {
+  const match = STANDARD_GLOSS.find((s) => code.startsWith(s.prefix));
+  return match ? `${code} (${match.gloss})` : code;
+}
 
 function pickEditable(meta: DocumentMetadata): EditableValues {
   return {
@@ -42,6 +64,7 @@ export function MetadataPanel() {
   const updateTab = usePdfStore((s) => s.updateTab);
   const [metadata, setMetadata] = useState<DocumentMetadata | null>(null);
   const [edited, setEdited] = useState<EditableValues | null>(null);
+  const [conformance, setConformance] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
@@ -64,6 +87,14 @@ export function MetadataPanel() {
         if (!cancelled) {
           setError(String(err));
         }
+      }
+      // Declared ISO conformance is derived (read-only) and independent of the
+      // editable fields; a failure here shouldn't block metadata display.
+      try {
+        const claims = await invoke<ConformanceClaims>("get_conformance", { docId });
+        if (!cancelled) setConformance(claims?.declared ?? []);
+      } catch {
+        if (!cancelled) setConformance([]);
       }
     };
 
@@ -126,6 +157,15 @@ export function MetadataPanel() {
     { label: "Producer", value: metadata.producer },
     { label: "Created", value: metadata.creationDate },
     { label: "Modified", value: metadata.modDate },
+    // Honest wording: we report only what the file declares, not validated
+    // compliance. Joined claims read e.g. "Declares PDF/A-2b, PDF/UA-1".
+    {
+      label: "Conformance",
+      value:
+        conformance.length > 0
+          ? `Declares ${conformance.map(describeClaim).join(", ")}`
+          : "",
+    },
   ];
 
   return (

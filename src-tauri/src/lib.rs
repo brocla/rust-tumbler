@@ -53,6 +53,7 @@ pub fn run() {
             commands::ocr::cancel_ocr,
             commands::metadata::get_metadata,
             commands::metadata::set_metadata,
+            commands::conformance::get_conformance,
             commands::pages::delete_pages,
             commands::pages::rotate_pages,
             commands::pages::reorder_pages,

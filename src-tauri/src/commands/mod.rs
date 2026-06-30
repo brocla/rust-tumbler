@@ -1,3 +1,4 @@
+pub mod conformance;
 pub mod document;
 pub mod metadata;
 pub mod ocr;
