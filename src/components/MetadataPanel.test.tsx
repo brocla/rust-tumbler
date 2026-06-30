@@ -113,4 +113,37 @@ describe("MetadataPanel", () => {
 
     expect(titleInput.value).toBe("Title From Other Tab");
   });
+
+  it("shows declared conformance read-only, with honest wording", async () => {
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === "get_metadata") return metadataFixture("Doc");
+      if (cmd === "get_conformance") return { declared: ["PDF/A-2b", "PDF/UA-1"] };
+      return undefined;
+    });
+
+    render(<MetadataPanel />);
+
+    // "Declares …", never "compliant"; codes get a plain-language gloss; and
+    // it's a value, not an input.
+    const value = await screen.findByText(
+      "Declares PDF/A-2b (archiving), PDF/UA-1 (accessibility)",
+    );
+    expect(value).toBeTruthy();
+    expect(value.tagName).not.toBe("INPUT");
+    expect(screen.getByText("Conformance")).toBeTruthy();
+  });
+
+  it("shows an em dash when no conformance is declared", async () => {
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === "get_metadata") return metadataFixture("Doc");
+      if (cmd === "get_conformance") return { declared: [] };
+      return undefined;
+    });
+
+    render(<MetadataPanel />);
+
+    const label = await screen.findByText("Conformance");
+    const value = label.parentElement?.querySelector(".metadata-value");
+    expect(value?.textContent).toBe("—");
+  });
 });

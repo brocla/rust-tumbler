@@ -2,6 +2,18 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { save, message } from "@tauri-apps/plugin-dialog";
 import { usePdfStore } from "../store/usePdfStore";
+import { confirmBreakingEdit } from "../utils/confirmBreakingEdit";
+
+interface ConformanceClaims {
+  declared: string[];
+}
+
+// Compression strips XMP and re-encodes images, which breaks PDF/A and PDF/X
+// conformance (PDF/UA/PDF/E are not guarded here — the structural damage is to
+// A/X). Returns the declared A/X claims that an optimization run would void.
+function breakingClaims(declared: string[]): string[] {
+  return declared.filter((c) => c.startsWith("PDF/A") || c.startsWith("PDF/X"));
+}
 
 // StepId values mirror the Rust `StepId` enum (serde snake_case).
 type StepId =
@@ -149,6 +161,26 @@ export function OptimizePanel() {
     // Preserve the declared step order rather than checkbox-click order.
     const steps = STEPS.filter((s) => checked.has(s.id)).map((s) => s.id);
     if (steps.length === 0) return;
+
+    // Guard: compressing a file that declares PDF/A or PDF/X will void that
+    // conformance (XMP removal + lossy image re-encode). Warn before running;
+    // the warning is overridable. The output is staged, not saved, so this is
+    // about informed consent rather than preventing the run.
+    try {
+      const { declared } = await invoke<ConformanceClaims>("get_conformance", { docId });
+      const breaking = breakingClaims(declared);
+      if (breaking.length > 0) {
+        const proceed = await confirmBreakingEdit(
+          `This PDF declares conformance with ${breaking.join(", ")}. ` +
+            "Optimizing it removes metadata and re-encodes images, so the saved " +
+            `copy will no longer be a valid ${breaking.join("/")} file.`,
+        );
+        if (!proceed) return;
+      }
+    } catch {
+      // If conformance can't be read, don't block compression — proceed.
+    }
+
     setRunning(true);
     setSaved(false);
     try {

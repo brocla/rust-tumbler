@@ -1,13 +1,17 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, act, waitFor } from "@testing-library/react";
 import { invoke } from "@tauri-apps/api/core";
-import { save } from "@tauri-apps/plugin-dialog";
+import { save, confirm } from "@tauri-apps/plugin-dialog";
 import { OptimizePanel } from "./OptimizePanel";
 import { usePdfStore } from "../store/usePdfStore";
 import type { TabState } from "../store/usePdfStore";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
-vi.mock("@tauri-apps/plugin-dialog", () => ({ save: vi.fn(), message: vi.fn() }));
+vi.mock("@tauri-apps/plugin-dialog", () => ({
+  save: vi.fn(),
+  message: vi.fn(),
+  confirm: vi.fn(),
+}));
 
 function makeTab(overrides: Partial<TabState> = {}): TabState {
   return {
@@ -50,8 +54,10 @@ describe("OptimizePanel", () => {
   beforeEach(() => {
     vi.mocked(invoke).mockReset();
     vi.mocked(save).mockReset();
+    vi.mocked(confirm).mockReset();
     vi.mocked(invoke).mockImplementation(async (cmd: string) => {
       if (cmd === "run_optimization_steps") return REPORT;
+      if (cmd === "get_conformance") return { declared: [] };
       return undefined;
     });
 
@@ -225,6 +231,58 @@ describe("OptimizePanel", () => {
     expect(screen.queryByText("Save As…")).toBeNull();
     expect(screen.queryByText(/Total:/)).toBeNull();
     expect(screen.getByText("Run")).toBeTruthy();
+  });
+
+  it("warns before compressing a file that declares PDF/A and aborts if declined", async () => {
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === "run_optimization_steps") return REPORT;
+      if (cmd === "get_conformance") return { declared: ["PDF/A-2b"] };
+      return undefined;
+    });
+    vi.mocked(confirm).mockResolvedValue(false); // user cancels
+
+    render(<OptimizePanel />);
+    await act(async () => {
+      fireEvent.click(screen.getByText("Run"));
+    });
+
+    expect(confirm).toHaveBeenCalledTimes(1);
+    // The warning names the declared standard; honest wording (no "compliant").
+    expect(String(vi.mocked(confirm).mock.calls[0][0])).toMatch(/PDF\/A-2b/);
+    // Declined -> no compression run.
+    expect(
+      vi.mocked(invoke).mock.calls.find((c) => c[0] === "run_optimization_steps"),
+    ).toBeUndefined();
+  });
+
+  it("proceeds with compression when the conformance warning is overridden", async () => {
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === "run_optimization_steps") return REPORT;
+      if (cmd === "get_conformance") return { declared: ["PDF/X-4"] };
+      return undefined;
+    });
+    vi.mocked(confirm).mockResolvedValue(true); // user continues
+
+    render(<OptimizePanel />);
+    await act(async () => {
+      fireEvent.click(screen.getByText("Run"));
+    });
+
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(
+      vi.mocked(invoke).mock.calls.find((c) => c[0] === "run_optimization_steps"),
+    ).toBeTruthy();
+  });
+
+  it("does not warn when the file declares no PDF/A or PDF/X conformance", async () => {
+    render(<OptimizePanel />); // default mock: declared: []
+    await act(async () => {
+      fireEvent.click(screen.getByText("Run"));
+    });
+    expect(confirm).not.toHaveBeenCalled();
+    expect(
+      vi.mocked(invoke).mock.calls.find((c) => c[0] === "run_optimization_steps"),
+    ).toBeTruthy();
   });
 
   it("clears a previous file's results when the active document changes", async () => {
