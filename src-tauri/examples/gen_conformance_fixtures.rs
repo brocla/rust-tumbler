@@ -20,8 +20,10 @@ use lopdf::{dictionary, Document, Stream};
 use std::path::Path;
 
 fn main() {
-    let out_dir = Path::new("tests/fixtures/conformance");
-    std::fs::create_dir_all(out_dir).expect("create output dir");
+    // Resolve relative to the crate, not the current working directory, so the
+    // output always lands in src-tauri regardless of where `cargo run` is invoked.
+    let out_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/conformance");
+    std::fs::create_dir_all(&out_dir).expect("create output dir");
 
     // (filename, heading text, XMP identifier block(s))
     let files = [
@@ -49,6 +51,14 @@ fn main() {
             "pdfa-2b-and-ua-1.pdf",
             "PDF/A-2b + PDF/UA-1",
             format!("{}\n{}", pdfa_block(2, "B"), pdfua_block(1)),
+        ),
+        (
+            // A family Tumbler doesn't model, following the `…/<token>/ns/id/`
+            // identifier-schema convention. Exercises the unrecognized-schema
+            // fallback (issue #23).
+            "unknown-standard.pdf",
+            "Unknown PDF standard",
+            unknown_block("pdfz", 1),
         ),
     ];
 
@@ -173,6 +183,16 @@ fn pdfe_xmp(part: u8) -> String {
     )
 }
 
+/// A made-up identifier schema for a family the detector doesn't know, using the
+/// conventional `…/<token>/ns/id/` namespace shape and a `part` property.
+fn unknown_block(token: &str, part: u8) -> String {
+    format!(
+        r#"  <rdf:Description rdf:about="" xmlns:{token}id="http://www.example.org/{token}/ns/id/">
+   <{token}id:part>{part}</{token}id:part>
+  </rdf:Description>"#
+    )
+}
+
 /// Escape characters that are special inside a PDF literal string.
 fn escape_pdf_string(s: &str) -> String {
     s.replace('\\', r"\\").replace('(', r"\(").replace(')', r"\)")
@@ -192,6 +212,7 @@ an ISO PDF sub-format via its XMP `/Metadata` packet:
 | `pdfua-1.pdf` | PDF/UA-1 (element form) |
 | `pdfe-1.pdf` | PDF/E-1 |
 | `pdfa-2b-and-ua-1.pdf` | PDF/A-2b **and** PDF/UA-1 (multiple claims) |
+| `unknown-standard.pdf` | An unrecognized identifier schema (`…/pdfz/ns/id/`) — exercises the new-family fallback |
 
 ## Important: declared, not validated
 
