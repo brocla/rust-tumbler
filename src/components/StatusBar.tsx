@@ -1,10 +1,13 @@
+import { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { usePdfStore } from "../store/usePdfStore";
 import { signatureBadge } from "../utils/signature";
 
 /**
- * Thin bottom border strip. Currently shows the digital-signature badge for the
- * **active tab only** (issue #17) — it reads the active tab's signatureStatus,
- * so switching tabs swaps the badge and unsigned tabs show nothing.
+ * Thin bottom border strip, right-justified. Shows (right to left): the app
+ * version number (always, in the theme accent color), then the digital-signature
+ * badge for the **active tab only** (issue #17) when present. The version stays
+ * rightmost; the signing statement sits to its left.
  */
 export function StatusBar() {
   const status = usePdfStore((s) => {
@@ -14,6 +17,13 @@ export function StatusBar() {
 
   const badge = signatureBadge(status);
 
+  const [version, setVersion] = useState("");
+  useEffect(() => {
+    invoke<string>("get_app_version")
+      .then(setVersion)
+      .catch(() => {});
+  }, []);
+
   return (
     <div className="app-status-bar">
       {badge && (
@@ -21,6 +31,7 @@ export function StatusBar() {
           {badge.text}
         </span>
       )}
+      {version && <span className="status-version">v{version}</span>}
     </div>
   );
 }

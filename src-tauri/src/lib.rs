@@ -67,6 +67,7 @@ pub fn run() {
             commands::print::cancel_print,
             commands::startup::take_startup_file,
             commands::theme::get_accent_color,
+            commands::app::get_app_version,
         ])
         .setup(|app| {
             #[cfg(debug_assertions)]

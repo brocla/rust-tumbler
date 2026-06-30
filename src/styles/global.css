@@ -161,6 +161,13 @@ body {
   background: rgba(247, 99, 12, 0.14);
 }
 
+/* App version — always rightmost, in the theme accent color. */
+.status-version {
+  color: var(--color-accent);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
 @media (prefers-color-scheme: dark) {
   .signature-badge-ok {
     color: #4ec97a;
