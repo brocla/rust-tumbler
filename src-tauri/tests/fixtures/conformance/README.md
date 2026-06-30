@@ -12,6 +12,7 @@ an ISO PDF sub-format via its XMP `/Metadata` packet:
 | `pdfua-1.pdf` | PDF/UA-1 (element form) |
 | `pdfe-1.pdf` | PDF/E-1 |
 | `pdfa-2b-and-ua-1.pdf` | PDF/A-2b **and** PDF/UA-1 (multiple claims) |
+| `unknown-standard.pdf` | An unrecognized identifier schema (`…/pdfz/ns/id/`) — exercises the new-family fallback |
 
 ## Important: declared, not validated
 

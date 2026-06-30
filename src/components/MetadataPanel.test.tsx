@@ -133,6 +133,23 @@ describe("MetadataPanel", () => {
     expect(screen.getByText("Conformance")).toBeTruthy();
   });
 
+  it("displays an unrecognized standard label verbatim (no fabricated gloss)", async () => {
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === "get_metadata") return metadataFixture("Doc");
+      if (cmd === "get_conformance")
+        return { declared: ["an unrecognized PDF standard (pdfz)"] };
+      return undefined;
+    });
+
+    render(<MetadataPanel />);
+
+    // Passed through unchanged — no "(archiving)"-style gloss invented for it.
+    const value = await screen.findByText(
+      "Declares an unrecognized PDF standard (pdfz)",
+    );
+    expect(value).toBeTruthy();
+  });
+
   it("shows an em dash when no conformance is declared", async () => {
     vi.mocked(invoke).mockImplementation(async (cmd: string) => {
       if (cmd === "get_metadata") return metadataFixture("Doc");
