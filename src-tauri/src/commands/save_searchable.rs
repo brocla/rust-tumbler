@@ -37,6 +37,16 @@ use tauri::{Emitter, State, WebviewWindow};
 /// any font the page already defines.
 const FONT_NAME: &str = "TumblerOCR";
 
+/// Loose-bounds metrics that pdfium reports for the non-embedded standard
+/// Helvetica we use, as fractions of the font size: `ASCENT` is how far the
+/// text-extraction box rises above the baseline, `DESCENT` how far it drops
+/// below. We size and place each line from these so its extraction box (and
+/// thus the selection/search highlight, which is derived from it) coincides
+/// with the OCR box — landing on the scanned text instead of a fraction of a
+/// line too low. Pinned empirically by `layer_box_matches_ocr_box`.
+const HELVETICA_ASCENT_RATIO: f32 = 0.905;
+const HELVETICA_DESCENT_RATIO: f32 = 0.211;
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SaveSearchableResult {
@@ -116,7 +126,12 @@ fn encode_for_font(text: &str) -> Vec<u8> {
 /// selection and search highlight smooth across the line, with uniform spacing,
 /// instead of jumping between independently-scaled per-word runs. Each block is
 /// self-contained so a malformed prior stream can't bleed text state into ours.
-/// Baseline `y` = line box bottom, font size = line box height.
+///
+/// Font size and baseline are derived from the line box and Helvetica's loose
+/// metrics so the run's text-extraction box coincides with the OCR box: with
+/// `fs = height / (ascent + descent)` the box height matches, and placing the
+/// baseline at `box_bottom + descent·fs` makes the box bottom sit on the OCR
+/// box bottom (the descent hangs down to exactly the box bottom, not below it).
 pub fn build_invisible_text_stream(words: &[OcrWord], font_name: &str) -> Vec<u8> {
     let mut ops: Vec<Operation> = Vec::new();
     for line in ocr_words_to_lines(words) {
@@ -124,7 +139,9 @@ pub fn build_invisible_text_stream(words: &[OcrWord], font_name: &str) -> Vec<u8
         if encoded.is_empty() {
             continue; // nothing representable (e.g. a pure-CJK line)
         }
-        let font_size = line.rect.height.max(1.0);
+        let box_height = line.rect.height.max(1.0);
+        let font_size = box_height / (HELVETICA_ASCENT_RATIO + HELVETICA_DESCENT_RATIO);
+        let baseline_y = line.rect.y + HELVETICA_DESCENT_RATIO * font_size;
         let h_scale = horizontal_scale_percent(&line.text, font_size, line.rect.width);
 
         ops.push(Operation::new("BT", vec![]));
@@ -136,7 +153,7 @@ pub fn build_invisible_text_stream(words: &[OcrWord], font_name: &str) -> Vec<u8
         ops.push(Operation::new("Tz", vec![Object::Real(h_scale)]));
         ops.push(Operation::new(
             "Td",
-            vec![Object::Real(line.rect.x), Object::Real(line.rect.y)],
+            vec![Object::Real(line.rect.x), Object::Real(baseline_y)],
         ));
         ops.push(Operation::new(
             "Tj",
@@ -577,6 +594,77 @@ mod tests {
         assert!(
             text.contains("Scanned"),
             "native pdfium text should contain the OCR word, got: {text:?}"
+        );
+
+        drop(reopened);
+        std::fs::remove_file(&src).ok();
+        std::fs::remove_file(&dest).ok();
+    }
+
+    /// The saved layer's text-extraction (loose) box — which drives the
+    /// selection/search highlight — must coincide with the OCR box, so the
+    /// highlight sits on the scanned text rather than a fraction of a line low.
+    /// Seeded rect: bottom y=100, height=20 → OCR box spans y 100..120.
+    #[test]
+    fn layer_box_matches_ocr_box() {
+        let _guard = crate::test_pdfium_guard();
+        let pdfium = crate::test_pdfium();
+
+        let src = temp_path("src.pdf");
+        write_blank_pdf(&src);
+        let dest = temp_path("out.pdf");
+
+        let word = OcrWord {
+            text: "Scanned".to_string(),
+            rect: TextRect { x: 30.0, y: 100.0, width: 120.0, height: 20.0 },
+        };
+        let engine: Arc<dyn OcrEngine> = Arc::new(FakeOcrEngine { words: vec![word.clone()] });
+        let state = AppState::new(pdfium, None).with_ocr_engine(engine.clone());
+        // Seed the cache directly so the rect is exactly the one above (no
+        // pixel→point mapping in the way).
+        state.set_ocr_words("doc1", 1, vec![word]);
+        let document = pdfium.load_pdf_from_file(&src, None).expect("load blank");
+        state
+            .insert_document("doc1".to_string(), DocEntry { document, file_path: src.clone() })
+            .expect("insert");
+
+        let entry = state.get_document("doc1").expect("get");
+        save_searchable_copy_impl(
+            |_, _| {},
+            entry,
+            "doc1".to_string(),
+            dest.clone(),
+            engine,
+            state.ocr_cache_handle(),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .expect("save");
+
+        // Union the loose bounds of every character in the run.
+        let reopened = pdfium.load_pdf_from_file(&dest, None).expect("reopen");
+        let page = reopened.pages().get(0).expect("page");
+        let text = page.text().expect("text");
+        let mut bottom = f32::INFINITY;
+        let mut top = f32::NEG_INFINITY;
+        let mut fonts = std::collections::HashSet::new();
+        for ch in text.chars().iter() {
+            fonts.insert(ch.font_name());
+            if let Ok(b) = ch.loose_bounds() {
+                bottom = bottom.min(b.bottom().value);
+                top = top.max(b.top().value);
+            }
+        }
+
+        // Font is exactly the standard Helvetica we declared (metrics assumed).
+        assert!(fonts.contains("Helvetica"), "unexpected font(s): {fonts:?}");
+        // Highlight box aligns with the OCR box within a fraction of a point.
+        assert!(
+            (bottom - 100.0).abs() < 1.5,
+            "layer bottom {bottom} should align to OCR box bottom 100"
+        );
+        assert!(
+            (top - 120.0).abs() < 1.5,
+            "layer top {top} should align to OCR box top 120"
         );
 
         drop(reopened);
