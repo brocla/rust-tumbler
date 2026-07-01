@@ -3,8 +3,11 @@
 //! Where "Make Searchable" (see [`crate::commands::ocr`]) recognizes text into a
 //! session-only cache, this writes those words into a **new** PDF as an
 //! invisible text layer (the "OCR sandwich"): for every previously text-less
-//! (scanned) page, each recognized word is appended to the page's content
-//! stream in **text render mode 3 (invisible)**. The bytes are never painted —
+//! (scanned) page, the recognized words are grouped into lines (reusing the
+//! ephemeral overlay's `ocr_words_to_lines`) and each line is appended to the
+//! page's content stream as one run in **text render mode 3 (invisible)** — so
+//! a reader's selection/search highlight stays smooth across the line, matching
+//! "Make Searchable". The bytes are never painted —
 //! they exist purely so the file is searchable, selectable, and copyable in any
 //! PDF reader. Afterward Tumbler's own `search_document` / `extract_page_text`
 //! need no special-casing: pdfium just sees real text operators.
@@ -19,7 +22,7 @@
 //! [`geometry_is_simple`]); the happy path is authored correctly.
 
 use crate::commands::ocr::{
-    cache_get, ocr_page_into_cache, OcrCache, OcrEngine, OcrProgress, OcrWord,
+    cache_get, ocr_page_into_cache, ocr_words_to_lines, OcrCache, OcrEngine, OcrProgress, OcrWord,
 };
 use crate::error::AppError;
 use crate::state::{lock_mutex, AppState, DocEntry};
@@ -105,18 +108,24 @@ fn encode_for_font(text: &str) -> Vec<u8> {
 
 /// Builds the invisible-text content stream for one page's worth of OCR words.
 ///
-/// Each word becomes a self-contained `BT … ET` block in render mode 3, so a
-/// malformed prior stream can't bleed text state into ours. Positions are the
-/// word's PDF-space box: baseline `y` = box bottom, font size = box height.
+/// Words are grouped into visual **lines** with the same [`ocr_words_to_lines`]
+/// pass the ephemeral "Make Searchable" overlay uses, and each line is written
+/// as **one continuous run** — a single `BT … ET` block in render mode 3, with
+/// one font size and one horizontal-scale (`Tz`) stretching the whole line to
+/// its box width. Emitting per line (not per word) is what keeps a reader's
+/// selection and search highlight smooth across the line, with uniform spacing,
+/// instead of jumping between independently-scaled per-word runs. Each block is
+/// self-contained so a malformed prior stream can't bleed text state into ours.
+/// Baseline `y` = line box bottom, font size = line box height.
 pub fn build_invisible_text_stream(words: &[OcrWord], font_name: &str) -> Vec<u8> {
     let mut ops: Vec<Operation> = Vec::new();
-    for w in words {
-        let encoded = encode_for_font(&w.text);
+    for line in ocr_words_to_lines(words) {
+        let encoded = encode_for_font(&line.text);
         if encoded.is_empty() {
-            continue; // nothing representable (e.g. a pure-CJK token)
+            continue; // nothing representable (e.g. a pure-CJK line)
         }
-        let font_size = w.rect.height.max(1.0);
-        let h_scale = horizontal_scale_percent(&w.text, font_size, w.rect.width);
+        let font_size = line.rect.height.max(1.0);
+        let h_scale = horizontal_scale_percent(&line.text, font_size, line.rect.width);
 
         ops.push(Operation::new("BT", vec![]));
         ops.push(Operation::new(
@@ -127,7 +136,7 @@ pub fn build_invisible_text_stream(words: &[OcrWord], font_name: &str) -> Vec<u8
         ops.push(Operation::new("Tz", vec![Object::Real(h_scale)]));
         ops.push(Operation::new(
             "Td",
-            vec![Object::Real(w.rect.x), Object::Real(w.rect.y)],
+            vec![Object::Real(line.rect.x), Object::Real(line.rect.y)],
         ));
         ops.push(Operation::new(
             "Tj",
@@ -477,6 +486,27 @@ mod tests {
     #[test]
     fn empty_words_produce_empty_stream() {
         assert!(build_invisible_text_stream(&[], FONT_NAME).is_empty());
+    }
+
+    /// Words sharing a baseline become a single continuous line run (one BT…ET,
+    /// text joined with spaces), not one run per word — this is what preserves
+    /// the smooth, uniform highlighting of "Make Searchable".
+    #[test]
+    fn words_on_one_line_form_a_single_run() {
+        let words = vec![
+            pt_word("Hello", 10.0, 100.0, 30.0, 12.0),
+            pt_word("World", 50.0, 100.0, 30.0, 12.0),
+        ];
+        let bytes = build_invisible_text_stream(&words, FONT_NAME);
+        let content = Content::decode(&bytes).expect("decode content");
+        let runs = content
+            .operations
+            .iter()
+            .filter(|op| op.operator == "BT")
+            .count();
+        assert_eq!(runs, 1, "two words on one line should be one run, got {runs}");
+        let s = String::from_utf8_lossy(&bytes);
+        assert!(s.contains("Hello World"), "line text should be joined: {s}");
     }
 
     #[test]
