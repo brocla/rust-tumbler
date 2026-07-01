@@ -165,27 +165,33 @@ pub(crate) fn save_searchable_copy_impl(
     })
 }
 
-/// Builds a PDF content stream with one invisible (Tr 3) text object per word.
+/// Builds a PDF content stream with one invisible (Tr 3) text object per
+/// **line** (not per word). Words are grouped with `ocr_words_to_lines` first
+/// so the granularity matches the text overlay — one selection span per visual
+/// line, the same smooth highlight that "Make Searchable" produces.
+///
 /// Public for unit tests.
 pub fn build_invisible_text_stream(
     words: &[OcrWord],
     font_name: &[u8],
 ) -> Result<Vec<u8>, AppError> {
+    use crate::commands::ocr::ocr_words_to_lines;
+
     let mut ops: Vec<Operation> = Vec::new();
 
-    for w in words {
-        let encoded = encode_win_ansi(&w.text);
+    for line in &ocr_words_to_lines(words) {
+        let encoded = encode_win_ansi(&line.text);
         if encoded.is_empty() {
             continue;
         }
 
-        let font_size = w.rect.height.max(1.0);
+        let font_size = line.rect.height.max(1.0);
         let char_count = encoded.len().max(1);
         // Approximate natural text width: Helvetica averages ~0.5× font-size
-        // per glyph at any size. Tz (horizontal scale %) stretches/shrinks the
-        // run to fit the OCR box, keeping the text roughly under the image word.
+        // per glyph. Tz (horizontal scale %) stretches/shrinks the whole line
+        // to span its OCR bounding box, keeping a uniform scale within the line.
         let natural_width = 0.5 * font_size * char_count as f32;
-        let h_scale = ((w.rect.width / natural_width) * 100.0).clamp(10.0, 2000.0);
+        let h_scale = ((line.rect.width / natural_width) * 100.0).clamp(10.0, 2000.0);
 
         ops.push(Operation::new("BT", vec![]));
         ops.push(Operation::new(
@@ -199,7 +205,7 @@ pub fn build_invisible_text_stream(
         ops.push(Operation::new("Tz", vec![Object::Real(h_scale)]));
         ops.push(Operation::new(
             "Td",
-            vec![Object::Real(w.rect.x), Object::Real(w.rect.y)],
+            vec![Object::Real(line.rect.x), Object::Real(line.rect.y)],
         ));
         ops.push(Operation::new("Tj", vec![Object::string_literal(encoded)]));
         ops.push(Operation::new("ET", vec![]));
