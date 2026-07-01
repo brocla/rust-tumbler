@@ -57,14 +57,76 @@ pub struct SaveSearchableResult {
 
 // ── Content-stream authoring (pure) ─────────────────────────────────────────
 
+/// Advance width of a WinAnsi byte in the standard Helvetica font, in 1000ths
+/// of an em (Adobe AFM values). Used to compute a line's true natural width so
+/// the horizontal scaling stretches it to exactly the OCR box — the backend
+/// equivalent of the frontend text layer's canvas width measurement. Bytes
+/// outside the table (rare WinAnsi punctuation) fall back to a mid-range 556.
+fn helvetica_width_1000(byte: u8) -> u16 {
+    match byte {
+        b' ' => 278, b'!' => 278, b'"' => 355, b'#' => 556, b'$' => 556, b'%' => 889,
+        b'&' => 667, b'\'' => 191, b'(' => 333, b')' => 333, b'*' => 389, b'+' => 584,
+        b',' => 278, b'-' => 333, b'.' => 278, b'/' => 278,
+        b'0'..=b'9' => 556,
+        b':' => 278, b';' => 278, b'<' => 584, b'=' => 584, b'>' => 584, b'?' => 556,
+        b'@' => 1015,
+        b'A' => 667, b'B' => 667, b'C' => 722, b'D' => 722, b'E' => 667, b'F' => 611,
+        b'G' => 778, b'H' => 722, b'I' => 278, b'J' => 500, b'K' => 667, b'L' => 556,
+        b'M' => 833, b'N' => 722, b'O' => 778, b'P' => 667, b'Q' => 778, b'R' => 722,
+        b'S' => 667, b'T' => 611, b'U' => 722, b'V' => 667, b'W' => 944, b'X' => 667,
+        b'Y' => 667, b'Z' => 611,
+        b'[' => 278, b'\\' => 278, b']' => 278, b'^' => 469, b'_' => 556, b'`' => 333,
+        b'a' => 556, b'b' => 556, b'c' => 500, b'd' => 556, b'e' => 556, b'f' => 278,
+        b'g' => 556, b'h' => 556, b'i' => 222, b'j' => 222, b'k' => 500, b'l' => 222,
+        b'm' => 833, b'n' => 556, b'o' => 556, b'p' => 556, b'q' => 556, b'r' => 333,
+        b's' => 500, b't' => 278, b'u' => 556, b'v' => 500, b'w' => 722, b'x' => 500,
+        b'y' => 500, b'z' => 500,
+        b'{' => 334, b'|' => 260, b'}' => 334, b'~' => 584,
+        // Common WinAnsi upper range: accented Latin share their base letter's
+        // width; the frequent punctuation is given its AFM value.
+        0x91 | 0x92 => 222,          // ' '  quoteleft/right
+        0x93 | 0x94 => 333,          // " "  quotedbl left/right
+        0x95 => 350,                 // •    bullet
+        0x96 => 556,                 // –    endash
+        0x97 => 1000,                // —    emdash
+        0x85 => 1000,                // …    ellipsis
+        0xA0 => 278,                 // nbsp
+        0xC0..=0xC5 => 667,          // À-Å
+        0xC6 => 1000,                // Æ
+        0xC7 => 722,                 // Ç
+        0xC8..=0xCB => 667,          // È-Ë
+        0xCC..=0xCF => 278,          // Ì-Ï
+        0xD1 => 722,                 // Ñ
+        0xD2..=0xD6 => 778,          // Ò-Ö
+        0xD9..=0xDC => 722,          // Ù-Ü
+        0xDD => 667,                 // Ý
+        0xDF => 611,                 // ß
+        0xE0..=0xE5 => 556,          // à-å
+        0xE6 => 889,                 // æ
+        0xE7 => 500,                 // ç
+        0xE8..=0xEB => 556,          // è-ë
+        0xEC..=0xEF => 278,          // ì-ï
+        0xF1 => 556,                 // ñ
+        0xF2..=0xF6 => 556,          // ò-ö
+        0xF9..=0xFC => 556,          // ù-ü
+        0xFD | 0xFF => 500,          // ý ÿ
+        _ => 556,
+    }
+}
+
+/// A line's natural (unscaled) width in points for the standard Helvetica font.
+fn helvetica_natural_width(encoded: &[u8], font_size: f32) -> f32 {
+    let sum: u32 = encoded.iter().map(|&b| helvetica_width_1000(b) as u32).sum();
+    font_size * sum as f32 / 1000.0
+}
+
 /// Horizontal scaling percent (`Tz`) that stretches the (invisible) glyphs to
-/// roughly fill the OCR box width. Without real glyph-advance tables we
-/// approximate a word's natural width as `0.5 * font_size * char_count`, which
-/// is close enough — `Tz` only affects how tightly a reader's selection
-/// highlight hugs the word, never search or copy correctness.
-fn horizontal_scale_percent(text: &str, font_size: f32, box_width: f32) -> f32 {
-    let char_count = text.chars().count().max(1) as f32;
-    let natural_width = 0.5 * font_size * char_count;
+/// span the OCR box width exactly. The natural width comes from Helvetica's real
+/// advance-width table, so the persisted run's on-page extent matches the OCR
+/// box — which is what makes the selection/search highlight reach the end of the
+/// line (a crude average-width estimate left it short).
+fn horizontal_scale_percent(encoded: &[u8], font_size: f32, box_width: f32) -> f32 {
+    let natural_width = helvetica_natural_width(encoded, font_size);
     if natural_width <= 0.0 || box_width <= 0.0 {
         return 100.0;
     }
@@ -142,7 +204,7 @@ pub fn build_invisible_text_stream(words: &[OcrWord], font_name: &str) -> Vec<u8
         let box_height = line.rect.height.max(1.0);
         let font_size = box_height / (HELVETICA_ASCENT_RATIO + HELVETICA_DESCENT_RATIO);
         let baseline_y = line.rect.y + HELVETICA_DESCENT_RATIO * font_size;
-        let h_scale = horizontal_scale_percent(&line.text, font_size, line.rect.width);
+        let h_scale = horizontal_scale_percent(&encoded, font_size, line.rect.width);
 
         ops.push(Operation::new("BT", vec![]));
         ops.push(Operation::new(
@@ -646,12 +708,16 @@ mod tests {
         let text = page.text().expect("text");
         let mut bottom = f32::INFINITY;
         let mut top = f32::NEG_INFINITY;
+        let mut left = f32::INFINITY;
+        let mut right = f32::NEG_INFINITY;
         let mut fonts = std::collections::HashSet::new();
         for ch in text.chars().iter() {
             fonts.insert(ch.font_name());
             if let Ok(b) = ch.loose_bounds() {
                 bottom = bottom.min(b.bottom().value);
                 top = top.max(b.top().value);
+                left = left.min(b.left().value);
+                right = right.max(b.right().value);
             }
         }
 
@@ -666,6 +732,10 @@ mod tests {
             (top - 120.0).abs() < 1.5,
             "layer top {top} should align to OCR box top 120"
         );
+        // And the run spans the full OCR box width (x 30..150) — the highlight
+        // reaches the end of the line rather than falling short.
+        assert!((left - 30.0).abs() < 4.0, "layer left {left} should align to OCR box left 30");
+        assert!((right - 150.0).abs() < 4.0, "layer right {right} should reach OCR box right 150");
 
         drop(reopened);
         std::fs::remove_file(&src).ok();
