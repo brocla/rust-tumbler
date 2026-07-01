@@ -1,13 +1,20 @@
-import { BookOpen, ChevronLeft, ChevronRight, Moon, MoveHorizontal, MoveVertical, Printer, ScanSearch, ScrollText, Sun, ZoomIn, ZoomOut } from "lucide-react";
+import { BookOpen, ChevronLeft, ChevronRight, FileSearch, Moon, MoveHorizontal, MoveVertical, Printer, ScanSearch, ScrollText, Sun, ZoomIn, ZoomOut } from "lucide-react";
 import { save, message, ask } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { usePdfStore } from "../store/usePdfStore";
 import type { DisplayMode } from "../store/usePdfStore";
 import { ZOOM_PRESETS } from "../utils/zoomConstants";
+import { confirmBreakingEdit } from "../utils/confirmBreakingEdit";
+import { isSigned, SIGNATURE_SAVE_COPY_WARNING } from "../utils/signature";
 
 interface TextExportResult {
   pages: number;
   ocrPages: number;
+  cancelled: boolean;
+}
+
+interface SaveSearchableResult {
+  pagesWritten: number;
   cancelled: boolean;
 }
 
@@ -205,6 +212,59 @@ export function Toolbar({ onOpenFile, onPrint }: ToolbarProps) {
     }
   };
 
+  // "Save Searchable Copy…": write a NEW PDF whose scanned pages carry an
+  // invisible OCR text layer, searchable in any reader. The source is untouched.
+  const handleSaveSearchableCopy = async () => {
+    if (!activeTab) return;
+
+    const dir = activeTab.filePath.replace(/[\\/][^\\/]*$/, "");
+    const baseName = activeTab.fileName.replace(/\.pdf$/i, "");
+    const destPath = await save({
+      filters: [{ name: "PDF", extensions: ["pdf"] }],
+      defaultPath: `${dir}/${baseName} (searchable).pdf`,
+    });
+    if (!destPath) return;
+
+    // The added text layer means a signed document's copy won't verify. Warn
+    // first; the warning is overridable and the original file stays intact.
+    if (isSigned(activeTab.signatureStatus)) {
+      const proceed = await confirmBreakingEdit(SIGNATURE_SAVE_COPY_WARNING);
+      if (!proceed) return;
+    }
+
+    setOcrProgress({ page: 0, total: activeTab.pageCount });
+    try {
+      const result = await invoke<SaveSearchableResult>("save_searchable_copy", {
+        docId: activeTab.docId,
+        destPath,
+      });
+      if (result.cancelled) {
+        await message(
+          `Cancelled after making ${result.pagesWritten} page${
+            result.pagesWritten === 1 ? "" : "s"
+          } searchable.`,
+          { title: "Save Searchable Copy", kind: "info" },
+        );
+      } else if (result.pagesWritten === 0) {
+        await message(
+          "Saved a copy. Every page already had a text layer, so no OCR layer was added.",
+          { title: "Save Searchable Copy", kind: "info" },
+        );
+      } else {
+        await message(
+          `Saved a searchable copy (${result.pagesWritten} page${
+            result.pagesWritten === 1 ? "" : "s"
+          } OCR'd).`,
+          { title: "Save Searchable Copy", kind: "info" },
+        );
+      }
+    } catch (err) {
+      await message(String(err), { title: "Save Searchable Copy", kind: "error" });
+    } finally {
+      setOcrProgress(null);
+    }
+  };
+
   return (
     <div className="toolbar">
       <div className="toolbar-group">
@@ -314,6 +374,13 @@ export function Toolbar({ onOpenFile, onPrint }: ToolbarProps) {
             title="OCR - Make Text Searchable"
           >
             <ScanSearch size={18} />
+          </button>
+          <button
+            className="toolbar-button"
+            onClick={handleSaveSearchableCopy}
+            title="Save Searchable Copy..."
+          >
+            <FileSearch size={18} />
           </button>
           <button
             className="toolbar-button"
