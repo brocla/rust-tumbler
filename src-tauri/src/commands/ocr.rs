@@ -146,6 +146,8 @@ pub fn cache_set(cache: &OcrCache, doc_id: &str, page: u32, words: Vec<OcrWord>)
 pub struct OcrLine {
     pub text: String,
     pub rect: TextRect,
+    /// Individual words that make up this line, sorted left-to-right.
+    pub words: Vec<OcrWord>,
 }
 
 /// Groups recognized words into visual lines. Words are in PDF user space
@@ -220,6 +222,7 @@ pub fn ocr_words_to_lines(words: &[OcrWord]) -> Vec<OcrLine> {
                     width: right - left,
                     height: top - bottom,
                 },
+                words: line.iter().map(|w| (*w).clone()).collect(),
             }
         })
         .collect()

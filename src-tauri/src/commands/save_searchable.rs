@@ -166,9 +166,16 @@ pub(crate) fn save_searchable_copy_impl(
 }
 
 /// Builds a PDF content stream with one invisible (Tr 3) text object per
-/// **line** (not per word). Words are grouped with `ocr_words_to_lines` first
-/// so the granularity matches the text overlay — one selection span per visual
-/// line, the same smooth highlight that "Make Searchable" produces.
+/// **line**. Words are grouped with `ocr_words_to_lines` first so the
+/// selection granularity matches the text overlay — one smooth highlight per
+/// visual line.
+///
+/// Within each line, each word is positioned with an absolute `Tm` matrix so
+/// inter-word spacing comes from the OCR coordinates rather than font-metric
+/// guesses.  A per-word `Tz` (horizontal scale) then compresses or stretches
+/// each word's glyphs to fill its bounding box.  Only within-word character
+/// spacing depends on the font metrics, which bounds any inaccuracy to
+/// individual short words instead of accumulating across the whole line.
 ///
 /// Public for unit tests.
 pub fn build_invisible_text_stream(
@@ -177,21 +184,23 @@ pub fn build_invisible_text_stream(
 ) -> Result<Vec<u8>, AppError> {
     use crate::commands::ocr::ocr_words_to_lines;
 
+    // Helvetica cap-height = 0.718 × font_size.  Placing the baseline at the
+    // OCR box bottom would make the selection top land at only 71.8 % of the
+    // box height.  Shift baseline up so cap-height reaches the box top:
+    //   baseline_y = box_bottom + (1 − 0.718) × line_height
+    const CAP_HEIGHT_RATIO: f32 = 0.718;
+
     let mut ops: Vec<Operation> = Vec::new();
 
     for line in &ocr_words_to_lines(words) {
-        let encoded = encode_win_ansi(&line.text);
-        if encoded.is_empty() {
+        // Skip lines where every word encodes to nothing (e.g. pure CJK).
+        if !line.words.iter().any(|w| !encode_win_ansi(&w.text).is_empty()) {
             continue;
         }
 
         let font_size = line.rect.height.max(1.0);
-        let char_count = encoded.len().max(1);
-        // Approximate natural text width: Helvetica averages ~0.5× font-size
-        // per glyph. Tz (horizontal scale %) stretches/shrinks the whole line
-        // to span its OCR bounding box, keeping a uniform scale within the line.
-        let natural_width = 0.5 * font_size * char_count as f32;
-        let h_scale = ((line.rect.width / natural_width) * 100.0).clamp(10.0, 2000.0);
+        // Consistent baseline for all words on this line.
+        let baseline_y = line.rect.y + (1.0 - CAP_HEIGHT_RATIO) * font_size;
 
         ops.push(Operation::new("BT", vec![]));
         ops.push(Operation::new(
@@ -202,12 +211,37 @@ pub fn build_invisible_text_stream(
             ],
         ));
         ops.push(Operation::new("Tr", vec![Object::Integer(3)]));
-        ops.push(Operation::new("Tz", vec![Object::Real(h_scale)]));
-        ops.push(Operation::new(
-            "Td",
-            vec![Object::Real(line.rect.x), Object::Real(line.rect.y)],
-        ));
-        ops.push(Operation::new("Tj", vec![Object::string_literal(encoded)]));
+
+        for word in &line.words {
+            let encoded = encode_win_ansi(&word.text);
+            if encoded.is_empty() {
+                continue;
+            }
+            let char_count = encoded.len().max(1);
+            // Tz calibrates this word's glyph widths to its OCR box width.
+            // 0.5 × font_size estimates the Helvetica average advance per glyph;
+            // error is bounded to this single word, not the whole line.
+            let natural_width = 0.5 * font_size * char_count as f32;
+            let h_scale = ((word.rect.width / natural_width) * 100.0).clamp(10.0, 2000.0);
+
+            ops.push(Operation::new("Tz", vec![Object::Real(h_scale)]));
+            // Tm [a b c d e f]: absolute text matrix.  [1 0 0 1 x y] positions
+            // the text origin at (x, y) in user space; font size and Tz are
+            // applied separately by the renderer and must not be baked in here.
+            ops.push(Operation::new(
+                "Tm",
+                vec![
+                    Object::Real(1.0),
+                    Object::Real(0.0),
+                    Object::Real(0.0),
+                    Object::Real(1.0),
+                    Object::Real(word.rect.x),
+                    Object::Real(baseline_y),
+                ],
+            ));
+            ops.push(Operation::new("Tj", vec![Object::string_literal(encoded)]));
+        }
+
         ops.push(Operation::new("ET", vec![]));
     }
 
