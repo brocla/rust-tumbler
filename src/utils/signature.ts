@@ -50,3 +50,13 @@ export function signatureBadge(status: SignatureStatus | undefined): SignatureBa
 export const SIGNATURE_EDIT_WARNING =
   "This document is signed. Saving these changes will modify the file and " +
   "invalidate the digital signature — it can't be re-verified afterward.";
+
+/**
+ * Warning shown before saving a searchable copy of a signed document.
+ * The source is untouched, but the copy will contain invalid signature data
+ * because the added text layer changes the document content.
+ */
+export const SIGNATURE_SEARCHABLE_COPY_WARNING =
+  "This document is signed. The searchable copy will include the signature " +
+  "data, but because a text layer will be added, the signature will not " +
+  "verify in the copy — it cannot be treated as a signed document.";

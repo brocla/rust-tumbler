@@ -330,7 +330,7 @@ pub async fn ocr_document(
     result?.map_err(String::from)
 }
 
-fn ocr_document_impl(
+pub(crate) fn ocr_document_impl(
     emit_progress: impl Fn(u32, u32),
     entry: Arc<Mutex<DocEntry>>,
     doc_id: String,

@@ -7,6 +7,7 @@ pub mod optimize;
 pub mod pages;
 pub mod print;
 pub mod render;
+pub mod save_searchable;
 pub mod signature;
 pub mod startup;
 pub mod text;

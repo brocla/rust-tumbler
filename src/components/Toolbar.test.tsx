@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, act } from "@testing-library/react";
 import { invoke } from "@tauri-apps/api/core";
-import { save, message, ask } from "@tauri-apps/plugin-dialog";
+import { save, message, ask, confirm } from "@tauri-apps/plugin-dialog";
 import { Toolbar } from "./Toolbar";
 import { usePdfStore } from "../store/usePdfStore";
 import type { TabState } from "../store/usePdfStore";
@@ -11,6 +11,7 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
   save: vi.fn(),
   message: vi.fn(),
   ask: vi.fn(),
+  confirm: vi.fn(),
 }));
 
 function makeTab(overrides: Partial<TabState> = {}): TabState {
@@ -58,6 +59,13 @@ async function clickExport() {
 async function clickMakeSearchable() {
   await act(async () => {
     fireEvent.click(screen.getByTitle("OCR - Make Text Searchable"));
+    await new Promise((r) => setTimeout(r, 0));
+  });
+}
+
+async function clickSaveSearchableCopy() {
+  await act(async () => {
+    fireEvent.click(screen.getByTitle("Save Searchable Copy..."));
     await new Promise((r) => setTimeout(r, 0));
   });
 }
@@ -182,5 +190,95 @@ describe("Toolbar make searchable", () => {
       expect.objectContaining({ title: "Make Searchable" }),
     );
     expect(usePdfStore.getState().tabs[0].ocrEpoch).toBe(0);
+  });
+});
+
+describe("Toolbar save searchable copy", () => {
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset();
+    vi.mocked(save).mockReset();
+    vi.mocked(message).mockReset();
+    vi.mocked(confirm).mockReset();
+    vi.mocked(save).mockResolvedValue("C:\\out-searchable.pdf");
+    vi.mocked(message).mockResolvedValue(undefined as never);
+  });
+
+  it("invokes save_searchable_copy with the chosen path and shows success", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === "save_searchable_copy")
+        return Promise.resolve({ pagesWritten: 3, cancelled: false });
+      return Promise.resolve(undefined);
+    });
+
+    renderToolbar();
+    await clickSaveSearchableCopy();
+
+    expect(invoke).toHaveBeenCalledWith("save_searchable_copy", {
+      docId: "doc-1",
+      destPath: "C:\\out-searchable.pdf",
+    });
+    expect(message).toHaveBeenCalledWith(
+      expect.stringContaining("Added a text layer to 3 pages"),
+      expect.objectContaining({ title: "Save Searchable Copy" }),
+    );
+  });
+
+  it("shows cancelled message when the backend reports cancellation", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === "save_searchable_copy")
+        return Promise.resolve({ pagesWritten: 0, cancelled: true });
+      return Promise.resolve(undefined);
+    });
+
+    renderToolbar();
+    await clickSaveSearchableCopy();
+
+    expect(message).toHaveBeenCalledWith(
+      "Cancelled.",
+      expect.objectContaining({ title: "Save Searchable Copy" }),
+    );
+  });
+
+  it("does nothing when the save dialog is cancelled (no path)", async () => {
+    vi.mocked(save).mockResolvedValue(null);
+
+    renderToolbar();
+    await clickSaveSearchableCopy();
+
+    expect(invoke).not.toHaveBeenCalledWith("save_searchable_copy", expect.anything());
+  });
+
+  it("shows signature warning and aborts when user declines on a signed doc", async () => {
+    vi.mocked(confirm).mockResolvedValue(false);
+    usePdfStore.setState({
+      tabs: [{ ...usePdfStore.getState().tabs[0], signatureStatus: "verified" }],
+      activeTabId: "tab-1",
+    });
+
+    renderToolbar();
+    await clickSaveSearchableCopy();
+
+    expect(confirm).toHaveBeenCalled();
+    expect(save).not.toHaveBeenCalled();
+    expect(invoke).not.toHaveBeenCalledWith("save_searchable_copy", expect.anything());
+  });
+
+  it("proceeds after signature warning when user accepts", async () => {
+    vi.mocked(confirm).mockResolvedValue(true);
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === "save_searchable_copy")
+        return Promise.resolve({ pagesWritten: 1, cancelled: false });
+      return Promise.resolve(undefined);
+    });
+    usePdfStore.setState({
+      tabs: [{ ...usePdfStore.getState().tabs[0], signatureStatus: "verified" }],
+      activeTabId: "tab-1",
+    });
+
+    renderToolbar();
+    await clickSaveSearchableCopy();
+
+    expect(confirm).toHaveBeenCalled();
+    expect(invoke).toHaveBeenCalledWith("save_searchable_copy", expect.anything());
   });
 });

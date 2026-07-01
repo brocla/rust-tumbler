@@ -63,6 +63,7 @@ pub fn run() {
             commands::optimize::run_optimization_steps,
             commands::optimize::save_optimized_copy,
             commands::optimize::cancel_compress,
+            commands::save_searchable::save_searchable_copy,
             commands::print::print_document,
             commands::print::cancel_print,
             commands::startup::take_startup_file,

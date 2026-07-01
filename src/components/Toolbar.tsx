@@ -1,13 +1,20 @@
-import { BookOpen, ChevronLeft, ChevronRight, Moon, MoveHorizontal, MoveVertical, Printer, ScanSearch, ScrollText, Sun, ZoomIn, ZoomOut } from "lucide-react";
+import { BookOpen, ChevronLeft, ChevronRight, FileSearch2, Moon, MoveHorizontal, MoveVertical, Printer, ScanSearch, ScrollText, Sun, ZoomIn, ZoomOut } from "lucide-react";
 import { save, message, ask } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { usePdfStore } from "../store/usePdfStore";
 import type { DisplayMode } from "../store/usePdfStore";
 import { ZOOM_PRESETS } from "../utils/zoomConstants";
+import { confirmBreakingEdit } from "../utils/confirmBreakingEdit";
+import { isSigned, SIGNATURE_SEARCHABLE_COPY_WARNING } from "../utils/signature";
 
 interface TextExportResult {
   pages: number;
   ocrPages: number;
+  cancelled: boolean;
+}
+
+interface SaveSearchableResult {
+  pagesWritten: number;
   cancelled: boolean;
 }
 
@@ -148,6 +155,49 @@ export function Toolbar({ onOpenFile, onPrint }: ToolbarProps) {
       }
     } catch (err) {
       await message(String(err), { title: "Export Failed", kind: "error" });
+    } finally {
+      setOcrProgress(null);
+    }
+  };
+
+  // "Save Searchable Copy…": writes a new PDF with an invisible OCR text layer
+  // on every scanned (text-less) page. The source file is never modified.
+  const handleSaveSearchableCopy = async () => {
+    if (!activeTab) return;
+
+    if (isSigned(activeTab.signatureStatus)) {
+      const proceed = await confirmBreakingEdit(SIGNATURE_SEARCHABLE_COPY_WARNING);
+      if (!proceed) return;
+    }
+
+    const dir = activeTab.filePath.replace(/[\\/][^\\/]*$/, "");
+    const baseName = activeTab.fileName.replace(/\.pdf$/i, "");
+    const destPath = await save({
+      filters: [{ name: "PDF", extensions: ["pdf"] }],
+      defaultPath: `${dir}/${baseName}-searchable.pdf`,
+    });
+    if (!destPath) return;
+
+    setOcrProgress({ page: 0, total: activeTab.pageCount });
+    try {
+      const result = await invoke<SaveSearchableResult>("save_searchable_copy", {
+        docId: activeTab.docId,
+        destPath,
+      });
+      if (result.cancelled) {
+        await message("Cancelled.", { title: "Save Searchable Copy", kind: "info" });
+      } else {
+        const layerNote =
+          result.pagesWritten > 0
+            ? `Added a text layer to ${result.pagesWritten} page${result.pagesWritten === 1 ? "" : "s"}.`
+            : "No scanned pages found — the copy is identical to the original.";
+        await message(`Saved a searchable copy.\n${layerNote}`, {
+          title: "Save Searchable Copy",
+          kind: "info",
+        });
+      }
+    } catch (err) {
+      await message(String(err), { title: "Save Searchable Copy", kind: "error" });
     } finally {
       setOcrProgress(null);
     }
@@ -314,6 +364,13 @@ export function Toolbar({ onOpenFile, onPrint }: ToolbarProps) {
             title="OCR - Make Text Searchable"
           >
             <ScanSearch size={18} />
+          </button>
+          <button
+            className="toolbar-button"
+            onClick={handleSaveSearchableCopy}
+            title="Save Searchable Copy..."
+          >
+            <FileSearch2 size={18} />
           </button>
           <button
             className="toolbar-button"
