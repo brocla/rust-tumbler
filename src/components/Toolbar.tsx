@@ -1,10 +1,11 @@
-import { BookOpen, ChevronLeft, ChevronRight, FileSearch, Moon, MoveHorizontal, MoveVertical, Printer, ScanSearch, ScrollText, Sun, ZoomIn, ZoomOut } from "lucide-react";
+import { BookOpen, ChevronLeft, ChevronRight, FileSearch, Moon, MoveHorizontal, MoveVertical, Printer, Save, SaveAll, ScanSearch, ScrollText, Sun, ZoomIn, ZoomOut } from "lucide-react";
 import { save, message, ask } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { usePdfStore } from "../store/usePdfStore";
 import type { DisplayMode } from "../store/usePdfStore";
 import { ZOOM_PRESETS } from "../utils/zoomConstants";
 import { confirmBreakingEdit } from "../utils/confirmBreakingEdit";
+import { saveTab, saveTabAs } from "../utils/saveDocument";
 import { isSigned, SIGNATURE_SAVE_COPY_WARNING } from "../utils/signature";
 
 interface TextExportResult {
@@ -371,6 +372,23 @@ export function Toolbar({ onOpenFile, onPrint }: ToolbarProps) {
               </button>
             );
           })()}
+
+          <div className="toolbar-separator" />
+          <button
+            className="toolbar-button"
+            onClick={() => void saveTab(activeTab)}
+            disabled={!activeTab.isDirty}
+            title="Save (Ctrl+S)"
+          >
+            <Save size={18} />
+          </button>
+          <button
+            className="toolbar-button"
+            onClick={() => void saveTabAs(activeTab)}
+            title="Save As... (Ctrl+Shift+S)"
+          >
+            <SaveAll size={18} />
+          </button>
 
           <div className="toolbar-separator" />
           <button

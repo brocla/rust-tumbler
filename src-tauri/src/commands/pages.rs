@@ -157,25 +157,29 @@ pub fn rotate_pages(
     page_numbers: Vec<u32>,
     clockwise_turns: u32,
 ) -> Result<PageInfo, String> {
-    let (info, doc_ids) =
-        rotate_pages_impl(&state, doc_id, page_numbers, clockwise_turns).map_err(String::from)?;
+    let info = rotate_pages_impl(&state, doc_id.clone(), page_numbers, clockwise_turns)
+        .map_err(String::from)?;
     let _ = app.emit(
         "document-pages-changed",
         PagesChangedPayload {
-            doc_ids,
+            doc_ids: vec![doc_id.clone()],
             page_count: info.page_count,
             page_dimensions: info.page_dimensions.clone(),
         },
     );
+    let _ = app.emit(
+        "document-dirty-changed",
+        crate::commands::save::DirtyChangedPayload { doc_id, dirty: true },
+    );
     Ok(info)
 }
 
-fn rotate_pages_impl(
+pub(crate) fn rotate_pages_impl(
     state: &AppState,
     doc_id: String,
     page_numbers: Vec<u32>,
     clockwise_turns: u32,
-) -> Result<(PageInfo, Vec<String>), AppError> {
+) -> Result<PageInfo, AppError> {
     if page_numbers.is_empty() {
         return Err(AppError::Other("No page numbers provided".to_string()));
     }
@@ -211,11 +215,12 @@ fn rotate_pages_impl(
         .document
         .save_to_bytes()
         .map_err(|e| AppError::pdfium("Failed to save PDF after rotation", e))?;
-    let file_path = entry.file_path.clone();
     drop(entry);
 
-    let doc_ids = write_and_reload(state, &file_path, bytes)?;
-    Ok((info, doc_ids))
+    // Non-destructive (issue #31): the rotation lives only in the in-memory
+    // buffer until the user saves. Nothing is written to disk here.
+    state.set_buffer_and_refresh(&doc_id, bytes)?;
+    Ok(info)
 }
 
 // ── reorder_pages ─────────────────────────────────────────────────────────────
@@ -468,12 +473,16 @@ mod tests {
     }
 
     fn open_doc_in_state(state: &AppState, doc_id: &str, doc: PdfDocument<'static>, path: &str) {
+        // The doc was just saved to `path`, so the file bytes are the buffer.
+        let buffer = std::fs::read(path).expect("read saved doc");
         state
             .insert_document(
                 doc_id.to_string(),
                 DocEntry {
                     document: doc,
                     file_path: path.to_string(),
+                    buffer,
+                    dirty: false,
                 },
             )
             .expect("insert document");

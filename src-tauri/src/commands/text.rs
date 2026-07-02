@@ -579,18 +579,8 @@ mod tests {
     fn open_fixture(state: &AppState, doc_id: &str) {
         let src = crate::fixture_path();
         let pdfium = crate::test_pdfium();
-        let document = pdfium
-            .load_pdf_from_file(src.to_str().unwrap(), None)
-            .expect("load pdf");
-        state
-            .insert_document(
-                doc_id.to_string(),
-                DocEntry {
-                    document,
-                    file_path: src.to_string_lossy().into_owned(),
-                },
-            )
-            .expect("insert");
+        let entry = DocEntry::load(pdfium, &src.to_string_lossy()).expect("load pdf");
+        state.insert_document(doc_id.to_string(), entry).expect("insert");
     }
 
     /// `sample.pdf` is a single 200x200 page containing the text "Test
@@ -759,6 +749,9 @@ mod tests {
                 DocEntry {
                     document: doc,
                     file_path: "blank.pdf".to_string(),
+                    // No backing file; these tests never touch the buffer.
+                    buffer: Vec::new(),
+                    dirty: false,
                 },
             )
             .expect("insert");
@@ -806,6 +799,9 @@ mod tests {
                 DocEntry {
                     document: doc,
                     file_path: format!("{doc_id}.pdf"),
+                    // No backing file; these tests never touch the buffer.
+                    buffer: Vec::new(),
+                    dirty: false,
                 },
             )
             .expect("insert");

@@ -23,16 +23,14 @@ pub fn open_document(state: State<'_, AppState>, path: String) -> Result<DocInfo
 }
 
 fn open_document_impl(state: &AppState, path: String) -> Result<DocInfo, AppError> {
-    let doc = state
-        .pdfium
-        .load_pdf_from_file(&path, None)
-        .map_err(|e| AppError::pdfium("Failed to load PDF", e))?;
+    let entry = DocEntry::load(state.pdfium, &path)?;
 
-    let page_count = doc.pages().len() as u32;
+    let page_count = entry.document.pages().len() as u32;
     let mut page_dimensions = Vec::with_capacity(page_count as usize);
 
     for i in 0..page_count {
-        let page = doc
+        let page = entry
+            .document
             .pages()
             .get(i as i32)
             .map_err(|e| AppError::pdfium(format!("Failed to get page {i}"), e))?;
@@ -43,13 +41,7 @@ fn open_document_impl(state: &AppState, path: String) -> Result<DocInfo, AppErro
     }
 
     let doc_id = uuid::Uuid::new_v4().to_string();
-    state.insert_document(
-        doc_id.clone(),
-        DocEntry {
-            document: doc,
-            file_path: path,
-        },
-    )?;
+    state.insert_document(doc_id.clone(), entry)?;
 
     Ok(DocInfo {
         doc_id,
@@ -143,8 +135,8 @@ mod tests {
 
         let missing = std::env::temp_dir().join("tumbler_does_not_exist.pdf");
         match open_document_impl(&state, missing.to_string_lossy().into_owned()) {
-            Err(AppError::Pdfium { .. }) => {}
-            Err(other) => panic!("expected AppError::Pdfium, got {other:?}"),
+            Err(AppError::Io { .. }) => {}
+            Err(other) => panic!("expected AppError::Io, got {other:?}"),
             Ok(_) => panic!("expected an error for a missing file"),
         }
     }

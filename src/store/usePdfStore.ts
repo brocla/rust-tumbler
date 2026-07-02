@@ -25,6 +25,11 @@ export interface TabState {
   searchResults: SearchResult[];
   searchResultIndex: number;
   metadataDirty: boolean;
+  // True when the document's in-memory buffer holds unsaved edits. Owned by
+  // the backend (DocEntry.dirty) and mirrored here via the
+  // "document-dirty-changed" event; drives the Save button, the tab dot, and
+  // the close guards. (issue #31)
+  isDirty: boolean;
   loading: boolean;
   pagesVersion: number;
   // Bumped to force a content repaint (e.g. a reorder) without remounting page
@@ -56,6 +61,19 @@ export interface SearchResult {
   rects: { x: number; y: number; width: number; height: number }[];
 }
 
+export type UnsavedChoice = "save" | "discard" | "cancel";
+
+/**
+ * A pending "Save changes to <file>?" prompt. Native Tauri dialogs support at
+ * most two buttons, so the three-way Save / Don't Save / Cancel choice is an
+ * in-app modal (UnsavedChangesDialog) driven by this slice: `askUnsaved`
+ * stores the resolver, the dialog's buttons call `resolveUnsaved`.
+ */
+export interface UnsavedPrompt {
+  fileName: string;
+  resolve: (choice: UnsavedChoice) => void;
+}
+
 export interface CompressProgress {
   step: string;
   stepIndex: number;
@@ -81,9 +99,13 @@ interface PdfStore {
   // driven by Tauri `compress-progress` events. Null when none is running.
   // Shared here so the panel triggers the run while App renders the overlay.
   compressProgress: CompressProgress | null;
+  // Non-null while an unsaved-changes prompt is showing (close guards await it).
+  unsavedPrompt: UnsavedPrompt | null;
 
   // Actions
   setActiveTab: (id: string) => void;
+  askUnsaved: (fileName: string) => Promise<UnsavedChoice>;
+  resolveUnsaved: (choice: UnsavedChoice) => void;
   setSidebarTool: (tool: PdfStore["activeSidebarTool"]) => void;
   setSidebarWidth: (width: number) => void;
   setOcrProgress: (progress: { page: number; total: number } | null) => void;
@@ -108,8 +130,17 @@ export const usePdfStore = create<PdfStore>((set, get) => ({
   sidebarWidth: 250,
   ocrProgress: null,
   compressProgress: null,
+  unsavedPrompt: null,
 
   setActiveTab: (id) => set({ activeTabId: id }),
+
+  askUnsaved: (fileName) =>
+    new Promise((resolve) => set({ unsavedPrompt: { fileName, resolve } })),
+
+  resolveUnsaved: (choice) => {
+    get().unsavedPrompt?.resolve(choice);
+    set({ unsavedPrompt: null });
+  },
 
   setOcrProgress: (progress) => set({ ocrProgress: progress }),
 

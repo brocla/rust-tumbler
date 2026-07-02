@@ -62,6 +62,8 @@ pub fn run() {
             commands::pages::reorder_pages,
             commands::pages::merge_document,
             commands::pages::split_document,
+            commands::save::save_document,
+            commands::save::save_document_as,
             commands::optimize::run_optimization_steps,
             commands::optimize::save_optimized_copy,
             commands::optimize::cancel_compress,

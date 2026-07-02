@@ -2,12 +2,15 @@ import { useEffect, useRef, useState } from "react";
 import { message, open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Toolbar } from "./components/Toolbar";
 import { TabBar } from "./components/TabBar";
 import { IconRail } from "./components/IconRail";
 import { Sidebar } from "./components/Sidebar";
 import { ViewerArea } from "./components/ViewerArea";
 import { StatusBar } from "./components/StatusBar";
+import { UnsavedChangesDialog } from "./components/UnsavedChangesDialog";
+import { saveTab, saveTabAs, confirmCloseDirtyTab } from "./utils/saveDocument";
 import { usePdfStore, suppressedReloadDocs } from "./store/usePdfStore";
 import type { PageDimension, CompressProgress } from "./store/usePdfStore";
 import type { SignatureInfo } from "./utils/signature";
@@ -84,6 +87,7 @@ function App() {
         searchResults: [],
         searchResultIndex: -1,
         metadataDirty: false,
+        isDirty: false,
         loading: false,
         pagesVersion: 0,
         contentEpoch: 0,
@@ -246,6 +250,56 @@ function App() {
     return () => { unlisten.then((f) => f()); };
   }, [updateTab]);
 
+  // Mirror the backend's dirty flag (DocEntry.dirty) into the tab so the Save
+  // button, tab dot, and close guards react. The backend owns the truth: every
+  // buffer edit and every save emits this event. (issue #31)
+  useEffect(() => {
+    const unlisten = listen<{ docId: string; dirty: boolean }>(
+      "document-dirty-changed",
+      (event) => {
+        const { tabs } = usePdfStore.getState();
+        const tab = tabs.find((t) => t.docId === event.payload.docId);
+        if (tab) updateTab(tab.id, { isDirty: event.payload.dirty });
+      },
+    );
+    return () => { unlisten.then((f) => f()); };
+  }, [updateTab]);
+
+  // Ctrl+S — Save (only when dirty); Ctrl+Shift+S — Save As
+  useEffect(() => {
+    const handleCtrlS = (e: KeyboardEvent) => {
+      if (!e.ctrlKey || e.key.toLowerCase() !== "s") return;
+      e.preventDefault();
+      const tab = usePdfStore.getState().getActiveTab();
+      if (!tab) return;
+      if (e.shiftKey) {
+        void saveTabAs(tab);
+      } else if (tab.isDirty) {
+        void saveTab(tab);
+      }
+    };
+    window.addEventListener("keydown", handleCtrlS);
+    return () => window.removeEventListener("keydown", handleCtrlS);
+  }, []);
+
+  // Window-close guard: quitting with unsaved changes prompts per dirty tab.
+  // Tauri only auto-closes when no close-requested listener prevents it, so
+  // awaiting the in-app prompt here blocks the quit until the user decides;
+  // Cancel (or a failed save) aborts it, otherwise we destroy explicitly.
+  useEffect(() => {
+    const appWindow = getCurrentWindow();
+    const unlisten = appWindow.onCloseRequested(async (event) => {
+      const dirtyTabs = usePdfStore.getState().tabs.filter((t) => t.isDirty);
+      if (dirtyTabs.length === 0) return;
+      event.preventDefault();
+      for (const tab of dirtyTabs) {
+        if (!(await confirmCloseDirtyTab(tab))) return;
+      }
+      await appWindow.destroy();
+    });
+    return () => { unlisten.then((f) => f()); };
+  }, []);
+
   // Ctrl+F — open search panel, focus and select input
   // Uses capture phase to intercept before WebView2's native find dialog
   useEffect(() => {
@@ -331,6 +385,7 @@ function App() {
         </div>
       </div>
       <StatusBar />
+      <UnsavedChangesDialog />
       {printProgress && (
         <div className="print-progress-overlay">
           <div className="print-progress-dialog">
