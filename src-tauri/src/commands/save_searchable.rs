@@ -186,8 +186,10 @@ fn encode_for_font(text: &str) -> Vec<u8> {
 /// one font size and one horizontal-scale (`Tz`) stretching the whole line to
 /// its box width. Emitting per line (not per word) is what keeps a reader's
 /// selection and search highlight smooth across the line, with uniform spacing,
-/// instead of jumping between independently-scaled per-word runs. Each block is
-/// self-contained so a malformed prior stream can't bleed text state into ours.
+/// instead of jumping between independently-scaled per-word runs. Each `BT…ET`
+/// block isolates *text* state; isolation from the page's *graphics* state
+/// (a leftover CTM or clip) is handled where this stream is appended — see
+/// [`append_content_stream`], which wraps the existing content in `q`/`Q`.
 ///
 /// Font size and baseline are derived from the line box and Helvetica's loose
 /// metrics so the run's text-extraction box coincides with the OCR box: with
@@ -303,27 +305,52 @@ fn merged_resources_with_font(
     resources
 }
 
-/// Appends `stream_id` to a page's `/Contents`, whatever its current shape.
-/// PDF concatenates the array, so our invisible text is drawn last (over the
-/// page image).
-fn append_content_stream(page: &mut Dictionary, stream_id: ObjectId) {
+/// The stream references in a page's `/Contents`, normalized across its possible
+/// shapes (single `Reference`, `Array` of references, or missing → empty).
+fn contents_refs(doc: &Document, page_id: ObjectId) -> Vec<ObjectId> {
+    let Some(page) = doc.get_object(page_id).ok().and_then(|o| o.as_dict().ok()) else {
+        return Vec::new();
+    };
     match page.get(b"Contents") {
-        Ok(Object::Reference(existing)) => {
-            let existing = *existing;
-            page.set(
-                "Contents",
-                Object::Array(vec![Object::Reference(existing), Object::Reference(stream_id)]),
-            );
-        }
-        Ok(Object::Array(a)) => {
-            let mut a = a.clone();
-            a.push(Object::Reference(stream_id));
-            page.set("Contents", Object::Array(a));
-        }
-        _ => {
-            page.set("Contents", Object::Reference(stream_id));
-        }
+        Ok(Object::Reference(r)) => vec![*r],
+        Ok(Object::Array(a)) => a.iter().filter_map(|o| o.as_reference().ok()).collect(),
+        _ => Vec::new(),
     }
+}
+
+/// Appends our invisible-text stream to a page's `/Contents`, bracketing the
+/// existing content in a `q … Q` pair first.
+///
+/// PDF concatenates the content streams into one, so without the wrap our text
+/// would inherit any graphics state the page's content left in effect — a
+/// leftover CTM (`cm`) or an open clip, both common in real scans, would shift
+/// or clip the layer. The `q` saves the page-default state at the top; the `Q`
+/// restores it after the existing content; our text then runs from a clean
+/// default CTM. (A single wrap can't neutralize *pathological* content that sets
+/// a top-level `cm` and then an unbalanced `q` with no `Q`; that's rare and
+/// matches what ocrmypdf/pikepdf do.)
+///
+/// Guard/text stream objects are added by the caller (needs `&mut Document`) and
+/// passed in as ids so this only edits the page dictionary. When the page has no
+/// existing content there's nothing to reset, so `/Contents` is set to our
+/// stream alone and the guard ids are ignored.
+fn append_content_stream(
+    page: &mut Dictionary,
+    existing: &[ObjectId],
+    save_id: ObjectId,
+    restore_id: ObjectId,
+    text_id: ObjectId,
+) {
+    if existing.is_empty() {
+        page.set("Contents", Object::Reference(text_id));
+        return;
+    }
+    let mut refs = Vec::with_capacity(existing.len() + 3);
+    refs.push(Object::Reference(save_id));
+    refs.extend(existing.iter().map(|id| Object::Reference(*id)));
+    refs.push(Object::Reference(restore_id));
+    refs.push(Object::Reference(text_id));
+    page.set("Contents", Object::Array(refs));
 }
 
 // ── Command ─────────────────────────────────────────────────────────────────
@@ -448,7 +475,21 @@ fn save_searchable_copy_impl(
                 })
             });
             let resources = merged_resources_with_font(&d, page_id, FONT_NAME, fid);
+
+            // Everything that needs `&mut Document` is created before the page
+            // borrow: our text stream, and (per page) the `q`/`Q` guard streams
+            // that reset the graphics state around the existing content so our
+            // layer isn't shifted/clipped by a leftover CTM or clip.
+            let existing = contents_refs(&d, page_id);
             let stream_id = d.add_object(Object::Stream(Stream::new(Dictionary::new(), stream_bytes)));
+            let (save_id, restore_id) = if existing.is_empty() {
+                (stream_id, stream_id) // unused when there's no content to wrap
+            } else {
+                (
+                    d.add_object(Object::Stream(Stream::new(Dictionary::new(), b"q\n".to_vec()))),
+                    d.add_object(Object::Stream(Stream::new(Dictionary::new(), b"\nQ\n".to_vec()))),
+                )
+            };
 
             {
                 let page = d
@@ -456,7 +497,7 @@ fn save_searchable_copy_impl(
                     .map_err(|e| AppError::lopdf(format!("Failed to get page {page_num}"), e))?
                     .as_dict_mut()
                     .map_err(|e| AppError::lopdf(format!("Page {page_num} is not a dictionary"), e))?;
-                append_content_stream(page, stream_id);
+                append_content_stream(page, &existing, save_id, restore_id, stream_id);
                 page.set("Resources", Object::Dictionary(resources));
             }
             pages_written += 1;
@@ -536,12 +577,16 @@ mod tests {
             .into_owned()
     }
 
-    /// Hand-writes a minimal one-page blank PDF (no text layer) to `path`, so
-    /// both pdfium and lopdf can load it — a stand-in for a scanned page.
-    fn write_blank_pdf(path: &str) {
+    /// Hand-writes a minimal one-page (200×200) PDF to `path` whose page content
+    /// stream is `content`, so both pdfium and lopdf can load it. Passing a
+    /// non-trivial content stream lets a test seed a *dirty graphics state* — a
+    /// leftover CTM, an open clip, or an unbalanced `q` — to prove the appended
+    /// OCR layer isn't affected by it. Empty content = a plain scanned-page
+    /// stand-in.
+    fn write_pdf_with_content(path: &str, content: &[u8]) {
         let mut doc = Document::with_version("1.5");
         let pages_id = doc.new_object_id();
-        let contents_id = doc.add_object(Stream::new(Dictionary::new(), Vec::new()));
+        let contents_id = doc.add_object(Stream::new(Dictionary::new(), content.to_vec()));
         let page_id = doc.add_object(dictionary! {
             "Type" => "Page",
             "Parent" => pages_id,
@@ -564,7 +609,64 @@ mod tests {
             "Pages" => pages_id,
         });
         doc.trailer.set("Root", catalog_id);
-        doc.save(path).expect("write blank pdf");
+        doc.save(path).expect("write pdf");
+    }
+
+    /// A blank (no-content) one-page PDF — a plain scanned-page stand-in.
+    fn write_blank_pdf(path: &str) {
+        write_pdf_with_content(path, b"");
+    }
+
+    /// Saves a searchable copy of a one-page PDF whose page content is
+    /// `page_content`, seeded with a single OCR `word`, then returns the unioned
+    /// loose bounds `(left, bottom, right, top)` pdfium reports for the authored
+    /// layer. Used to assert the layer lands on the OCR box regardless of the
+    /// page's pre-existing graphics state. The caller must hold
+    /// `test_pdfium_guard()`.
+    fn saved_layer_loose_bounds(page_content: &[u8], word: OcrWord) -> (f32, f32, f32, f32) {
+        let pdfium = crate::test_pdfium();
+        let src = temp_path("src.pdf");
+        write_pdf_with_content(&src, page_content);
+        let dest = temp_path("out.pdf");
+
+        let engine: Arc<dyn OcrEngine> = Arc::new(FakeOcrEngine { words: vec![word.clone()] });
+        let state = AppState::new(pdfium, None).with_ocr_engine(engine.clone());
+        // Seed the cache directly so the rect is exactly `word.rect`.
+        state.set_ocr_words("doc1", 1, vec![word]);
+        let document = pdfium.load_pdf_from_file(&src, None).expect("load src");
+        state
+            .insert_document("doc1".to_string(), DocEntry { document, file_path: src.clone() })
+            .expect("insert");
+
+        let entry = state.get_document("doc1").expect("get");
+        save_searchable_copy_impl(
+            |_, _| {},
+            entry,
+            "doc1".to_string(),
+            dest.clone(),
+            engine,
+            state.ocr_cache_handle(),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .expect("save");
+
+        let reopened = pdfium.load_pdf_from_file(&dest, None).expect("reopen");
+        let page = reopened.pages().get(0).expect("page");
+        let text = page.text().expect("text");
+        let (mut left, mut bottom, mut right, mut top) =
+            (f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
+        for ch in text.chars().iter() {
+            if let Ok(b) = ch.loose_bounds() {
+                left = left.min(b.left().value);
+                bottom = bottom.min(b.bottom().value);
+                right = right.max(b.right().value);
+                top = top.max(b.top().value);
+            }
+        }
+        drop(reopened);
+        std::fs::remove_file(&src).ok();
+        std::fs::remove_file(&dest).ok();
+        (left, bottom, right, top)
     }
 
     // ── Pure builder / helpers ──────────────────────────────────────────────
@@ -753,6 +855,137 @@ mod tests {
         // reaches the end of the line rather than falling short.
         assert!((left - 30.0).abs() < 4.0, "layer left {left} should align to OCR box left 30");
         assert!((right - 150.0).abs() < 4.0, "layer right {right} should reach OCR box right 150");
+
+        drop(reopened);
+        std::fs::remove_file(&src).ok();
+        std::fs::remove_file(&dest).ok();
+    }
+
+    // ── B1: appended layer must not inherit the page's leftover graphics state ─
+    //
+    // These pages leave a dirty CTM in effect at the end of their content (a
+    // bare `cm`, and an unbalanced `q`+`cm` with no `Q`), which real scans do.
+    // The appended OCR run is concatenated after that content, so today it
+    // inherits the transform and the extraction box drifts/scales away from the
+    // OCR box. Both assert the layer lands on the OCR box (x 30..150, y
+    // 100..120) and therefore FAIL until the append wraps existing content in
+    // `q`/`Q`. (A leftover clip would likewise clip the *rendered* highlight;
+    // the same q/Q wrap fixes it, but clipping doesn't affect pdfium's text
+    // extraction, so it can't be surfaced through these bounds-based checks.)
+
+    /// A leftover translation CTM (bare `cm`, never restored) must not shift the
+    /// appended invisible text. FAILS until B1 is fixed.
+    #[test]
+    fn layer_ignores_leftover_translate_ctm() {
+        let _guard = crate::test_pdfium_guard();
+        let word = OcrWord {
+            text: "Scanned".to_string(),
+            rect: TextRect { x: 30.0, y: 100.0, width: 120.0, height: 20.0 },
+        };
+        // Translate the CTM by (+100, +40) and never restore it.
+        let (left, bottom, right, top) = saved_layer_loose_bounds(b"1 0 0 1 100 40 cm\n", word);
+
+        assert!((left - 30.0).abs() < 4.0, "left {left} drifted (leftover CTM not reset)");
+        assert!((right - 150.0).abs() < 4.0, "right {right} drifted (leftover CTM not reset)");
+        assert!((bottom - 100.0).abs() < 1.5, "bottom {bottom} drifted (leftover CTM not reset)");
+        assert!((top - 120.0).abs() < 1.5, "top {top} drifted (leftover CTM not reset)");
+    }
+
+    /// An unbalanced `q` that applies a 2× scale and is never popped must not
+    /// scale/shift the appended invisible text. FAILS until B1 is fixed.
+    #[test]
+    fn layer_ignores_unbalanced_q_scale_ctm() {
+        let _guard = crate::test_pdfium_guard();
+        let word = OcrWord {
+            text: "Scanned".to_string(),
+            rect: TextRect { x: 30.0, y: 100.0, width: 120.0, height: 20.0 },
+        };
+        // Push graphics state and scale 2×, with no matching `Q`.
+        let (left, bottom, right, top) = saved_layer_loose_bounds(b"q 2 0 0 2 0 0 cm\n", word);
+
+        assert!((left - 30.0).abs() < 4.0, "left {left} scaled/drifted (leftover state not reset)");
+        assert!((right - 150.0).abs() < 4.0, "right {right} scaled/drifted (leftover state not reset)");
+        assert!((bottom - 100.0).abs() < 1.5, "bottom {bottom} scaled/drifted (leftover state not reset)");
+        assert!((top - 120.0).abs() < 1.5, "top {top} scaled/drifted (leftover state not reset)");
+    }
+
+    /// A page whose `/Contents` is already an Array (multiple content streams,
+    /// the second leaving a translated CTM) is wrapped correctly: our layer is
+    /// appended after a `Q` that resets the state, so it lands on the OCR box.
+    /// Exercises the Array branch of `append_content_stream`.
+    #[test]
+    fn layer_wraps_array_contents_and_ignores_ctm() {
+        let _guard = crate::test_pdfium_guard();
+        let pdfium = crate::test_pdfium();
+
+        // Build a page whose Contents is an ARRAY of two streams; the second
+        // leaves a +80,+30 translation in effect.
+        let src = temp_path("src.pdf");
+        {
+            let mut doc = Document::with_version("1.5");
+            let pages_id = doc.new_object_id();
+            let c0 = doc.add_object(Stream::new(Dictionary::new(), b"% first stream\n".to_vec()));
+            let c1 = doc.add_object(Stream::new(Dictionary::new(), b"1 0 0 1 80 30 cm\n".to_vec()));
+            let page_id = doc.add_object(dictionary! {
+                "Type" => "Page",
+                "Parent" => pages_id,
+                "Contents" => vec![Object::Reference(c0), Object::Reference(c1)],
+                "MediaBox" => vec![
+                    Object::Integer(0), Object::Integer(0),
+                    Object::Integer(200), Object::Integer(200),
+                ],
+            });
+            doc.objects.insert(
+                pages_id,
+                Object::Dictionary(dictionary! {
+                    "Type" => "Pages",
+                    "Kids" => vec![Object::Reference(page_id)],
+                    "Count" => Object::Integer(1),
+                }),
+            );
+            let catalog_id = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+            doc.trailer.set("Root", catalog_id);
+            doc.save(&src).expect("write array-contents pdf");
+        }
+        let dest = temp_path("out.pdf");
+
+        let word = OcrWord {
+            text: "Scanned".to_string(),
+            rect: TextRect { x: 30.0, y: 100.0, width: 120.0, height: 20.0 },
+        };
+        let engine: Arc<dyn OcrEngine> = Arc::new(FakeOcrEngine { words: vec![word.clone()] });
+        let state = AppState::new(pdfium, None).with_ocr_engine(engine.clone());
+        state.set_ocr_words("doc1", 1, vec![word]);
+        let document = pdfium.load_pdf_from_file(&src, None).expect("load src");
+        state
+            .insert_document("doc1".to_string(), DocEntry { document, file_path: src.clone() })
+            .expect("insert");
+
+        let entry = state.get_document("doc1").expect("get");
+        let result = save_searchable_copy_impl(
+            |_, _| {},
+            entry,
+            "doc1".to_string(),
+            dest.clone(),
+            engine,
+            state.ocr_cache_handle(),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .expect("save");
+        assert_eq!(result.pages_written, 1);
+
+        let reopened = pdfium.load_pdf_from_file(&dest, None).expect("reopen");
+        let page = reopened.pages().get(0).expect("page");
+        let text = page.text().expect("text");
+        let (mut left, mut right) = (f32::INFINITY, f32::NEG_INFINITY);
+        for ch in text.chars().iter() {
+            if let Ok(b) = ch.loose_bounds() {
+                left = left.min(b.left().value);
+                right = right.max(b.right().value);
+            }
+        }
+        assert!((left - 30.0).abs() < 4.0, "left {left} — array contents not wrapped");
+        assert!((right - 150.0).abs() < 4.0, "right {right} — array contents not wrapped");
 
         drop(reopened);
         std::fs::remove_file(&src).ok();
