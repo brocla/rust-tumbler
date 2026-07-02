@@ -1,14 +1,21 @@
 // Shared types + helpers for digital-signature verification display (issue #17).
 // Mirrors the Rust `SignatureInfo` / `SignatureStatus` (serde camelCase).
 
-export type SignatureStatus = "unsigned" | "verified" | "modifiedAfter" | "invalid";
+export type SignatureStatus =
+  | "unsigned"
+  | "verified"
+  | "modifiedAfter"
+  | "invalid"
+  | "unknown";
+
+export type Integrity = "ok" | "failed" | "unknown";
 
 export interface SignatureEntry {
   signerName: string;
   reason: string;
   location: string;
   signingTime: string;
-  integrityOk: boolean;
+  integrity: Integrity;
   modifiedAfter: boolean;
 }
 
@@ -25,13 +32,15 @@ export function isSigned(status: SignatureStatus | undefined): boolean {
 
 export interface SignatureBadge {
   text: string;
-  kind: "ok" | "warn";
+  kind: "ok" | "warn" | "info";
 }
 
 /**
  * Status-bar badge for the active tab. Honest wording: "Verified" means the
- * signature is cryptographically intact, not that the signer is trusted.
- * Returns null when there's nothing to show (unsigned / unknown).
+ * signature is cryptographically intact, not that the signer is trusted;
+ * "not verified here" means we detected a signature but can't check it in this
+ * build (e.g. an Adobe BER-encoded CMS) — NOT that it's invalid. Returns null
+ * when there's nothing to show (unsigned).
  */
 export function signatureBadge(status: SignatureStatus | undefined): SignatureBadge | null {
   switch (status) {
@@ -40,7 +49,9 @@ export function signatureBadge(status: SignatureStatus | undefined): SignatureBa
     case "modifiedAfter":
       return { text: "Signed — modified after signing", kind: "warn" };
     case "invalid":
-      return { text: "Signed — signature could not be verified", kind: "warn" };
+      return { text: "Signed — signature is invalid", kind: "warn" };
+    case "unknown":
+      return { text: "Signed — not verified here", kind: "info" };
     default:
       return null;
   }

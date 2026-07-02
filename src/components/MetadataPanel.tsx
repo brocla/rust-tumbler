@@ -16,11 +16,14 @@ function describeSignatures(info: SignatureInfo | null): string {
   return info.signatures
     .map((s) => {
       const who = s.signerName || "Unknown signer";
-      const state = !s.integrityOk
-        ? "could not be verified"
-        : s.modifiedAfter
-          ? "intact, but modified after signing"
-          : "intact";
+      const state =
+        s.integrity === "failed"
+          ? "signature is invalid (document altered)"
+          : s.integrity === "unknown"
+            ? "present — not verified here"
+            : s.modifiedAfter
+              ? "intact, but modified after signing"
+              : "intact";
       return `Signed by ${who} — ${state}`;
     })
     .join("; ");

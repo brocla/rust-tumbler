@@ -58,13 +58,24 @@ describe("StatusBar", () => {
     expect(screen.getByText("Signed — modified after signing")).toBeTruthy();
   });
 
-  it("shows a warning label when the signature could not be verified", () => {
+  it("shows an invalid label when the signature failed (tamper)", () => {
     usePdfStore.setState({
       tabs: [makeTab({ signatureStatus: "invalid" })],
       activeTabId: "tab-1",
     });
     render(<StatusBar />);
-    expect(screen.getByText("Signed — signature could not be verified")).toBeTruthy();
+    expect(screen.getByText("Signed — signature is invalid")).toBeTruthy();
+  });
+
+  it("shows a neutral 'not verified here' label for an unknown/unsupported signature", () => {
+    usePdfStore.setState({
+      tabs: [makeTab({ signatureStatus: "unknown" })],
+      activeTabId: "tab-1",
+    });
+    const { container } = render(<StatusBar />);
+    expect(screen.getByText("Signed — not verified here")).toBeTruthy();
+    // Neutral styling, not a warning.
+    expect(container.querySelector(".signature-badge-info")).not.toBeNull();
   });
 
   it("shows no badge for an unsigned (or unverified) tab", () => {
@@ -86,7 +97,7 @@ describe("StatusBar", () => {
     });
     const { rerender } = render(<StatusBar />);
     // Active is tab-2 (invalid) → its badge, not tab-1's.
-    expect(screen.getByText("Signed — signature could not be verified")).toBeTruthy();
+    expect(screen.getByText("Signed — signature is invalid")).toBeTruthy();
     expect(screen.queryByText("Verified Signed Document")).toBeNull();
 
     usePdfStore.setState({ activeTabId: "tab-1" });

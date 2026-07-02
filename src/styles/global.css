@@ -161,6 +161,12 @@ body {
   background: rgba(247, 99, 12, 0.14);
 }
 
+/* Detected but not verifiable here — neutral, not alarming. */
+.signature-badge-info {
+  color: var(--color-text-secondary);
+  background: var(--color-bg-tertiary);
+}
+
 /* App version — always rightmost, in the theme accent color. */
 .status-version {
   color: var(--color-accent);

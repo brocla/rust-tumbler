@@ -165,7 +165,7 @@ describe("MetadataPanel", () => {
               reason: "",
               location: "",
               signingTime: "",
-              integrityOk: true,
+              integrity: "ok",
               modifiedAfter: false,
             },
           ],
