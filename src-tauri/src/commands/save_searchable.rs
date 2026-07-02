@@ -407,65 +407,82 @@ fn save_searchable_copy_impl(
     }
 
     // Phase B (lopdf): author the invisible text into a fresh copy read from
-    // disk. pdfium's handle is never used for writing.
-    let mut doc = Document::load(&file_path)
-        .map_err(|e| AppError::lopdf("Failed to open PDF for searchable copy", e))?;
-    let pages = doc.get_pages();
-
-    // Add the shared font object lazily — only if at least one page needs it, so
-    // a document with nothing to OCR is written back untouched.
-    let mut font_id: Option<ObjectId> = None;
+    // disk. pdfium's handle is never used for writing. Only parse/rewrite the
+    // PDF when at least one page actually needs a layer — see the write step.
     let mut pages_written = 0u32;
+    let mut doc: Option<Document> = None;
 
-    for page_num in textless_pages {
-        let Some(words) = cache_get(&cache, &doc_id, page_num) else {
-            continue;
-        };
-        let Some(&page_id) = pages.get(&page_num) else {
-            continue;
-        };
+    if !textless_pages.is_empty() {
+        let mut d = Document::load(&file_path)
+            .map_err(|e| AppError::lopdf("Failed to open PDF for searchable copy", e))?;
+        let pages = d.get_pages();
+        // Add the shared font object lazily — only when a page first needs it.
+        let mut font_id: Option<ObjectId> = None;
 
-        // Skip pages whose coordinate space doesn't match what OcrWord.rect
-        // assumes; better no layer than a mis-placed one.
-        let (ox, oy, rotate) = page_geometry(&doc, page_id);
-        if !geometry_is_simple(ox, oy, rotate) {
-            continue;
+        for page_num in textless_pages {
+            let Some(words) = cache_get(&cache, &doc_id, page_num) else {
+                continue;
+            };
+            let Some(&page_id) = pages.get(&page_num) else {
+                continue;
+            };
+
+            // Skip pages whose coordinate space doesn't match what OcrWord.rect
+            // assumes; better no layer than a mis-placed one.
+            let (ox, oy, rotate) = page_geometry(&d, page_id);
+            if !geometry_is_simple(ox, oy, rotate) {
+                continue;
+            }
+
+            let stream_bytes = build_invisible_text_stream(&words, FONT_NAME);
+            if stream_bytes.is_empty() {
+                continue; // no representable text for this page
+            }
+
+            let fid = *font_id.get_or_insert_with(|| {
+                d.add_object(dictionary! {
+                    "Type" => "Font",
+                    "Subtype" => "Type1",
+                    "BaseFont" => "Helvetica",
+                    "Encoding" => "WinAnsiEncoding",
+                })
+            });
+            let resources = merged_resources_with_font(&d, page_id, FONT_NAME, fid);
+            let stream_id = d.add_object(Object::Stream(Stream::new(Dictionary::new(), stream_bytes)));
+
+            {
+                let page = d
+                    .get_object_mut(page_id)
+                    .map_err(|e| AppError::lopdf(format!("Failed to get page {page_num}"), e))?
+                    .as_dict_mut()
+                    .map_err(|e| AppError::lopdf(format!("Page {page_num} is not a dictionary"), e))?;
+                append_content_stream(page, stream_id);
+                page.set("Resources", Object::Dictionary(resources));
+            }
+            pages_written += 1;
         }
-
-        let stream_bytes = build_invisible_text_stream(&words, FONT_NAME);
-        if stream_bytes.is_empty() {
-            continue; // no representable text for this page
-        }
-
-        let fid = *font_id.get_or_insert_with(|| {
-            doc.add_object(dictionary! {
-                "Type" => "Font",
-                "Subtype" => "Type1",
-                "BaseFont" => "Helvetica",
-                "Encoding" => "WinAnsiEncoding",
-            })
-        });
-        let resources = merged_resources_with_font(&doc, page_id, FONT_NAME, fid);
-        let stream_id = doc.add_object(Object::Stream(Stream::new(Dictionary::new(), stream_bytes)));
-
-        {
-            let page = doc
-                .get_object_mut(page_id)
-                .map_err(|e| AppError::lopdf(format!("Failed to get page {page_num}"), e))?
-                .as_dict_mut()
-                .map_err(|e| AppError::lopdf(format!("Page {page_num} is not a dictionary"), e))?;
-            append_content_stream(page, stream_id);
-            page.set("Resources", Object::Dictionary(resources));
-        }
-        pages_written += 1;
+        doc = Some(d);
     }
 
     // Write to a temp file in the destination dir, then atomic rename, so a
-    // crash or disk-full can't leave a truncated file at dest_path.
+    // crash or disk-full can't leave a truncated file at dest_path. When we
+    // authored a layer, serialize the modified document; otherwise copy the
+    // source bytes verbatim — an unchanged copy should be byte-identical, since
+    // lopdf re-serialization would reorder objects and could drop structures it
+    // doesn't model.
     let tmp_path = format!("{dest_path}.tmp-{}", uuid::Uuid::new_v4());
-    if let Err(e) = doc.save(&tmp_path) {
+    let write_result = match doc.as_mut() {
+        Some(d) if pages_written > 0 => d
+            .save(&tmp_path)
+            .map(|_| ())
+            .map_err(|e| AppError::io("Failed to save searchable copy", e)),
+        _ => std::fs::copy(&file_path, &tmp_path)
+            .map(|_| ())
+            .map_err(|e| AppError::io("Failed to copy source PDF", e)),
+    };
+    if let Err(e) = write_result {
         let _ = std::fs::remove_file(&tmp_path);
-        return Err(AppError::io("Failed to save searchable copy", e));
+        return Err(e);
     }
     std::fs::rename(&tmp_path, &dest_path).map_err(|e| {
         let _ = std::fs::remove_file(&tmp_path);
@@ -779,6 +796,11 @@ mod tests {
         .expect("save searchable");
 
         assert_eq!(result.pages_written, 0, "native-text page must get no layer");
+        // With nothing to author, the copy must be byte-identical to the source
+        // (a faithful copy, not a lopdf re-serialization).
+        let src_bytes = std::fs::read(&src).expect("read source");
+        let dest_bytes = std::fs::read(&dest).expect("read dest");
+        assert_eq!(src_bytes, dest_bytes, "unchanged copy should be byte-identical");
         std::fs::remove_file(&dest).ok();
     }
 
