@@ -80,7 +80,7 @@ function App() {
         pageDimensions: info.pageDimensions,
         currentPage: 1,
         scrollTop: 0,
-        zoom: 100,
+        zoom: 140,
         zoomMode: "numeric",
         displayMode: "normal",
         searchQuery: "",
