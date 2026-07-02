@@ -539,18 +539,8 @@ mod tests {
     fn open_fixture(state: &AppState, doc_id: &str) {
         let pdfium = crate::test_pdfium();
         let src = crate::fixture_path();
-        let document = pdfium
-            .load_pdf_from_file(src.to_str().unwrap(), None)
-            .expect("load pdf");
-        state
-            .insert_document(
-                doc_id.to_string(),
-                DocEntry {
-                    document,
-                    file_path: src.to_string_lossy().into_owned(),
-                },
-            )
-            .expect("insert");
+        let entry = DocEntry::load(pdfium, &src.to_string_lossy()).expect("load pdf");
+        state.insert_document(doc_id.to_string(), entry).expect("insert");
     }
 
     fn word(text: &str) -> OcrWord {
@@ -647,6 +637,9 @@ mod tests {
                 DocEntry {
                     document: doc,
                     file_path: format!("{doc_id}.pdf"),
+                    // No backing file; these tests never touch the buffer.
+                    buffer: Vec::new(),
+                    dirty: false,
                 },
             )
             .expect("insert");

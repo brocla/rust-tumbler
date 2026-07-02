@@ -58,6 +58,7 @@ rust-tumbler/
 | `ocr.rs` | per-page and whole-document OCR via Windows.Media.Ocr |
 | `metadata.rs` | read / write PDF metadata (lopdf) |
 | `pages.rs` | delete, rotate, reorder, merge, split pages (lopdf) |
+| `save.rs` | Save / Save As — the only commands that write the in-memory buffer to disk (issue #31) |
 | `optimize.rs` | five-step compression pipeline (lopdf) |
 | `print.rs` | native GDI printing with progress and cancellation |
 | `startup.rs` | read the file-association path passed on the command line |
@@ -100,7 +101,9 @@ Key fields:
 | `pending_optimized` | `Mutex<HashMap<String, Vec<u8>>>` | Compressed bytes staged after a compression run, waiting for "Save As…". Cleared on save or document close. |
 | `ocr_job` / `compress_job` / `print_job` | `Mutex<Option<Arc<AtomicBool>>>` | Cancellation tokens for long-running operations. |
 
-`DocEntry` holds the `PdfDocument<'static>` (pdfium handle) and the `file_path` string.
+`DocEntry` holds the `PdfDocument<'static>` (pdfium handle), the `file_path` string, plus — for non-destructive editing (issue #31) — `buffer: Vec<u8>` (the authoritative current bytes, including unsaved edits; `document` is always a pdfium render of it) and `dirty: bool` (true exactly when `buffer` differs from disk). Buffer-model edits end with `state.set_buffer_and_refresh(doc_id, bytes)` and emit `document-dirty-changed`; `save_document` / `save_document_as` (in `commands/save.rs`) are the only commands that write the buffer to disk.
+
+**Migration status (issue #31):** `rotate_pages` is buffer-based (deferred; needs an explicit Save). All other edits (delete/reorder/merge/metadata) still write to disk immediately, after which `reload_documents_with_path` re-syncs the buffer from disk and clears `dirty`. Phase 2 migrates them.
 
 Accessing a document safely:
 ```rust

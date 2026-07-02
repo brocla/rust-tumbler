@@ -35,22 +35,30 @@ pub fn get_conformance(
 }
 
 fn get_conformance_impl(state: &AppState, doc_id: String) -> Result<ConformanceClaims, AppError> {
-    // Resolve the on-disk path via the same locking pattern get_metadata_impl uses;
-    // the file on disk is the source of truth (in-place edits write through to it).
-    let file_path = {
-        let entry = state.get_document(&doc_id)?;
-        let entry = lock_mutex(&entry)?;
-        entry.file_path.clone()
-    };
-    Ok(conformance_from_path(&file_path))
+    // Read the in-memory buffer, not the file on disk: with non-destructive
+    // editing (issue #31) the buffer is the authoritative document state.
+    let entry = state.get_document(&doc_id)?;
+    let entry = lock_mutex(&entry)?;
+    Ok(conformance_from_bytes(&entry.buffer))
 }
 
 /// Load the PDF with lopdf, extract its XMP packet, and parse out the declared
 /// conformance claims. `AppState`-free so it is unit-testable and reusable from
 /// a CLI. A missing/unparsable file or absent metadata yields no claims rather
 /// than an error — "can't tell" reads as "declares nothing".
+/// Production reads the in-memory buffer via `conformance_from_bytes`; this
+/// path form is kept for tests and CLI reuse.
+#[allow(dead_code)]
 pub fn conformance_from_path(file_path: &str) -> ConformanceClaims {
-    let Ok(doc) = lopdf::Document::load(file_path) else {
+    match std::fs::read(file_path) {
+        Ok(bytes) => conformance_from_bytes(&bytes),
+        Err(_) => ConformanceClaims::default(),
+    }
+}
+
+/// Same as `conformance_from_path`, from bytes already in memory.
+pub fn conformance_from_bytes(bytes: &[u8]) -> ConformanceClaims {
+    let Ok(doc) = lopdf::Document::load_mem(bytes) else {
         return ConformanceClaims::default();
     };
     match read_xmp(&doc) {

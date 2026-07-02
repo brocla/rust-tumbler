@@ -68,17 +68,20 @@ pub fn get_signature_info(
 }
 
 fn get_signature_info_impl(state: &AppState, doc_id: String) -> Result<SignatureInfo, AppError> {
-    let file_path = {
-        let entry = state.get_document(&doc_id)?;
-        let entry = lock_mutex(&entry)?;
-        entry.file_path.clone()
-    };
-    Ok(verify_signatures_from_path(&file_path))
+    // Verify the in-memory buffer, not the file on disk: with non-destructive
+    // editing (issue #31) an unsaved edit must already report as breaking the
+    // signature before the user saves.
+    let entry = state.get_document(&doc_id)?;
+    let entry = lock_mutex(&entry)?;
+    Ok(verify_signatures(&entry.buffer))
 }
 
 /// Read the file and verify every signature it declares. Pure and infallible at
 /// the boundary — an unreadable/unparsable file reports as `Unsigned` (we can't
 /// see any signatures), never an error.
+/// Production verifies the in-memory buffer via `verify_signatures`; this path
+/// form is kept for tests and CLI reuse.
+#[allow(dead_code)]
 pub fn verify_signatures_from_path(file_path: &str) -> SignatureInfo {
     match std::fs::read(file_path) {
         Ok(bytes) => verify_signatures(&bytes),

@@ -1321,3 +1321,18 @@ body {
 .print-progress-dialog button:hover {
   background: var(--color-hover, rgba(128, 128, 128, 0.15));
 }
+
+/* Unsaved-changes prompt (issue #31): three buttons in a row instead of the
+   progress dialog's single full-width Cancel. */
+.unsaved-dialog-buttons {
+  display: flex;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.unsaved-dialog .unsaved-dialog-buttons button {
+  margin-top: 0;
+  width: auto;
+  flex: 1;
+  white-space: nowrap;
+}

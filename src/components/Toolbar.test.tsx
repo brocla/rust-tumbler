@@ -31,6 +31,7 @@ function makeTab(overrides: Partial<TabState> = {}): TabState {
     searchResults: [],
     searchResultIndex: -1,
     metadataDirty: false,
+    isDirty: false,
     loading: false,
     pagesVersion: 0,
     contentEpoch: 0,
@@ -69,6 +70,94 @@ async function clickSaveSearchable() {
     await new Promise((r) => setTimeout(r, 0));
   });
 }
+
+describe("Toolbar save / save as (issue #31)", () => {
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset();
+    vi.mocked(save).mockReset();
+    vi.mocked(message).mockReset();
+    vi.mocked(message).mockResolvedValue(undefined as never);
+  });
+
+  it("disables Save while the document is clean", () => {
+    renderToolbar();
+    expect(screen.getByTitle("Save (Ctrl+S)")).toBeDisabled();
+  });
+
+  it("enables Save when dirty and invokes save_document", async () => {
+    vi.mocked(invoke).mockResolvedValue(undefined);
+    usePdfStore.setState({
+      tabs: [makeTab({ isDirty: true })],
+      activeTabId: "tab-1",
+      ocrProgress: null,
+    });
+    render(<Toolbar onOpenFile={vi.fn()} onPrint={vi.fn()} />);
+
+    const saveButton = screen.getByTitle("Save (Ctrl+S)");
+    expect(saveButton).toBeEnabled();
+    await act(async () => {
+      fireEvent.click(saveButton);
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    expect(invoke).toHaveBeenCalledWith("save_document", { docId: "doc-1" });
+  });
+
+  it("Save As prompts for a destination, invokes save_document_as, and retargets the tab", async () => {
+    vi.mocked(save).mockResolvedValue("C:\\Users\\test\\renamed.pdf");
+    vi.mocked(invoke).mockResolvedValue("C:\\Users\\test\\renamed.pdf");
+
+    renderToolbar();
+    await act(async () => {
+      fireEvent.click(screen.getByTitle("Save As... (Ctrl+Shift+S)"));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    expect(save).toHaveBeenCalledWith(
+      expect.objectContaining({ defaultPath: "C:\\Users\\test\\test.pdf" }),
+    );
+    expect(invoke).toHaveBeenCalledWith("save_document_as", {
+      docId: "doc-1",
+      destPath: "C:\\Users\\test\\renamed.pdf",
+    });
+    const tab = usePdfStore.getState().tabs[0];
+    expect(tab.filePath).toBe("C:\\Users\\test\\renamed.pdf");
+    expect(tab.fileName).toBe("renamed.pdf");
+  });
+
+  it("Save As does nothing when the dialog is cancelled", async () => {
+    vi.mocked(save).mockResolvedValue(null);
+
+    renderToolbar();
+    await act(async () => {
+      fireEvent.click(screen.getByTitle("Save As... (Ctrl+Shift+S)"));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("reports a failed save and leaves the document dirty", async () => {
+    vi.mocked(invoke).mockRejectedValue("disk full");
+    usePdfStore.setState({
+      tabs: [makeTab({ isDirty: true })],
+      activeTabId: "tab-1",
+      ocrProgress: null,
+    });
+    render(<Toolbar onOpenFile={vi.fn()} onPrint={vi.fn()} />);
+
+    await act(async () => {
+      fireEvent.click(screen.getByTitle("Save (Ctrl+S)"));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    expect(message).toHaveBeenCalledWith(
+      "disk full",
+      expect.objectContaining({ title: "Save Failed" }),
+    );
+    expect(usePdfStore.getState().tabs[0].isDirty).toBe(true);
+  });
+});
 
 describe("Toolbar export text", () => {
   beforeEach(() => {

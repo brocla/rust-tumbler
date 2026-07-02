@@ -5,6 +5,7 @@ import { confirm } from "@tauri-apps/plugin-dialog";
 import { usePdfStore } from "../store/usePdfStore";
 import type { TabState } from "../store/usePdfStore";
 import { evictDoc } from "../utils/renderCache";
+import { confirmCloseDirtyTab } from "../utils/saveDocument";
 
 interface TabBarProps {
   onOpenFile: () => void;
@@ -23,6 +24,10 @@ export function TabBar({ onOpenFile }: TabBarProps) {
   if (tabs.length === 0) return null;
 
   const closeTab = async (tab: TabState) => {
+    // Unsaved buffer edits (issue #31): Save / Don't Save / Cancel. A failed
+    // save also aborts the close so the edits aren't silently lost.
+    if (tab.isDirty && !(await confirmCloseDirtyTab(tab))) return;
+
     if (tab.metadataDirty) {
       const proceed = await confirm(
         `"${tab.fileName}" has unsaved metadata changes. Close anyway?`,
@@ -100,7 +105,7 @@ export function TabBar({ onOpenFile }: TabBarProps) {
           onClick={() => setActiveTab(tab.id)}
           title={tab.fileName}
         >
-          {tab.metadataDirty && <span className="tab-dirty-dot" />}
+          {(tab.isDirty || tab.metadataDirty) && <span className="tab-dirty-dot" />}
           <span className="tab-label">{tab.fileName}</span>
           <button
             className="tab-close-button"

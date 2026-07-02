@@ -653,7 +653,7 @@ mod tests {
         state.set_ocr_words("doc1", 1, vec![word]);
         let document = pdfium.load_pdf_from_file(&src, None).expect("load src");
         state
-            .insert_document("doc1".to_string(), DocEntry { document, file_path: src.clone() })
+            .insert_document("doc1".to_string(), DocEntry { document, file_path: src.clone(), buffer: std::fs::read(&src).expect("read src"), dirty: false })
             .expect("insert");
 
         let entry = state.get_document("doc1").expect("get");
@@ -943,7 +943,7 @@ mod tests {
         state
             .insert_document(
                 "doc1".to_string(),
-                DocEntry { document, file_path: src.clone() },
+                DocEntry { document, file_path: src.clone(), buffer: std::fs::read(&src).expect("read src"), dirty: false },
             )
             .expect("insert");
 
@@ -1005,7 +1005,7 @@ mod tests {
         state.set_ocr_words("doc1", 1, vec![word]);
         let document = pdfium.load_pdf_from_file(&src, None).expect("load blank");
         state
-            .insert_document("doc1".to_string(), DocEntry { document, file_path: src.clone() })
+            .insert_document("doc1".to_string(), DocEntry { document, file_path: src.clone(), buffer: std::fs::read(&src).expect("read src"), dirty: false })
             .expect("insert");
 
         let entry = state.get_document("doc1").expect("get");
@@ -1157,7 +1157,7 @@ mod tests {
         state.set_ocr_words("doc1", 1, vec![word]);
         let document = pdfium.load_pdf_from_file(&src, None).expect("load src");
         state
-            .insert_document("doc1".to_string(), DocEntry { document, file_path: src.clone() })
+            .insert_document("doc1".to_string(), DocEntry { document, file_path: src.clone(), buffer: std::fs::read(&src).expect("read src"), dirty: false })
             .expect("insert");
 
         let entry = state.get_document("doc1").expect("get");
@@ -1247,7 +1247,7 @@ mod tests {
         let state = AppState::new(pdfium, None).with_ocr_engine(engine.clone());
         let document = pdfium.load_pdf_from_file(&src, None).expect("load src");
         state
-            .insert_document("doc1".to_string(), DocEntry { document, file_path: src.clone() })
+            .insert_document("doc1".to_string(), DocEntry { document, file_path: src.clone(), buffer: std::fs::read(&src).expect("read src"), dirty: false })
             .expect("insert");
 
         let entry = state.get_document("doc1").expect("get");
@@ -1282,18 +1282,8 @@ mod tests {
         let state = AppState::new(pdfium, None);
 
         let src = crate::fixture_path();
-        let document = pdfium
-            .load_pdf_from_file(src.to_str().unwrap(), None)
-            .expect("load fixture");
-        state
-            .insert_document(
-                "doc1".to_string(),
-                DocEntry {
-                    document,
-                    file_path: src.to_string_lossy().into_owned(),
-                },
-            )
-            .expect("insert");
+        let entry = DocEntry::load(pdfium, &src.to_string_lossy()).expect("load fixture");
+        state.insert_document("doc1".to_string(), entry).expect("insert");
 
         let dest = temp_path("native.pdf");
         let entry = state.get_document("doc1").expect("get");
@@ -1335,7 +1325,7 @@ mod tests {
         state
             .insert_document(
                 "doc1".to_string(),
-                DocEntry { document, file_path: src.clone() },
+                DocEntry { document, file_path: src.clone(), buffer: std::fs::read(&src).expect("read src"), dirty: false },
             )
             .expect("insert");
 
@@ -1375,7 +1365,7 @@ mod tests {
         state
             .insert_document(
                 "doc1".to_string(),
-                DocEntry { document, file_path: src.clone() },
+                DocEntry { document, file_path: src.clone(), buffer: std::fs::read(&src).expect("read src"), dirty: false },
             )
             .expect("insert");
 

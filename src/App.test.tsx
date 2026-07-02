@@ -9,9 +9,15 @@ import type { TabState } from "./store/usePdfStore";
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({
   open: vi.fn(),
+  save: vi.fn(),
   message: vi.fn(),
 }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
+vi.mock("@tauri-apps/api/window", () => ({
+  getCurrentWindow: () => ({
+    onCloseRequested: vi.fn(async () => () => {}),
+  }),
+}));
 
 // The document-open flow lives in App itself; the child panels are irrelevant
 // here and drag in their own Tauri calls, so stub them out.
@@ -41,6 +47,7 @@ function makeTab(overrides: Partial<TabState> = {}): TabState {
     searchResults: [],
     searchResultIndex: -1,
     metadataDirty: false,
+    isDirty: false,
     loading: false,
     pagesVersion: 0,
     contentEpoch: 0,
@@ -124,6 +131,32 @@ describe("App single-instance-per-file open guard", () => {
     expect(tabs).toHaveLength(2);
     expect(activeTabId).toBe("tab-1");
     expect(invoke).not.toHaveBeenCalledWith("open_document", expect.anything());
+  });
+
+  it("mirrors document-dirty-changed events into the tab's isDirty flag", async () => {
+    let dirtyHandler:
+      | ((event: { payload: { docId: string; dirty: boolean } }) => void)
+      | undefined;
+    vi.mocked(listen).mockImplementation(async (event: string, handler: never) => {
+      if (event === "document-dirty-changed") dirtyHandler = handler;
+      return () => {};
+    });
+
+    await act(async () => {
+      render(<App />);
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    usePdfStore.setState({ tabs: [makeTab()], activeTabId: "tab-1" });
+
+    await act(async () => {
+      dirtyHandler!({ payload: { docId: "doc-1", dirty: true } });
+    });
+    expect(usePdfStore.getState().tabs[0].isDirty).toBe(true);
+
+    await act(async () => {
+      dirtyHandler!({ payload: { docId: "doc-1", dirty: false } });
+    });
+    expect(usePdfStore.getState().tabs[0].isDirty).toBe(false);
   });
 
   it("falls back to the raw path when canonicalization fails", async () => {

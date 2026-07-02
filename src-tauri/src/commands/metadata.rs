@@ -260,6 +260,8 @@ mod tests {
                 DocEntry {
                     document,
                     file_path: file_path.clone(),
+                    buffer: std::fs::read(&file_path).expect("read pdf"),
+                    dirty: false,
                 },
             )
             .expect("insert");

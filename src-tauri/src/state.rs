@@ -6,8 +6,35 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 pub struct DocEntry {
+    /// pdfium render view of `buffer` — always kept in sync with it.
     pub document: PdfDocument<'static>,
+    /// Where Save writes; updated by Save As.
     pub file_path: String,
+    /// The authoritative current bytes of the document, including any
+    /// not-yet-saved edits. Differs from the file on disk exactly when
+    /// `dirty` is true. (issue #31)
+    pub buffer: Vec<u8>,
+    /// True once an in-memory edit has been applied and not yet saved.
+    pub dirty: bool,
+}
+
+impl DocEntry {
+    /// Loads a document from `path`: the file bytes become `buffer` and the
+    /// pdfium view is built from those bytes (not from the file), so render
+    /// state and buffer can never diverge.
+    pub fn load(pdfium: &'static Pdfium, path: &str) -> Result<Self, AppError> {
+        let buffer =
+            std::fs::read(path).map_err(|e| AppError::io("Failed to read PDF file", e))?;
+        let document = pdfium
+            .load_pdf_from_byte_vec(buffer.clone(), None)
+            .map_err(|e| AppError::pdfium("Failed to load PDF", e))?;
+        Ok(Self {
+            document,
+            file_path: path.to_string(),
+            buffer,
+            dirty: false,
+        })
+    }
 }
 
 pub struct AppState {
@@ -200,17 +227,73 @@ impl AppState {
 
         let mut reloaded_ids = Vec::with_capacity(matches.len());
         for (doc_id, entry) in matches {
+            let buffer = std::fs::read(file_path)
+                .map_err(|e| AppError::io("Failed to read PDF for reload", e))?;
             let document = self
                 .pdfium
-                .load_pdf_from_file(file_path, None)
+                .load_pdf_from_byte_vec(buffer.clone(), None)
                 .map_err(|e| AppError::pdfium("Failed to reload PDF", e))?;
-            lock_mutex(&entry)?.document = document;
+            {
+                let mut e = lock_mutex(&entry)?;
+                e.document = document;
+                // Disk now defines the document again, so any unsaved buffer
+                // state is superseded and the doc is clean.
+                e.buffer = buffer;
+                e.dirty = false;
+            }
             // The page set may have changed (delete/reorder/merge), so any
             // page-keyed OCR words for this doc are now stale.
             self.clear_ocr_cache_for_doc(&doc_id);
             reloaded_ids.push(doc_id);
         }
         Ok(reloaded_ids)
+    }
+
+    /// Applies an in-memory edit: `bytes` become the document's authoritative
+    /// buffer, the pdfium view is rebuilt from them, the OCR cache is dropped
+    /// (page layout may have changed), and the document is marked dirty.
+    /// Every buffer-model edit command ends by calling this. (issue #31)
+    pub fn set_buffer_and_refresh(&self, doc_id: &str, bytes: Vec<u8>) -> Result<(), AppError> {
+        let entry = self.get_document(doc_id)?;
+        let document = self
+            .pdfium
+            .load_pdf_from_byte_vec(bytes.clone(), None)
+            .map_err(|e| AppError::pdfium("Failed to reload PDF from edited bytes", e))?;
+        {
+            let mut e = lock_mutex(&entry)?;
+            e.document = document;
+            e.buffer = bytes;
+            e.dirty = true;
+        }
+        self.clear_ocr_cache_for_doc(doc_id);
+        Ok(())
+    }
+
+    /// True if `file_path` is already held by an open document other than
+    /// `exclude_doc_id`. Used by Save As to preserve the single-instance-
+    /// per-file invariant (paths are compared as stored, i.e. canonical).
+    pub fn is_path_open_elsewhere(
+        &self,
+        file_path: &str,
+        exclude_doc_id: &str,
+    ) -> Result<bool, AppError> {
+        let docs = lock_mutex(&self.documents)?;
+        for (doc_id, entry) in docs.iter() {
+            if doc_id == exclude_doc_id {
+                continue;
+            }
+            if lock_mutex(entry)?.file_path == file_path {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    #[cfg(test)]
+    pub fn is_dirty(&self, doc_id: &str) -> Result<bool, AppError> {
+        let entry = self.get_document(doc_id)?;
+        let e = lock_mutex(&entry)?;
+        Ok(e.dirty)
     }
 }
 
@@ -277,19 +360,9 @@ mod tests {
 
         assert!(matches!(state.get_document("missing"), Err(AppError::NotFound(_))));
 
-        let document = pdfium
-            .load_pdf_from_file(src.to_str().unwrap(), None)
-            .expect("load pdf");
         let file_path = src.to_string_lossy().into_owned();
-        state
-            .insert_document(
-                "doc1".to_string(),
-                DocEntry {
-                    document,
-                    file_path: file_path.clone(),
-                },
-            )
-            .expect("insert");
+        let entry = DocEntry::load(pdfium, &file_path).expect("load pdf");
+        state.insert_document("doc1".to_string(), entry).expect("insert");
 
         let entry = state.get_document("doc1").expect("get");
         assert_eq!(lock_mutex(&entry).unwrap().file_path, file_path);
@@ -309,18 +382,8 @@ mod tests {
         let file_path = src.to_string_lossy().into_owned();
 
         for doc_id in ["tab-a", "tab-b"] {
-            let document = pdfium
-                .load_pdf_from_file(&file_path, None)
-                .expect("load pdf");
-            state
-                .insert_document(
-                    doc_id.to_string(),
-                    DocEntry {
-                        document,
-                        file_path: file_path.clone(),
-                    },
-                )
-                .expect("insert");
+            let entry = DocEntry::load(pdfium, &file_path).expect("load pdf");
+            state.insert_document(doc_id.to_string(), entry).expect("insert");
         }
 
         // A third tab with an unrelated file should not be touched.
@@ -329,17 +392,9 @@ mod tests {
             .to_string_lossy()
             .into_owned();
         std::fs::copy(&src, &other_path).expect("copy fixture");
-        let other_document = pdfium
-            .load_pdf_from_file(&other_path, None)
-            .expect("load pdf");
+        let other_entry = DocEntry::load(pdfium, &other_path).expect("load pdf");
         state
-            .insert_document(
-                "tab-c".to_string(),
-                DocEntry {
-                    document: other_document,
-                    file_path: other_path.clone(),
-                },
-            )
+            .insert_document("tab-c".to_string(), other_entry)
             .expect("insert");
 
         let reloaded = state
@@ -351,6 +406,82 @@ mod tests {
         assert!(reloaded.contains(&"tab-b".to_string()));
 
         std::fs::remove_file(&other_path).ok();
+    }
+
+    /// `DocEntry::load` seeds the buffer with the file's bytes and starts clean.
+    #[test]
+    fn doc_entry_load_seeds_buffer_from_file_and_is_clean() {
+        let src = crate::fixture_path();
+        let pdfium = crate::test_pdfium();
+
+        let entry = DocEntry::load(pdfium, &src.to_string_lossy()).expect("load");
+
+        assert_eq!(entry.buffer, std::fs::read(&src).expect("read fixture"));
+        assert!(!entry.dirty);
+    }
+
+    /// `set_buffer_and_refresh` swaps the buffer, rebuilds the pdfium view
+    /// from it, and marks the document dirty — the shape every buffer-model
+    /// edit ends with.
+    #[test]
+    fn set_buffer_and_refresh_marks_dirty_and_rebuilds_document() {
+        let _guard = crate::test_pdfium_guard();
+        let src = crate::fixture_path();
+        let pdfium = crate::test_pdfium();
+        let state = AppState::new(pdfium, None);
+
+        let file_path = src.to_string_lossy().into_owned();
+        let entry = DocEntry::load(pdfium, &file_path).expect("load");
+        state.insert_document("doc1".to_string(), entry).expect("insert");
+
+        // A distinguishable two-page document as the "edited" bytes.
+        let mut edited = pdfium.create_new_pdf().expect("create pdf");
+        for i in 0..2 {
+            edited
+                .pages_mut()
+                .create_page_at_index(
+                    PdfPagePaperSize::new_custom(PdfPoints::new(300.0), PdfPoints::new(300.0)),
+                    i,
+                )
+                .expect("create page");
+        }
+        let edited_bytes = edited.save_to_bytes().expect("save to bytes");
+
+        state
+            .set_buffer_and_refresh("doc1", edited_bytes.clone())
+            .expect("set buffer");
+
+        let entry_arc = state.get_document("doc1").expect("get");
+        let entry = lock_mutex(&entry_arc).expect("lock");
+        assert!(entry.dirty);
+        assert_eq!(entry.buffer, edited_bytes);
+        assert_eq!(entry.document.pages().len(), 2, "pdfium view must show the edit");
+    }
+
+    /// A disk reload supersedes any unsaved buffer state: buffer tracks the
+    /// file again and the document is clean.
+    #[test]
+    fn reload_documents_with_path_resets_buffer_and_dirty() {
+        let _guard = crate::test_pdfium_guard();
+        let src = crate::fixture_path();
+        let pdfium = crate::test_pdfium();
+        let state = AppState::new(pdfium, None);
+
+        let file_path = src.to_string_lossy().into_owned();
+        let entry = DocEntry::load(pdfium, &file_path).expect("load");
+        state.insert_document("doc1".to_string(), entry).expect("insert");
+
+        // Dirty the buffer with arbitrary (still valid) bytes.
+        let bytes = std::fs::read(&src).expect("read fixture");
+        state.set_buffer_and_refresh("doc1", bytes).expect("set buffer");
+        assert!(state.is_dirty("doc1").expect("is_dirty"));
+
+        state.reload_documents_with_path(&file_path).expect("reload");
+
+        let entry_arc = state.get_document("doc1").expect("get");
+        let entry = lock_mutex(&entry_arc).expect("lock");
+        assert!(!entry.dirty);
+        assert_eq!(entry.buffer, std::fs::read(&src).expect("read fixture"));
     }
 
     /// The whole point of `documents: Mutex<HashMap<String, Arc<Mutex<DocEntry>>>>`
@@ -367,18 +498,8 @@ mod tests {
         let file_path = src.to_string_lossy().into_owned();
 
         for doc_id in ["doc-a", "doc-b"] {
-            let document = pdfium
-                .load_pdf_from_file(&file_path, None)
-                .expect("load pdf");
-            state
-                .insert_document(
-                    doc_id.to_string(),
-                    DocEntry {
-                        document,
-                        file_path: file_path.clone(),
-                    },
-                )
-                .expect("insert");
+            let entry = DocEntry::load(pdfium, &file_path).expect("load pdf");
+            state.insert_document(doc_id.to_string(), entry).expect("insert");
         }
 
         let entry_a = state.get_document("doc-a").expect("get doc-a");

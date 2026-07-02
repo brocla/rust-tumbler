@@ -24,6 +24,7 @@ function makeTab(overrides: Partial<TabState> = {}): TabState {
     searchResults: [],
     searchResultIndex: -1,
     metadataDirty: false,
+    isDirty: false,
     loading: false,
     pagesVersion: 0,
     contentEpoch: 0,
