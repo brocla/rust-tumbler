@@ -743,6 +743,185 @@ mod tests {
         assert!(!geometry_is_simple(0.0, 0.0, 270));
     }
 
+    // ── B9: Helvetica width table / horizontal scaling ──────────────────────
+
+    /// Spot-check the AFM advance widths for common glyphs, so a typo in the
+    /// table is caught directly rather than only via an integration string. The
+    /// last two pin the behavior of bytes outside the explicit arms (0x7F → the
+    /// 556 fallback; 0xFF → its table entry).
+    #[test]
+    fn helvetica_widths_match_afm() {
+        assert_eq!(helvetica_width_1000(b' '), 278);
+        assert_eq!(helvetica_width_1000(b'i'), 222);
+        assert_eq!(helvetica_width_1000(b'M'), 833);
+        assert_eq!(helvetica_width_1000(b'W'), 944);
+        assert_eq!(helvetica_width_1000(b'0'), 556);
+        assert_eq!(helvetica_width_1000(b'.'), 278);
+        assert_eq!(helvetica_width_1000(0xFF), 500); // ÿ
+        assert_eq!(helvetica_width_1000(0x7F), 556); // DEL → fallback
+    }
+
+    /// The natural width is the summed advances scaled by the font size:
+    /// "Test" = T611 + e556 + s500 + t278 = 1945 units → 19.45 pt at fs 10.
+    #[test]
+    fn helvetica_natural_width_sums_advances() {
+        let w = helvetica_natural_width(b"Test", 10.0);
+        assert!((w - 19.45).abs() < 1e-4, "unexpected natural width: {w}");
+        // Spaces are counted too: "A A" = 667 + 278 + 667 = 1612 → 16.12 pt.
+        let w2 = helvetica_natural_width(b"A A", 10.0);
+        assert!((w2 - 16.12).abs() < 1e-4, "spaces not counted: {w2}");
+    }
+
+    /// `Tz` scales the run so its natural width fills the box. "II" is 2×278 =
+    /// 556 units → 5.56 pt at fs 10; a 11.12 pt box needs 200%.
+    #[test]
+    fn horizontal_scale_fits_box_width() {
+        let tz = horizontal_scale_percent(b"II", 10.0, 11.12);
+        assert!((tz - 200.0).abs() < 0.5, "unexpected Tz: {tz}");
+        // Degenerate inputs fall back to 100% rather than dividing by zero.
+        assert_eq!(horizontal_scale_percent(b"II", 10.0, 0.0), 100.0);
+        assert_eq!(horizontal_scale_percent(b"", 10.0, 50.0), 100.0);
+        // A wildly oversized box is clamped to the 1000% ceiling.
+        assert_eq!(horizontal_scale_percent(b"I", 10.0, 1.0e6), 1000.0);
+    }
+
+    // ── B8: /Contents normalization and the q/Q wrap shapes ─────────────────
+
+    #[test]
+    fn contents_refs_handles_reference_array_and_missing() {
+        let mut doc = Document::with_version("1.5");
+        let s1 = doc.add_object(Stream::new(Dictionary::new(), Vec::new()));
+        let s2 = doc.add_object(Stream::new(Dictionary::new(), Vec::new()));
+
+        // Single reference.
+        let single = doc.add_object(dictionary! { "Type" => "Page", "Contents" => s1 });
+        assert_eq!(contents_refs(&doc, single), vec![s1]);
+
+        // Array of references (order preserved).
+        let array = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Contents" => vec![Object::Reference(s1), Object::Reference(s2)],
+        });
+        assert_eq!(contents_refs(&doc, array), vec![s1, s2]);
+
+        // No /Contents key at all.
+        let missing = doc.add_object(dictionary! { "Type" => "Page" });
+        assert!(contents_refs(&doc, missing).is_empty());
+    }
+
+    #[test]
+    fn append_content_stream_sets_lone_reference_when_page_had_no_content() {
+        let mut page = Dictionary::new();
+        append_content_stream(&mut page, &[], (5, 0), (6, 0), (7, 0));
+        match page.get(b"Contents") {
+            Ok(Object::Reference(r)) => assert_eq!(*r, (7, 0)),
+            other => panic!("expected a lone text reference, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn append_content_stream_brackets_existing_content_with_q_q() {
+        let mut page = Dictionary::new();
+        // existing = [1, 2]; guards save=5 restore=6; text=7.
+        append_content_stream(&mut page, &[(1, 0), (2, 0)], (5, 0), (6, 0), (7, 0));
+        match page.get(b"Contents") {
+            Ok(Object::Array(a)) => {
+                let ids: Vec<ObjectId> =
+                    a.iter().map(|o| o.as_reference().expect("ref")).collect();
+                // q, then existing content, then Q, then our text — so our text
+                // runs from the page-default graphics state.
+                assert_eq!(ids, vec![(5, 0), (1, 0), (2, 0), (6, 0), (7, 0)]);
+            }
+            other => panic!("expected a wrapped array, got {other:?}"),
+        }
+    }
+
+    // ── B7: resource merge preserves the page's existing resources ──────────
+
+    fn font_id(doc: &mut Document, base: &str) -> ObjectId {
+        doc.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => base,
+        })
+    }
+
+    /// A page owning `/Resources` with an image XObject and a font: after the
+    /// merge, both survive and our OCR font is added alongside — proving we
+    /// don't blank the page's own resources (which would drop the scanned image).
+    #[test]
+    fn merged_resources_preserves_owned_xobject_and_font() {
+        let mut doc = Document::with_version("1.5");
+        let img = doc.add_object(Stream::new(Dictionary::new(), Vec::new()));
+        let existing_font = font_id(&mut doc, "Courier");
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Resources" => dictionary! {
+                "XObject" => dictionary! { "Im0" => Object::Reference(img) },
+                "Font" => dictionary! { "F1" => Object::Reference(existing_font) },
+            },
+        });
+        let our_font = font_id(&mut doc, "Helvetica");
+
+        let res = merged_resources_with_font(&doc, page_id, FONT_NAME, our_font);
+
+        let xobject = res.get(b"XObject").unwrap().as_dict().unwrap();
+        assert_eq!(xobject.get(b"Im0").unwrap().as_reference().unwrap(), img);
+        let fonts = res.get(b"Font").unwrap().as_dict().unwrap();
+        assert_eq!(fonts.get(b"F1").unwrap().as_reference().unwrap(), existing_font);
+        assert_eq!(fonts.get(FONT_NAME.as_bytes()).unwrap().as_reference().unwrap(), our_font);
+    }
+
+    /// When `/Resources` is inherited from the parent `/Pages` node (page has
+    /// none of its own), the merge still resolves and preserves them.
+    #[test]
+    fn merged_resources_uses_inherited_resources() {
+        let mut doc = Document::with_version("1.5");
+        let img = doc.add_object(Stream::new(Dictionary::new(), Vec::new()));
+        let pages_id = doc.new_object_id();
+        let page_id = doc.add_object(dictionary! { "Type" => "Page", "Parent" => pages_id });
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![Object::Reference(page_id)],
+                "Count" => Object::Integer(1),
+                "Resources" => dictionary! {
+                    "XObject" => dictionary! { "Im0" => Object::Reference(img) },
+                },
+            }),
+        );
+        let our_font = font_id(&mut doc, "Helvetica");
+
+        let res = merged_resources_with_font(&doc, page_id, FONT_NAME, our_font);
+
+        let xobject = res.get(b"XObject").unwrap().as_dict().unwrap();
+        assert_eq!(xobject.get(b"Im0").unwrap().as_reference().unwrap(), img);
+        let fonts = res.get(b"Font").unwrap().as_dict().unwrap();
+        assert_eq!(fonts.get(FONT_NAME.as_bytes()).unwrap().as_reference().unwrap(), our_font);
+    }
+
+    /// `/Font` given as an indirect reference (not an inline dict) is resolved,
+    /// cloned, and extended with our font.
+    #[test]
+    fn merged_resources_handles_font_subdict_by_reference() {
+        let mut doc = Document::with_version("1.5");
+        let existing_font = font_id(&mut doc, "Courier");
+        let font_subdict =
+            doc.add_object(Object::Dictionary(dictionary! { "F1" => Object::Reference(existing_font) }));
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Resources" => dictionary! { "Font" => Object::Reference(font_subdict) },
+        });
+        let our_font = font_id(&mut doc, "Helvetica");
+
+        let res = merged_resources_with_font(&doc, page_id, FONT_NAME, our_font);
+
+        let fonts = res.get(b"Font").unwrap().as_dict().unwrap();
+        assert_eq!(fonts.get(b"F1").unwrap().as_reference().unwrap(), existing_font);
+        assert_eq!(fonts.get(FONT_NAME.as_bytes()).unwrap().as_reference().unwrap(), our_font);
+    }
+
     // ── The decisive round-trip: searchable in any reader ───────────────────
 
     /// A blank (scanned-style) page + cached OCR words → save copy → reopen the
