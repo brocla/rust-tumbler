@@ -310,6 +310,8 @@ describe("Toolbar add text layer", () => {
     );
     // The buffer changed, so the text overlay refreshes.
     expect(usePdfStore.getState().tabs[0].ocrEpoch).toBe(1);
+    // ...and the signature badge is re-verified against the edited buffer.
+    expect(invoke).toHaveBeenCalledWith("get_signature_info", { docId: "doc-1" });
   });
 
   it("reports rotated/offset pages that were left un-searchable", async () => {
@@ -377,5 +379,7 @@ describe("Toolbar add text layer", () => {
       expect.stringContaining("Every page already has a text layer"),
       expect.objectContaining({ title: "Add Text Layer" }),
     );
+    // No edit happened, so there's nothing to re-verify.
+    expect(invoke).not.toHaveBeenCalledWith("get_signature_info", expect.anything());
   });
 });

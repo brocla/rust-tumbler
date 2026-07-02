@@ -7,6 +7,7 @@ import { ZOOM_PRESETS } from "../utils/zoomConstants";
 import { confirmBreakingEdit } from "../utils/confirmBreakingEdit";
 import { saveTab, saveTabAs } from "../utils/saveDocument";
 import { isSigned, SIGNATURE_EDIT_WARNING } from "../utils/signature";
+import type { SignatureInfo } from "../utils/signature";
 
 interface TextExportResult {
   pages: number;
@@ -235,6 +236,19 @@ export function Toolbar({ onOpenFile, onPrint }: ToolbarProps) {
       // The buffer changed (native text now exists), so refresh the text
       // overlay for selection/search.
       updateTab(activeTab.id, { ocrEpoch: activeTab.ocrEpoch + 1 });
+      if (result.pagesWritten > 0) {
+        // The edit diverged the buffer from the signed bytes — re-verify so
+        // the badge honestly shows "modified" while unsaved, matching what
+        // the page-edit path does. Best-effort, like every other refresh.
+        try {
+          const sig = await invoke<SignatureInfo>("get_signature_info", {
+            docId: activeTab.docId,
+          });
+          updateTab(activeTab.id, { signatureStatus: sig.status });
+        } catch {
+          /* best-effort */
+        }
+      }
       const plural = (n: number) => (n === 1 ? "" : "s");
       const written = result.pagesWritten;
       const skipped = result.pagesSkippedUnsupportedGeometry;
