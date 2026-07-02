@@ -19,6 +19,7 @@ use der::{Decode, Encode};
 use lopdf::{Document, Object};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use tauri::State;
 
 #[derive(Serialize, Default, PartialEq, Eq, Clone, Copy, Debug)]
@@ -31,8 +32,26 @@ pub enum SignatureStatus {
     Verified,
     /// Signed, signed bytes intact, but bytes were appended after signing.
     ModifiedAfter,
-    /// A signature failed its integrity check or couldn't be parsed.
+    /// A signature's signed bytes were altered (digest mismatch).
     Invalid,
+    /// >= 1 signature detected, but its integrity could not be checked in this
+    /// build (e.g. a BER indefinite-length CMS blob or a digest algorithm we
+    /// don't yet support). Honest "we see a signature but can't vouch for it" —
+    /// deliberately distinct from `Invalid`, which means tampering.
+    Unknown,
+}
+
+/// Outcome of one signature's integrity check.
+#[derive(Serialize, Default, PartialEq, Eq, Clone, Copy, Debug)]
+#[serde(rename_all = "camelCase")]
+pub enum Integrity {
+    /// The signed bytes hash to the digest sealed in the CMS.
+    Ok,
+    /// The digest did not match — the signed bytes were altered.
+    Failed,
+    /// Could not be checked (unsupported CMS encoding/algorithm, missing data).
+    #[default]
+    Unknown,
 }
 
 #[derive(Serialize, Default, Debug)]
@@ -45,8 +64,9 @@ pub struct SignatureEntry {
     pub location: String,
     /// `/M` signing time, display-ready (leading "D:" stripped).
     pub signing_time: String,
-    /// True if this signature's `/ByteRange` digest matches the CMS digest.
-    pub integrity_ok: bool,
+    /// Whether this signature's `/ByteRange` digest matches the sealed CMS
+    /// digest (`Ok`), doesn't (`Failed`), or couldn't be checked (`Unknown`).
+    pub integrity: Integrity,
     /// True if bytes were appended after this signature's coverage.
     pub modified_after: bool,
 }
@@ -111,8 +131,12 @@ fn verify_signatures(bytes: &[u8]) -> SignatureInfo {
 fn aggregate_status(sigs: &[SignatureEntry]) -> SignatureStatus {
     if sigs.is_empty() {
         SignatureStatus::Unsigned
-    } else if sigs.iter().any(|s| !s.integrity_ok) {
+    } else if sigs.iter().any(|s| s.integrity == Integrity::Failed) {
+        // A genuine tamper detection outranks everything.
         SignatureStatus::Invalid
+    } else if sigs.iter().any(|s| s.integrity == Integrity::Unknown) {
+        // We saw a signature but couldn't fully check it — don't claim Verified.
+        SignatureStatus::Unknown
     } else if sigs.iter().any(|s| s.modified_after) {
         SignatureStatus::ModifiedAfter
     } else {
@@ -120,47 +144,96 @@ fn aggregate_status(sigs: &[SignatureEntry]) -> SignatureStatus {
     }
 }
 
-/// Resolve the signature dictionaries from the AcroForm: each `/Fields` entry
-/// that is a signature field (`/FT /Sig`) and has a value (`/V`) whose
-/// dictionary carries a `/ByteRange`.
+/// Collect the signature *value* dictionaries in the document — any dict that
+/// carries a `/ByteRange`. Real-world signatures show up in two places, both
+/// handled here:
+///
+/// - The **AcroForm field tree**, where the signature field is frequently nested
+///   under a parent's `/Kids` (and `/FT` may be on the parent, or absent), so we
+///   recurse rather than assuming a flat `/FT /Sig` at the top of `/Fields`.
+/// - The Catalog **`/Perms`** entries — usage-rights (`/UR3`) and certification
+///   (`/DocMDP`) signatures live here, outside `/Fields` entirely.
+///
+/// Keying off "has a `/ByteRange`" (rather than `/FT`) reliably identifies a
+/// signature value dict in both cases. References are de-duplicated so a
+/// signature reachable from both a field and `/Perms` is reported once.
 fn collect_signature_dicts(doc: &Document) -> Vec<lopdf::Dictionary> {
     let mut out = Vec::new();
+    let mut seen: HashSet<lopdf::ObjectId> = HashSet::new();
 
-    let acro = doc
+    // AcroForm field tree (iterative, recursing /Kids, with a cycle guard).
+    if let Some(acro) = doc
         .catalog()
         .ok()
         .and_then(|c| c.get(b"AcroForm").ok())
-        .and_then(|o| resolve_dict(doc, o));
-    let Some(acro) = acro else { return out };
-
-    let Ok(fields) = acro.get(b"Fields").and_then(|o| match o {
-        Object::Array(a) => Ok(a.clone()),
-        Object::Reference(id) => doc
-            .get_object(*id)
-            .and_then(|o| o.as_array().cloned()),
-        _ => Ok(Vec::new()),
-    }) else {
-        return out;
-    };
-
-    for field_ref in fields {
-        let Some(field) = resolve_dict(doc, &field_ref) else { continue };
-        let is_sig = field
-            .get(b"FT")
-            .ok()
-            .and_then(|o| o.as_name_str().ok())
-            == Some("Sig");
-        if !is_sig {
-            continue;
-        }
-        if let Some(v) = field.get(b"V").ok().and_then(|o| resolve_dict(doc, o)) {
-            if v.has(b"ByteRange") {
-                out.push(v);
+        .and_then(|o| resolve_dict(doc, o))
+    {
+        let mut stack = resolve_array(doc, acro.get(b"Fields").ok());
+        let mut guard = 0;
+        while let Some(node) = stack.pop() {
+            guard += 1;
+            if guard > 10_000 {
+                break;
             }
+            let Some(field) = resolve_dict(doc, &node) else { continue };
+            // The field's value (/V) is usually the signature dict; occasionally
+            // the field node itself carries the ByteRange.
+            if let Ok(v) = field.get(b"V") {
+                push_if_sig(doc, v, &mut out, &mut seen);
+            }
+            if field.has(b"ByteRange") {
+                push_if_sig(doc, &node, &mut out, &mut seen);
+            }
+            stack.extend(resolve_array(doc, field.get(b"Kids").ok()));
+        }
+    }
+
+    // Catalog /Perms: /UR3 (usage rights), /DocMDP (certification), etc.
+    if let Some(perms) = doc
+        .catalog()
+        .ok()
+        .and_then(|c| c.get(b"Perms").ok())
+        .and_then(|o| resolve_dict(doc, o))
+    {
+        for (_key, v) in perms.iter() {
+            push_if_sig(doc, v, &mut out, &mut seen);
         }
     }
 
     out
+}
+
+/// If `obj` resolves to a dict with a `/ByteRange` (and hasn't been seen before,
+/// by reference), append it.
+fn push_if_sig(
+    doc: &Document,
+    obj: &Object,
+    out: &mut Vec<lopdf::Dictionary>,
+    seen: &mut HashSet<lopdf::ObjectId>,
+) {
+    if let Ok(id) = obj.as_reference() {
+        if !seen.insert(id) {
+            return;
+        }
+    }
+    if let Some(dict) = resolve_dict(doc, obj) {
+        if dict.has(b"ByteRange") {
+            out.push(dict);
+        }
+    }
+}
+
+/// Resolve an optional object to a Vec of its elements, following a reference to
+/// an array. Returns empty for anything that isn't an array (or ref to one).
+fn resolve_array(doc: &Document, obj: Option<&Object>) -> Vec<Object> {
+    match obj {
+        Some(Object::Array(a)) => a.clone(),
+        Some(Object::Reference(id)) => doc
+            .get_object(*id)
+            .and_then(|o| o.as_array().cloned())
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
 }
 
 fn resolve_dict(doc: &Document, obj: &Object) -> Option<lopdf::Dictionary> {
@@ -186,13 +259,7 @@ fn verify_one(bytes: &[u8], _doc: &Document, sig: &lopdf::Dictionary) -> Signatu
         })
         .unwrap_or_default();
 
-    let integrity_ok = match &byte_range {
-        Some(br) => match (digest_byte_range(bytes, br), cms_message_digest(&contents)) {
-            (Some(computed), Some(sealed)) => computed == sealed,
-            _ => false,
-        },
-        None => false,
-    };
+    let integrity = check_integrity(bytes, byte_range.as_deref(), &contents);
 
     // Bytes after a signature's coverage are a post-signing incremental update.
     let modified_after = byte_range
@@ -207,8 +274,40 @@ fn verify_one(bytes: &[u8], _doc: &Document, sig: &lopdf::Dictionary) -> Signatu
         reason,
         location,
         signing_time,
-        integrity_ok,
+        integrity,
         modified_after,
+    }
+}
+
+/// Check one signature's integrity: does the CMS's sealed message digest match
+/// a fresh hash of the `/ByteRange`? Returns `Unknown` (not `Failed`) whenever we
+/// can't perform the check — no byte range, an unparsable CMS (e.g. Adobe's BER
+/// indefinite-length encoding, which the strict-DER parser rejects), or a digest
+/// algorithm this build doesn't compute. Only a real digest mismatch is `Failed`.
+fn check_integrity(bytes: &[u8], byte_range: Option<&[i64]>, contents: &[u8]) -> Integrity {
+    let Some(br) = byte_range else {
+        return Integrity::Unknown;
+    };
+    let Some(sd) = parse_signed_data(contents) else {
+        return Integrity::Unknown;
+    };
+    let Some(signer) = sd.signer_infos.0.iter().next() else {
+        return Integrity::Unknown;
+    };
+    // Only SHA-256 message digests are computed here; anything else is reported
+    // honestly as unverified rather than guessed at.
+    if signer.digest_alg.oid != SHA256_OID {
+        return Integrity::Unknown;
+    }
+    let (Some(sealed), Some(computed)) =
+        (message_digest_attr(signer), digest_byte_range(bytes, br))
+    else {
+        return Integrity::Unknown;
+    };
+    if computed == sealed {
+        Integrity::Ok
+    } else {
+        Integrity::Failed
     }
 }
 
@@ -245,6 +344,8 @@ const MESSAGE_DIGEST_OID: const_oid::ObjectIdentifier =
     const_oid::ObjectIdentifier::new_unwrap("1.2.840.113549.1.9.4");
 const COMMON_NAME_OID: const_oid::ObjectIdentifier =
     const_oid::ObjectIdentifier::new_unwrap("2.5.4.3");
+const SHA256_OID: const_oid::ObjectIdentifier =
+    const_oid::ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.2.1");
 
 /// The total length of the first DER TLV in `b`, so a zero-padded `/Contents`
 /// placeholder (the signature is sized smaller than its reserved space) can be
@@ -276,11 +377,9 @@ fn parse_signed_data(contents: &[u8]) -> Option<cms::signed_data::SignedData> {
     ci.content.decode_as::<cms::signed_data::SignedData>().ok()
 }
 
-/// The `messageDigest` signed attribute from the first SignerInfo — the digest
-/// the signer sealed over the document's signed bytes.
-fn cms_message_digest(contents: &[u8]) -> Option<Vec<u8>> {
-    let sd = parse_signed_data(contents)?;
-    let signer = sd.signer_infos.0.iter().next()?;
+/// The `messageDigest` signed attribute of a SignerInfo — the digest the signer
+/// sealed over the document's signed bytes.
+fn message_digest_attr(signer: &cms::signed_data::SignerInfo) -> Option<Vec<u8>> {
     let attrs = signer.signed_attrs.as_ref()?;
     for attr in attrs.iter() {
         if attr.oid == MESSAGE_DIGEST_OID {
@@ -362,7 +461,7 @@ mod tests {
         assert_eq!(info.count, 1);
         assert_eq!(info.status, SignatureStatus::Verified);
         let sig = &info.signatures[0];
-        assert!(sig.integrity_ok);
+        assert_eq!(sig.integrity, Integrity::Ok);
         assert!(!sig.modified_after);
         assert_eq!(sig.signer_name, "Tumbler Test Signer");
         assert_eq!(sig.reason, "Demonstration");
@@ -375,7 +474,7 @@ mod tests {
         let info = verify_signatures_from_path(&fixture("signed-modified-after.pdf"));
         assert_eq!(info.count, 1);
         assert_eq!(info.status, SignatureStatus::ModifiedAfter);
-        assert!(info.signatures[0].integrity_ok);
+        assert_eq!(info.signatures[0].integrity, Integrity::Ok);
         assert!(info.signatures[0].modified_after);
     }
 
@@ -385,7 +484,22 @@ mod tests {
         let info = verify_signatures_from_path(&fixture("signed-tampered.pdf"));
         assert_eq!(info.count, 1);
         assert_eq!(info.status, SignatureStatus::Invalid);
-        assert!(!info.signatures[0].integrity_ok);
+        assert_eq!(info.signatures[0].integrity, Integrity::Failed);
+    }
+
+    /// A real-world Adobe Reader-enabled form (IRS f8946): the signature is
+    /// nested under a parent field's /Kids and lives in the Catalog /Perms /UR3,
+    /// and its CMS uses BER indefinite-length encoding the strict-DER parser
+    /// can't read. We must still DETECT it (so the badge shows) and report it
+    /// honestly as Unknown — signed but not verifiable here — never Unsigned and
+    /// never Invalid (which would falsely imply tampering).
+    #[test]
+    fn adobe_ur3_form_is_detected_but_unknown() {
+        let path = format!("{}/tests/fixtures/forms/f8946.pdf", env!("CARGO_MANIFEST_DIR"));
+        let info = verify_signatures_from_path(&path);
+        assert_eq!(info.count, 1, "signature should be detected");
+        assert_eq!(info.status, SignatureStatus::Unknown);
+        assert_eq!(info.signatures[0].integrity, Integrity::Unknown);
     }
 
     /// The plain unsigned fixture has no signature fields.
@@ -406,21 +520,22 @@ mod tests {
 
     #[test]
     fn aggregate_status_precedence() {
-        let intact = |modified| SignatureEntry {
-            integrity_ok: true,
+        let entry = |integrity, modified| SignatureEntry {
+            integrity,
             modified_after: modified,
             ..Default::default()
         };
-        let broken = SignatureEntry { integrity_ok: false, ..Default::default() };
+        let ok = |modified| entry(Integrity::Ok, modified);
+        let failed = || entry(Integrity::Failed, false);
+        let unknown = || entry(Integrity::Unknown, false);
 
         assert_eq!(aggregate_status(&[]), SignatureStatus::Unsigned);
-        assert_eq!(aggregate_status(&[intact(false)]), SignatureStatus::Verified);
-        assert_eq!(aggregate_status(&[intact(true)]), SignatureStatus::ModifiedAfter);
-        // Invalid wins over modified-after.
-        assert_eq!(
-            aggregate_status(&[intact(true), broken]),
-            SignatureStatus::Invalid
-        );
+        assert_eq!(aggregate_status(&[ok(false)]), SignatureStatus::Verified);
+        assert_eq!(aggregate_status(&[ok(true)]), SignatureStatus::ModifiedAfter);
+        assert_eq!(aggregate_status(&[unknown()]), SignatureStatus::Unknown);
+        // Failed (real tamper) outranks Unknown; Unknown outranks modified-after.
+        assert_eq!(aggregate_status(&[unknown(), failed()]), SignatureStatus::Invalid);
+        assert_eq!(aggregate_status(&[ok(true), unknown()]), SignatureStatus::Unknown);
     }
 
     #[test]
