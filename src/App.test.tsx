@@ -60,8 +60,8 @@ function makeTab(overrides: Partial<TabState> = {}): TabState {
 /** Renders App and returns a function that fires the "open-file" event. */
 async function renderAppAndGetOpenFile(): Promise<(path: string) => Promise<void>> {
   let openFileHandler: ((event: { payload: string }) => void) | undefined;
-  vi.mocked(listen).mockImplementation(async (event: string, handler: never) => {
-    if (event === "open-file") openFileHandler = handler;
+  vi.mocked(listen).mockImplementation(async (event, handler) => {
+    if (event === "open-file") openFileHandler = handler as unknown as typeof openFileHandler;
     return () => {};
   });
 
@@ -137,8 +137,8 @@ describe("App single-instance-per-file open guard", () => {
     let dirtyHandler:
       | ((event: { payload: { docId: string; dirty: boolean } }) => void)
       | undefined;
-    vi.mocked(listen).mockImplementation(async (event: string, handler: never) => {
-      if (event === "document-dirty-changed") dirtyHandler = handler;
+    vi.mocked(listen).mockImplementation(async (event, handler) => {
+      if (event === "document-dirty-changed") dirtyHandler = handler as unknown as typeof dirtyHandler;
       return () => {};
     });
 
