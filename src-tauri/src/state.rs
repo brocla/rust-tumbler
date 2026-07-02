@@ -180,49 +180,6 @@ impl AppState {
         }
     }
 
-    /// Reloads every open document whose file matches `file_path` from disk.
-    ///
-    /// No production callers remain after issue #31 Phase 2 (all edits are
-    /// buffer-based now); kept until Phase 3 decides whether external-change
-    /// detection wants it. Returns the doc_ids that were reloaded.
-    #[allow(dead_code)]
-    pub fn reload_documents_with_path(&self, file_path: &str) -> Result<Vec<String>, AppError> {
-        let matches: Vec<(String, Arc<Mutex<DocEntry>>)> = {
-            let docs = lock_mutex(&self.documents)?;
-            docs.iter()
-                .filter_map(|(doc_id, entry)| {
-                    let matches_path = lock_mutex(entry)
-                        .map(|e| e.file_path == file_path)
-                        .unwrap_or(false);
-                    matches_path.then(|| (doc_id.clone(), entry.clone()))
-                })
-                .collect()
-        };
-
-        let mut reloaded_ids = Vec::with_capacity(matches.len());
-        for (doc_id, entry) in matches {
-            let buffer = std::fs::read(file_path)
-                .map_err(|e| AppError::io("Failed to read PDF for reload", e))?;
-            let document = self
-                .pdfium
-                .load_pdf_from_byte_vec(buffer.clone(), None)
-                .map_err(|e| AppError::pdfium("Failed to reload PDF", e))?;
-            {
-                let mut e = lock_mutex(&entry)?;
-                e.document = document;
-                // Disk now defines the document again, so any unsaved buffer
-                // state is superseded and the doc is clean.
-                e.buffer = buffer;
-                e.dirty = false;
-            }
-            // The page set may have changed (delete/reorder/merge), so any
-            // page-keyed OCR words for this doc are now stale.
-            self.clear_ocr_cache_for_doc(&doc_id);
-            reloaded_ids.push(doc_id);
-        }
-        Ok(reloaded_ids)
-    }
-
     /// Applies an in-memory edit: `bytes` become the document's authoritative
     /// buffer, the pdfium view is rebuilt from them, the OCR cache is dropped
     /// (page layout may have changed), and the document is marked dirty.
@@ -345,43 +302,6 @@ mod tests {
         assert!(matches!(state.get_document("doc1"), Err(AppError::NotFound(_))));
     }
 
-    /// Two tabs with the same file open: after the underlying file changes on
-    /// disk, `reload_documents_with_path` should refresh both `DocEntry`s.
-    #[test]
-    fn reload_documents_with_path_refreshes_all_matching_tabs() {
-        let src = crate::fixture_path();
-
-        let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None);
-        let file_path = src.to_string_lossy().into_owned();
-
-        for doc_id in ["tab-a", "tab-b"] {
-            let entry = DocEntry::load(pdfium, &file_path).expect("load pdf");
-            state.insert_document(doc_id.to_string(), entry).expect("insert");
-        }
-
-        // A third tab with an unrelated file should not be touched.
-        let other_path = std::env::temp_dir()
-            .join("tumbler_reload_test_other.pdf")
-            .to_string_lossy()
-            .into_owned();
-        std::fs::copy(&src, &other_path).expect("copy fixture");
-        let other_entry = DocEntry::load(pdfium, &other_path).expect("load pdf");
-        state
-            .insert_document("tab-c".to_string(), other_entry)
-            .expect("insert");
-
-        let reloaded = state
-            .reload_documents_with_path(&file_path)
-            .expect("reload");
-
-        assert_eq!(reloaded.len(), 2);
-        assert!(reloaded.contains(&"tab-a".to_string()));
-        assert!(reloaded.contains(&"tab-b".to_string()));
-
-        std::fs::remove_file(&other_path).ok();
-    }
-
     /// `DocEntry::load` seeds the buffer with the file's bytes and starts clean.
     #[test]
     fn doc_entry_load_seeds_buffer_from_file_and_is_clean() {
@@ -430,32 +350,6 @@ mod tests {
         assert!(entry.dirty);
         assert_eq!(entry.buffer, edited_bytes);
         assert_eq!(entry.document.pages().len(), 2, "pdfium view must show the edit");
-    }
-
-    /// A disk reload supersedes any unsaved buffer state: buffer tracks the
-    /// file again and the document is clean.
-    #[test]
-    fn reload_documents_with_path_resets_buffer_and_dirty() {
-        let _guard = crate::test_pdfium_guard();
-        let src = crate::fixture_path();
-        let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None);
-
-        let file_path = src.to_string_lossy().into_owned();
-        let entry = DocEntry::load(pdfium, &file_path).expect("load");
-        state.insert_document("doc1".to_string(), entry).expect("insert");
-
-        // Dirty the buffer with arbitrary (still valid) bytes.
-        let bytes = std::fs::read(&src).expect("read fixture");
-        state.set_buffer_and_refresh("doc1", bytes).expect("set buffer");
-        assert!(state.is_dirty("doc1").expect("is_dirty"));
-
-        state.reload_documents_with_path(&file_path).expect("reload");
-
-        let entry_arc = state.get_document("doc1").expect("get");
-        let entry = lock_mutex(&entry_arc).expect("lock");
-        assert!(!entry.dirty);
-        assert_eq!(entry.buffer, std::fs::read(&src).expect("read fixture"));
     }
 
     /// The whole point of `documents: Mutex<HashMap<String, Arc<Mutex<DocEntry>>>>`
