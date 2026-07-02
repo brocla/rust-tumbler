@@ -58,8 +58,9 @@ rust-tumbler/
 | `ocr.rs` | per-page and whole-document OCR via Windows.Media.Ocr |
 | `metadata.rs` | read / write PDF metadata (lopdf) |
 | `pages.rs` | delete, rotate, reorder, merge, split pages (lopdf) |
-| `save.rs` | Save / Save As — the only commands that write the in-memory buffer to disk (issue #31) |
+| `save.rs` | Save / Save As — the only commands that write the in-memory buffer to disk |
 | `optimize.rs` | five-step compression pipeline (lopdf) |
+| `text_layer.rs` | embed an invisible OCR text layer into the document buffer (issue #4) |
 | `print.rs` | native GDI printing with progress and cancellation |
 | `startup.rs` | read the file-association path passed on the command line |
 | `theme.rs` | read the Windows accent color for UI theming |
@@ -100,9 +101,7 @@ Key fields:
 | `ocr_cache` | `Arc<Mutex<HashMap<(String,u32), Vec<OcrWord>>>>` | Recognized words keyed by `(doc_id, page_1based)`. Session-only — never written to disk. |
 | `ocr_job` / `compress_job` / `print_job` | `Mutex<Option<Arc<AtomicBool>>>` | Cancellation tokens for long-running operations. |
 
-`DocEntry` holds the `PdfDocument<'static>` (pdfium handle), the `file_path` string, plus — for non-destructive editing (issue #31) — `buffer: Vec<u8>` (the authoritative current bytes, including unsaved edits; `document` is always a pdfium render of it) and `dirty: bool` (true exactly when `buffer` differs from disk). Buffer-model edits end with `state.set_buffer_and_refresh(doc_id, bytes)` and emit `document-dirty-changed`; `save_document` / `save_document_as` (in `commands/save.rs`) are the only commands that write the buffer to disk.
-
-**Migration status (issue #31):** Phase 2 complete — all edits (rotate/delete/reorder/merge/metadata/compression/OCR text layer) are buffer-based and deferred until an explicit Save. Reads that need the current bytes (compression, text-layer authoring, metadata write, signature/conformance) parse the buffer via `lopdf::Document::load_mem`; exports (`split_document`, `export_text`) read the pdfium view of the buffer; printing a dirty document hands the buffer to the GDI path via a temp file. Phase 3 is cleanup (retire `reload_documents_with_path`, update the lopdf edit-pattern docs below).
+`DocEntry` holds the `PdfDocument<'static>` (pdfium handle), the `file_path` string, `buffer: Vec<u8>` (the authoritative current bytes, including unsaved edits; `document` is always a pdfium render of it) and `dirty: bool` (true exactly when `buffer` differs from disk). Buffer-model edits end with `state.set_buffer_and_refresh(doc_id, bytes)` and emit `document-dirty-changed`; `save_document` / `save_document_as` (in `commands/save.rs`) are the only commands that write the buffer to disk.
 
 Accessing a document safely:
 ```rust
@@ -137,12 +136,12 @@ Split each command into a public `#[tauri::command]` wrapper and a private `_imp
 | **pdfium** (via `pdfium-render`) | Rendering pages to bitmaps, reading text/coordinates, search | Structural edits (adding/removing objects) |
 | **lopdf** | Metadata edits, page delete/rotate/reorder/merge/split, compression | Rendering |
 
-Write operations with lopdf follow this pattern:
-1. Read the file from disk with `Document::load(file_path)` (not from pdfium's handle).
-2. Modify the in-memory `Document`.
-3. Write to a temp file in the same directory, then `fs::rename` to the destination (atomic replace).
-4. Call `state.reload_documents_with_path(file_path)` so all pdfium handles for that file are refreshed.
-5. Emit `"document-pages-changed"` to the frontend so tabs reload.
+All edits follow the **buffer model** — they read from and write back to `DocEntry.buffer`, never to disk:
+
+- **pdfium-based edits (rotate/delete/reorder/merge):** mutate `entry.document` in place → `entry.document.save_to_bytes()` → `state.set_buffer_and_refresh(doc_id, bytes)`.
+- **lopdf-based edits (metadata/compression/text layer):** `lopdf::Document::load_mem(&entry.buffer)` (not from disk) → mutate → serialize to `Vec<u8>` → `state.set_buffer_and_refresh(doc_id, bytes)`.
+- Page-operation commands then emit `document-pages-changed` + `document-dirty-changed` via `pages::emit_pages_edited`.
+- `save_document` / `save_document_as` in `commands/save.rs` are the only commands that write anything to disk.
 
 ---
 
@@ -162,7 +161,7 @@ Key slices:
 
 ## Saving files
 
-All write operations use **write-to-temp then atomic rename**:
+`save_document` and `save_document_as` in `commands/save.rs` are the only commands that write the document buffer to disk. Both use **write-to-temp then atomic rename** via the `atomic_write` helper:
 ```rust
 let tmp = format!("{dest_path}.tmp-{}", uuid::Uuid::new_v4());
 std::fs::write(&tmp, &bytes)?;
@@ -177,13 +176,13 @@ This ensures a crash or disk-full error cannot leave a truncated file at the des
 - OCR runs on the Windows.Media.Ocr engine (built into Windows 10/11).
 - Results are cached in `AppState.ocr_cache` for the session only — never written to disk.
 - `search_document` and `extract_page_text` both fall back to the OCR cache for pages with no native text layer.
-- The cache is cleared when a document is closed or reloaded after an edit.
+- The cache is cleared when a document is closed or when `set_buffer_and_refresh` applies an edit (page layout may have changed).
 
 ---
 
 ## Multi-tab / same-file
 
-The same PDF can be open in multiple tabs simultaneously. Each tab has its own `doc_id` and its own pdfium handle (`DocEntry`), but they share the same file on disk. After any write operation, `reload_documents_with_path` refreshes every pdfium handle that points to the modified file.
+The single-instance-per-file invariant (enforced on open) guarantees at most one `DocEntry` per file path. Each tab therefore has its own `doc_id` and its own self-contained buffer; no cross-tab sync is needed after an edit, because edits only update the buffer and `save_document` / `save_document_as` are the only disk writes.
 
 ---
 
@@ -199,7 +198,7 @@ The same PDF can be open in multiple tabs simultaneously. Each tab has its own `
 | `strip_extras` | Remove XMP metadata, page thumbnails, JavaScript, embedded files |
 | `recompress_images` | Downsample high-DPI images and re-encode as JPEG (lossy) |
 
-The core logic is in the free function `run_optimization_steps_impl`, which has no `AppState` or window dependency and is directly callable from non-Tauri code (e.g., a CLI or MCP server). The compressed bytes are staged in `AppState.pending_optimized` until the user explicitly saves them.
+The core logic is in the free function `run_optimization_steps_impl`, which has no `AppState` or window dependency and is directly callable from non-Tauri code (e.g., a CLI or MCP server). The compressed bytes are applied to the document buffer via `state.set_buffer_and_refresh` and written to disk only when the user explicitly saves.
 
 ---
 
