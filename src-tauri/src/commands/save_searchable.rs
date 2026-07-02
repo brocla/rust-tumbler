@@ -52,6 +52,12 @@ const HELVETICA_DESCENT_RATIO: f32 = 0.211;
 pub struct SaveSearchableResult {
     /// Pages that received an invisible OCR text layer.
     pub pages_written: u32,
+    /// Text-less pages that were OCR'd but left un-searchable because their
+    /// geometry (a `/Rotate` or a shifted MediaBox origin) isn't yet supported
+    /// by the layer author. Surfaced so the user is told, rather than silently
+    /// seeing a lower count. (Distinct from a scanned page on which OCR simply
+    /// recognized no encodable text — a rare case not separately counted here.)
+    pub pages_skipped_unsupported_geometry: u32,
     pub cancelled: bool,
 }
 
@@ -409,6 +415,7 @@ fn save_searchable_copy_impl(
         if cancel.load(Ordering::Relaxed) {
             return Ok(SaveSearchableResult {
                 pages_written: 0,
+                pages_skipped_unsupported_geometry: 0,
                 cancelled: true,
             });
         }
@@ -437,6 +444,7 @@ fn save_searchable_copy_impl(
     // disk. pdfium's handle is never used for writing. Only parse/rewrite the
     // PDF when at least one page actually needs a layer — see the write step.
     let mut pages_written = 0u32;
+    let mut pages_skipped_unsupported_geometry = 0u32;
     let mut doc: Option<Document> = None;
 
     if !textless_pages.is_empty() {
@@ -455,15 +463,17 @@ fn save_searchable_copy_impl(
             };
 
             // Skip pages whose coordinate space doesn't match what OcrWord.rect
-            // assumes; better no layer than a mis-placed one.
+            // assumes; better no layer than a mis-placed one. Count them so the
+            // user is told these pages were left un-searchable.
             let (ox, oy, rotate) = page_geometry(&d, page_id);
             if !geometry_is_simple(ox, oy, rotate) {
+                pages_skipped_unsupported_geometry += 1;
                 continue;
             }
 
             let stream_bytes = build_invisible_text_stream(&words, FONT_NAME);
             if stream_bytes.is_empty() {
-                continue; // no representable text for this page
+                continue; // no representable text recognized for this page
             }
 
             let fid = *font_id.get_or_insert_with(|| {
@@ -532,6 +542,7 @@ fn save_searchable_copy_impl(
 
     Ok(SaveSearchableResult {
         pages_written,
+        pages_skipped_unsupported_geometry,
         cancelled: false,
     })
 }
@@ -988,6 +999,87 @@ mod tests {
         assert!((right - 150.0).abs() < 4.0, "right {right} — array contents not wrapped");
 
         drop(reopened);
+        std::fs::remove_file(&src).ok();
+        std::fs::remove_file(&dest).ok();
+    }
+
+    /// A document with one plain page and one offset-origin page: both are
+    /// text-less and OCR'd in Phase A, but the offset page fails the geometry
+    /// guard in Phase B. The result must report it (pages_skipped) rather than
+    /// silently drop it, so the UI can tell the user. Offset origin is used
+    /// instead of /Rotate because it trips the same guard without needing
+    /// pdfium to render a rotated page.
+    #[test]
+    fn offset_page_is_counted_as_skipped() {
+        let _guard = crate::test_pdfium_guard();
+        let pdfium = crate::test_pdfium();
+
+        let src = temp_path("src.pdf");
+        {
+            let mut doc = Document::with_version("1.5");
+            let pages_id = doc.new_object_id();
+            let empty = || Stream::new(Dictionary::new(), Vec::new());
+            let c0 = doc.add_object(empty());
+            let c1 = doc.add_object(empty());
+            // Page 1: normal origin (0,0) → gets a layer.
+            let p0 = doc.add_object(dictionary! {
+                "Type" => "Page",
+                "Parent" => pages_id,
+                "Contents" => c0,
+                "MediaBox" => vec![
+                    Object::Integer(0), Object::Integer(0),
+                    Object::Integer(200), Object::Integer(200),
+                ],
+            });
+            // Page 2: shifted origin (50,50) → skipped by the geometry guard.
+            let p1 = doc.add_object(dictionary! {
+                "Type" => "Page",
+                "Parent" => pages_id,
+                "Contents" => c1,
+                "MediaBox" => vec![
+                    Object::Integer(50), Object::Integer(50),
+                    Object::Integer(250), Object::Integer(250),
+                ],
+            });
+            doc.objects.insert(
+                pages_id,
+                Object::Dictionary(dictionary! {
+                    "Type" => "Pages",
+                    "Kids" => vec![Object::Reference(p0), Object::Reference(p1)],
+                    "Count" => Object::Integer(2),
+                }),
+            );
+            let catalog_id = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+            doc.trailer.set("Root", catalog_id);
+            doc.save(&src).expect("write two-page pdf");
+        }
+        let dest = temp_path("out.pdf");
+
+        let engine: Arc<dyn OcrEngine> = Arc::new(FakeOcrEngine { words: vec![px_word("Scanned")] });
+        let state = AppState::new(pdfium, None).with_ocr_engine(engine.clone());
+        let document = pdfium.load_pdf_from_file(&src, None).expect("load src");
+        state
+            .insert_document("doc1".to_string(), DocEntry { document, file_path: src.clone() })
+            .expect("insert");
+
+        let entry = state.get_document("doc1").expect("get");
+        let result = save_searchable_copy_impl(
+            |_, _| {},
+            entry,
+            "doc1".to_string(),
+            dest.clone(),
+            engine,
+            state.ocr_cache_handle(),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .expect("save");
+
+        assert_eq!(result.pages_written, 1, "the plain page should get a layer");
+        assert_eq!(
+            result.pages_skipped_unsupported_geometry, 1,
+            "the offset page should be counted as skipped"
+        );
+
         std::fs::remove_file(&src).ok();
         std::fs::remove_file(&dest).ok();
     }

@@ -15,6 +15,7 @@ interface TextExportResult {
 
 interface SaveSearchableResult {
   pagesWritten: number;
+  pagesSkippedUnsupportedGeometry: number;
   cancelled: boolean;
 }
 
@@ -238,26 +239,30 @@ export function Toolbar({ onOpenFile, onPrint }: ToolbarProps) {
         docId: activeTab.docId,
         destPath,
       });
+      const plural = (n: number) => (n === 1 ? "" : "s");
+      const written = result.pagesWritten;
+      const skipped = result.pagesSkippedUnsupportedGeometry;
+      // A "rotated or offset" clause describing the skipped pages, or "" when
+      // there were none. These pages were OCR'd but their geometry isn't yet
+      // supported, so they got no searchable layer — say so rather than hide it.
+      const skippedNote =
+        skipped > 0
+          ? `${skipped} rotated or offset page${plural(skipped)} couldn't be made searchable`
+          : "";
+
+      let text: string;
       if (result.cancelled) {
-        await message(
-          `Cancelled after making ${result.pagesWritten} page${
-            result.pagesWritten === 1 ? "" : "s"
-          } searchable.`,
-          { title: "Save Searchable Copy", kind: "info" },
-        );
-      } else if (result.pagesWritten === 0) {
-        await message(
-          "Saved a copy. Every page already had a text layer, so no OCR layer was added.",
-          { title: "Save Searchable Copy", kind: "info" },
-        );
+        text = `Cancelled after making ${written} page${plural(written)} searchable.`;
+      } else if (written > 0 && skipped > 0) {
+        text = `Saved a searchable copy (${written} page${plural(written)} OCR'd). ${skippedNote}.`;
+      } else if (written > 0) {
+        text = `Saved a searchable copy (${written} page${plural(written)} OCR'd).`;
+      } else if (skipped > 0) {
+        text = `Saved a copy, but ${skippedNote} (unsupported page geometry).`;
       } else {
-        await message(
-          `Saved a searchable copy (${result.pagesWritten} page${
-            result.pagesWritten === 1 ? "" : "s"
-          } OCR'd).`,
-          { title: "Save Searchable Copy", kind: "info" },
-        );
+        text = "Saved a copy (no OCR text layer was added).";
       }
+      await message(text, { title: "Save Searchable Copy", kind: "info" });
     } catch (err) {
       await message(String(err), { title: "Save Searchable Copy", kind: "error" });
     } finally {

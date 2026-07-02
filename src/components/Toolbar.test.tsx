@@ -204,7 +204,11 @@ describe("Toolbar save searchable copy", () => {
 
   it("saves a copy to the chosen path and reports pages OCR'd", async () => {
     vi.mocked(save).mockResolvedValue("C:\\out (searchable).pdf");
-    vi.mocked(invoke).mockResolvedValue({ pagesWritten: 2, cancelled: false });
+    vi.mocked(invoke).mockResolvedValue({
+      pagesWritten: 2,
+      pagesSkippedUnsupportedGeometry: 0,
+      cancelled: false,
+    });
 
     renderToolbar();
     await clickSaveSearchable();
@@ -216,6 +220,41 @@ describe("Toolbar save searchable copy", () => {
     });
     expect(message).toHaveBeenCalledWith(
       expect.stringContaining("Saved a searchable copy (2 pages OCR'd)."),
+      expect.objectContaining({ title: "Save Searchable Copy" }),
+    );
+  });
+
+  it("reports rotated/offset pages that were left un-searchable", async () => {
+    vi.mocked(save).mockResolvedValue("C:\\out (searchable).pdf");
+    vi.mocked(invoke).mockResolvedValue({
+      pagesWritten: 2,
+      pagesSkippedUnsupportedGeometry: 1,
+      cancelled: false,
+    });
+
+    renderToolbar();
+    await clickSaveSearchable();
+
+    const [[text]] = vi.mocked(message).mock.calls;
+    expect(text).toContain("2 pages OCR'd");
+    expect(text).toContain("1 rotated or offset page couldn't be made searchable");
+  });
+
+  it("explains when every scanned page was skipped for geometry", async () => {
+    vi.mocked(save).mockResolvedValue("C:\\out (searchable).pdf");
+    vi.mocked(invoke).mockResolvedValue({
+      pagesWritten: 0,
+      pagesSkippedUnsupportedGeometry: 3,
+      cancelled: false,
+    });
+
+    renderToolbar();
+    await clickSaveSearchable();
+
+    expect(message).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "3 rotated or offset pages couldn't be made searchable",
+      ),
       expect.objectContaining({ title: "Save Searchable Copy" }),
     );
   });
@@ -250,13 +289,17 @@ describe("Toolbar save searchable copy", () => {
 
   it("reports when no OCR layer was needed", async () => {
     vi.mocked(save).mockResolvedValue("C:\\out (searchable).pdf");
-    vi.mocked(invoke).mockResolvedValue({ pagesWritten: 0, cancelled: false });
+    vi.mocked(invoke).mockResolvedValue({
+      pagesWritten: 0,
+      pagesSkippedUnsupportedGeometry: 0,
+      cancelled: false,
+    });
 
     renderToolbar();
     await clickSaveSearchable();
 
     expect(message).toHaveBeenCalledWith(
-      expect.stringContaining("Every page already had a text layer"),
+      expect.stringContaining("no OCR text layer was added"),
       expect.objectContaining({ title: "Save Searchable Copy" }),
     );
   });
