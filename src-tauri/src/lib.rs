@@ -49,7 +49,7 @@ pub fn run() {
             commands::text::search_document,
             commands::text::export_text,
             commands::text::count_pages_without_text,
-            commands::save_searchable::save_searchable_copy,
+            commands::text_layer::add_text_layer,
             commands::ocr::ocr_page,
             commands::ocr::ocr_document,
             commands::ocr::cancel_ocr,

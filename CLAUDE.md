@@ -102,7 +102,7 @@ Key fields:
 
 `DocEntry` holds the `PdfDocument<'static>` (pdfium handle), the `file_path` string, plus — for non-destructive editing (issue #31) — `buffer: Vec<u8>` (the authoritative current bytes, including unsaved edits; `document` is always a pdfium render of it) and `dirty: bool` (true exactly when `buffer` differs from disk). Buffer-model edits end with `state.set_buffer_and_refresh(doc_id, bytes)` and emit `document-dirty-changed`; `save_document` / `save_document_as` (in `commands/save.rs`) are the only commands that write the buffer to disk.
 
-**Migration status (issue #31):** Phase 2 complete — all edits (rotate/delete/reorder/merge/metadata/compression) are buffer-based and deferred until an explicit Save. Reads that need the current bytes (compression, save-searchable, metadata write, signature/conformance) parse the buffer via `lopdf::Document::load_mem`; exports (`split_document`, `export_text`) read the pdfium view of the buffer; printing a dirty document hands the buffer to the GDI path via a temp file. Phase 3 is cleanup (retire `reload_documents_with_path`, update the lopdf edit-pattern docs below).
+**Migration status (issue #31):** Phase 2 complete — all edits (rotate/delete/reorder/merge/metadata/compression/OCR text layer) are buffer-based and deferred until an explicit Save. Reads that need the current bytes (compression, text-layer authoring, metadata write, signature/conformance) parse the buffer via `lopdf::Document::load_mem`; exports (`split_document`, `export_text`) read the pdfium view of the buffer; printing a dirty document hands the buffer to the GDI path via a temp file. Phase 3 is cleanup (retire `reload_documents_with_path`, update the lopdf edit-pattern docs below).
 
 Accessing a document safely:
 ```rust

@@ -6,7 +6,7 @@ import type { DisplayMode } from "../store/usePdfStore";
 import { ZOOM_PRESETS } from "../utils/zoomConstants";
 import { confirmBreakingEdit } from "../utils/confirmBreakingEdit";
 import { saveTab, saveTabAs } from "../utils/saveDocument";
-import { isSigned, SIGNATURE_SAVE_COPY_WARNING } from "../utils/signature";
+import { isSigned, SIGNATURE_EDIT_WARNING } from "../utils/signature";
 
 interface TextExportResult {
   pages: number;
@@ -14,7 +14,7 @@ interface TextExportResult {
   cancelled: boolean;
 }
 
-interface SaveSearchableResult {
+interface AddTextLayerResult {
   pagesWritten: number;
   pagesSkippedUnsupportedGeometry: number;
   cancelled: boolean;
@@ -214,32 +214,27 @@ export function Toolbar({ onOpenFile, onPrint }: ToolbarProps) {
     }
   };
 
-  // "Save Searchable Copy…": write a NEW PDF whose scanned pages carry an
-  // invisible OCR text layer, searchable in any reader. The source is untouched.
-  const handleSaveSearchableCopy = async () => {
+  // "Add Text Layer": embed an invisible OCR text layer into the document's
+  // scanned pages, searchable in any reader. Like every edit (issue #31) it
+  // lands in the in-memory buffer — the user commits it with Save / Save As.
+  const handleAddTextLayer = async () => {
     if (!activeTab) return;
 
-    const dir = activeTab.filePath.replace(/[\\/][^\\/]*$/, "");
-    const baseName = activeTab.fileName.replace(/\.pdf$/i, "");
-    const destPath = await save({
-      filters: [{ name: "PDF", extensions: ["pdf"] }],
-      defaultPath: `${dir}/${baseName} (searchable).pdf`,
-    });
-    if (!destPath) return;
-
-    // The added text layer means a signed document's copy won't verify. Warn
-    // first; the warning is overridable and the original file stays intact.
+    // The embedded text layer means the signature won't verify once saved.
+    // Warn first; the warning is overridable and nothing is saved yet.
     if (isSigned(activeTab.signatureStatus)) {
-      const proceed = await confirmBreakingEdit(SIGNATURE_SAVE_COPY_WARNING);
+      const proceed = await confirmBreakingEdit(SIGNATURE_EDIT_WARNING);
       if (!proceed) return;
     }
 
     setOcrProgress({ page: 0, total: activeTab.pageCount });
     try {
-      const result = await invoke<SaveSearchableResult>("save_searchable_copy", {
+      const result = await invoke<AddTextLayerResult>("add_text_layer", {
         docId: activeTab.docId,
-        destPath,
       });
+      // The buffer changed (native text now exists), so refresh the text
+      // overlay for selection/search.
+      updateTab(activeTab.id, { ocrEpoch: activeTab.ocrEpoch + 1 });
       const plural = (n: number) => (n === 1 ? "" : "s");
       const written = result.pagesWritten;
       const skipped = result.pagesSkippedUnsupportedGeometry;
@@ -253,19 +248,19 @@ export function Toolbar({ onOpenFile, onPrint }: ToolbarProps) {
 
       let text: string;
       if (result.cancelled) {
-        text = `Cancelled after making ${written} page${plural(written)} searchable.`;
+        text = "Cancelled — no text layer was added.";
       } else if (written > 0 && skipped > 0) {
-        text = `Saved a searchable copy (${written} page${plural(written)} OCR'd). ${skippedNote}.`;
+        text = `Added a text layer to ${written} page${plural(written)}; ${skippedNote}. Use Save or Save As to keep it.`;
       } else if (written > 0) {
-        text = `Saved a searchable copy (${written} page${plural(written)} OCR'd).`;
+        text = `Added a text layer to ${written} page${plural(written)}. Use Save or Save As to keep it.`;
       } else if (skipped > 0) {
-        text = `Saved a copy, but ${skippedNote} (unsupported page geometry).`;
+        text = `No text layer added — ${skippedNote} (unsupported page geometry).`;
       } else {
-        text = "Saved a copy (no OCR text layer was added).";
+        text = "Every page already has a text layer — nothing to add.";
       }
-      await message(text, { title: "Save Searchable Copy", kind: "info" });
+      await message(text, { title: "Add Text Layer", kind: "info" });
     } catch (err) {
-      await message(String(err), { title: "Save Searchable Copy", kind: "error" });
+      await message(String(err), { title: "Add Text Layer", kind: "error" });
     } finally {
       setOcrProgress(null);
     }
@@ -401,8 +396,8 @@ export function Toolbar({ onOpenFile, onPrint }: ToolbarProps) {
           </button>
           <button
             className="toolbar-button"
-            onClick={handleSaveSearchableCopy}
-            title="Save Searchable Copy..."
+            onClick={handleAddTextLayer}
+            title="Add Text Layer (make searchable in any reader)"
           >
             <FileSearch size={18} />
           </button>

@@ -64,9 +64,9 @@ async function clickMakeSearchable() {
   });
 }
 
-async function clickSaveSearchable() {
+async function clickAddTextLayer() {
   await act(async () => {
-    fireEvent.click(screen.getByTitle("Save Searchable Copy..."));
+    fireEvent.click(screen.getByTitle("Add Text Layer (make searchable in any reader)"));
     await new Promise((r) => setTimeout(r, 0));
   });
 }
@@ -282,7 +282,7 @@ describe("Toolbar make searchable", () => {
   });
 });
 
-describe("Toolbar save searchable copy", () => {
+describe("Toolbar add text layer", () => {
   beforeEach(() => {
     vi.mocked(invoke).mockReset();
     vi.mocked(save).mockReset();
@@ -291,8 +291,7 @@ describe("Toolbar save searchable copy", () => {
     vi.mocked(message).mockResolvedValue(undefined as never);
   });
 
-  it("saves a copy to the chosen path and reports pages OCR'd", async () => {
-    vi.mocked(save).mockResolvedValue("C:\\out (searchable).pdf");
+  it("adds the layer as a buffer edit — no save dialog — and points at Save", async () => {
     vi.mocked(invoke).mockResolvedValue({
       pagesWritten: 2,
       pagesSkippedUnsupportedGeometry: 0,
@@ -300,21 +299,20 @@ describe("Toolbar save searchable copy", () => {
     });
 
     renderToolbar();
-    await clickSaveSearchable();
+    await clickAddTextLayer();
 
     expect(confirm).not.toHaveBeenCalled(); // unsigned document → no warning
-    expect(invoke).toHaveBeenCalledWith("save_searchable_copy", {
-      docId: "doc-1",
-      destPath: "C:\\out (searchable).pdf",
-    });
+    expect(save).not.toHaveBeenCalled(); // deferred edit: no dialog
+    expect(invoke).toHaveBeenCalledWith("add_text_layer", { docId: "doc-1" });
     expect(message).toHaveBeenCalledWith(
-      expect.stringContaining("Saved a searchable copy (2 pages OCR'd)."),
-      expect.objectContaining({ title: "Save Searchable Copy" }),
+      expect.stringContaining("Added a text layer to 2 pages. Use Save or Save As to keep it."),
+      expect.objectContaining({ title: "Add Text Layer" }),
     );
+    // The buffer changed, so the text overlay refreshes.
+    expect(usePdfStore.getState().tabs[0].ocrEpoch).toBe(1);
   });
 
   it("reports rotated/offset pages that were left un-searchable", async () => {
-    vi.mocked(save).mockResolvedValue("C:\\out (searchable).pdf");
     vi.mocked(invoke).mockResolvedValue({
       pagesWritten: 2,
       pagesSkippedUnsupportedGeometry: 1,
@@ -322,15 +320,14 @@ describe("Toolbar save searchable copy", () => {
     });
 
     renderToolbar();
-    await clickSaveSearchable();
+    await clickAddTextLayer();
 
     const [[text]] = vi.mocked(message).mock.calls;
-    expect(text).toContain("2 pages OCR'd");
+    expect(text).toContain("Added a text layer to 2 pages");
     expect(text).toContain("1 rotated or offset page couldn't be made searchable");
   });
 
   it("explains when every scanned page was skipped for geometry", async () => {
-    vi.mocked(save).mockResolvedValue("C:\\out (searchable).pdf");
     vi.mocked(invoke).mockResolvedValue({
       pagesWritten: 0,
       pagesSkippedUnsupportedGeometry: 3,
@@ -338,27 +335,17 @@ describe("Toolbar save searchable copy", () => {
     });
 
     renderToolbar();
-    await clickSaveSearchable();
+    await clickAddTextLayer();
 
     expect(message).toHaveBeenCalledWith(
       expect.stringContaining(
         "3 rotated or offset pages couldn't be made searchable",
       ),
-      expect.objectContaining({ title: "Save Searchable Copy" }),
+      expect.objectContaining({ title: "Add Text Layer" }),
     );
   });
 
-  it("does not invoke the backend when the user cancels the save dialog", async () => {
-    vi.mocked(save).mockResolvedValue(null);
-
-    renderToolbar();
-    await clickSaveSearchable();
-
-    expect(invoke).not.toHaveBeenCalled();
-  });
-
-  it("warns before saving a signed document and aborts if declined", async () => {
-    vi.mocked(save).mockResolvedValue("C:\\out (searchable).pdf");
+  it("warns before editing a signed document and aborts if declined", async () => {
     vi.mocked(confirm).mockResolvedValue(false);
     usePdfStore.setState({
       tabs: [makeTab({ signatureStatus: "verified" })],
@@ -367,17 +354,16 @@ describe("Toolbar save searchable copy", () => {
     });
     render(<Toolbar onOpenFile={vi.fn()} onPrint={vi.fn()} />);
 
-    await clickSaveSearchable();
+    await clickAddTextLayer();
 
     expect(confirm).toHaveBeenCalled();
     expect(invoke).not.toHaveBeenCalledWith(
-      "save_searchable_copy",
+      "add_text_layer",
       expect.anything(),
     );
   });
 
-  it("reports when no OCR layer was needed", async () => {
-    vi.mocked(save).mockResolvedValue("C:\\out (searchable).pdf");
+  it("reports when no page needed a layer", async () => {
     vi.mocked(invoke).mockResolvedValue({
       pagesWritten: 0,
       pagesSkippedUnsupportedGeometry: 0,
@@ -385,11 +371,11 @@ describe("Toolbar save searchable copy", () => {
     });
 
     renderToolbar();
-    await clickSaveSearchable();
+    await clickAddTextLayer();
 
     expect(message).toHaveBeenCalledWith(
-      expect.stringContaining("no OCR text layer was added"),
-      expect.objectContaining({ title: "Save Searchable Copy" }),
+      expect.stringContaining("Every page already has a text layer"),
+      expect.objectContaining({ title: "Add Text Layer" }),
     );
   });
 });

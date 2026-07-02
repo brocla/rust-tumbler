@@ -50,13 +50,3 @@ export function signatureBadge(status: SignatureStatus | undefined): SignatureBa
 export const SIGNATURE_EDIT_WARNING =
   "This document is signed. Saving these changes will modify the file and " +
   "invalidate the digital signature — it can't be re-verified afterward.";
-
-/**
- * Overridable warning shown before saving a searchable copy of a signed
- * document. The source file is untouched, but the added OCR text layer means
- * the copy carries the signature in a broken state.
- */
-export const SIGNATURE_SAVE_COPY_WARNING =
-  "This document is signed. The searchable copy adds an invisible OCR text " +
-  "layer, so its digital signature won't verify — the original file is left " +
-  "unchanged.";
