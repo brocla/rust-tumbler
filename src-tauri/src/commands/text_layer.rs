@@ -1,7 +1,7 @@
-//! "Save Searchable Copy" — the persisted OCR-layer tier (issue #4).
+//! "Add Text Layer" — the persisted OCR-layer tier (issue #4).
 //!
 //! Where "Make Searchable" (see [`crate::commands::ocr`]) recognizes text into a
-//! session-only cache, this writes those words into a **new** PDF as an
+//! session-only cache, this embeds those words into the document as an
 //! invisible text layer (the "OCR sandwich"): for every previously text-less
 //! (scanned) page, the recognized words are grouped into lines (reusing the
 //! ephemeral overlay's `ocr_words_to_lines`) and each line is appended to the
@@ -12,8 +12,9 @@
 //! PDF reader. Afterward Tumbler's own `search_document` / `extract_page_text`
 //! need no special-casing: pdfium just sees real text operators.
 //!
-//! This is always "Save As": the source file is never modified. The write goes
-//! to a temp file in the destination directory, then an atomic rename.
+//! Like every other edit (issue #31), the layer is applied to the in-memory
+//! buffer and the document is marked dirty; the user commits it to disk with
+//! an ordinary Save / Save As. Nothing here touches the file.
 //!
 //! Coordinate note: `OcrWord.rect` is already in PDF user space (points, origin
 //! bottom-left) for the common case of a MediaBox at `[0 0 w h]` with no
@@ -49,7 +50,7 @@ const HELVETICA_DESCENT_RATIO: f32 = 0.211;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SaveSearchableResult {
+pub struct AddTextLayerResult {
     /// Pages that received an invisible OCR text layer.
     pub pages_written: u32,
     /// Text-less pages that were OCR'd but left un-searchable because their
@@ -369,12 +370,12 @@ fn append_content_stream(
 // ── Command ─────────────────────────────────────────────────────────────────
 
 #[tauri::command]
-pub async fn save_searchable_copy(
+pub async fn add_text_layer(
+    app: tauri::AppHandle,
     window: WebviewWindow,
     state: State<'_, AppState>,
     doc_id: String,
-    dest_path: String,
-) -> Result<SaveSearchableResult, String> {
+) -> Result<AddTextLayerResult, String> {
     let entry = state.get_document(&doc_id).map_err(String::from)?;
     let engine = state.ocr_engine.clone();
     let cache = state.ocr_cache_handle();
@@ -386,29 +387,46 @@ pub async fn save_searchable_copy(
         let _ = window.emit("ocr-progress", OcrProgress { page, total });
     };
 
-    let result = tauri::async_runtime::spawn_blocking(move || {
-        save_searchable_copy_impl(emit, entry, doc_id, dest_path, engine, cache, cancel)
+    let outcome = tauri::async_runtime::spawn_blocking(move || {
+        add_text_layer_impl(emit, entry, doc_id.clone(), engine, cache, cancel)
+            .map(|r| (doc_id, r))
     })
     .await
     .map_err(|e| e.to_string());
 
     state.take_ocr_job();
-    result?.map_err(String::from)
+    let (doc_id, (result, edited_bytes)) = outcome?.map_err(String::from)?;
+
+    // A layer was authored: it becomes the buffer (dirty until the user saves).
+    // `set_buffer_and_refresh` also drops the doc's OCR cache — correct, since
+    // those pages now carry native text.
+    if let Some(bytes) = edited_bytes {
+        state.set_buffer_and_refresh(&doc_id, bytes).map_err(String::from)?;
+        let _ = app.emit(
+            "document-dirty-changed",
+            crate::commands::save::DirtyChangedPayload { doc_id, dirty: true },
+        );
+    }
+    Ok(result)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn save_searchable_copy_impl(
+/// Runs Phase A (OCR text-less pages into the cache) and Phase B (author the
+/// invisible layer), returning the result plus the edited document bytes —
+/// `None` when no page needed a layer (or the run was cancelled), in which
+/// case the document is left untouched.
+fn add_text_layer_impl(
     emit_progress: impl Fn(u32, u32),
     entry: Arc<Mutex<DocEntry>>,
     doc_id: String,
-    dest_path: String,
     engine: Arc<dyn OcrEngine>,
     cache: OcrCache,
     cancel: Arc<AtomicBool>,
-) -> Result<SaveSearchableResult, AppError> {
-    let (file_path, page_count) = {
+) -> Result<(AddTextLayerResult, Option<Vec<u8>>), AppError> {
+    // The buffer is the authoritative bytes (it carries any unsaved edits), so
+    // the layer is authored into it, not into the file on disk.
+    let (source_bytes, page_count) = {
         let entry = lock_mutex(&entry)?;
-        (entry.file_path.clone(), entry.document.pages().len() as u32)
+        (entry.buffer.clone(), entry.document.pages().len() as u32)
     };
 
     // Phase A (pdfium): ensure every text-less page is OCR'd into the cache, and
@@ -420,11 +438,14 @@ fn save_searchable_copy_impl(
         let page_num = i + 1;
 
         if cancel.load(Ordering::Relaxed) {
-            return Ok(SaveSearchableResult {
-                pages_written: 0,
-                pages_skipped_unsupported_geometry: 0,
-                cancelled: true,
-            });
+            return Ok((
+                AddTextLayerResult {
+                    pages_written: 0,
+                    pages_skipped_unsupported_geometry: 0,
+                    cancelled: true,
+                },
+                None,
+            ));
         }
         emit_progress(page_num, page_count);
 
@@ -447,16 +468,16 @@ fn save_searchable_copy_impl(
         }
     }
 
-    // Phase B (lopdf): author the invisible text into a fresh copy read from
-    // disk. pdfium's handle is never used for writing. Only parse/rewrite the
-    // PDF when at least one page actually needs a layer — see the write step.
+    // Phase B (lopdf): author the invisible text into a fresh copy parsed from
+    // the buffer. pdfium's handle is never used for writing. Only parse/rewrite
+    // the PDF when at least one page actually needs a layer — see the write step.
     let mut pages_written = 0u32;
     let mut pages_skipped_unsupported_geometry = 0u32;
     let mut doc: Option<Document> = None;
 
     if !textless_pages.is_empty() {
-        let mut d = Document::load(&file_path)
-            .map_err(|e| AppError::lopdf("Failed to open PDF for searchable copy", e))?;
+        let mut d = Document::load_mem(&source_bytes)
+            .map_err(|e| AppError::lopdf("Failed to parse PDF for searchable copy", e))?;
         let pages = d.get_pages();
         // Add the shared font object lazily — only when a page first needs it.
         let mut font_id: Option<ObjectId> = None;
@@ -522,36 +543,28 @@ fn save_searchable_copy_impl(
         doc = Some(d);
     }
 
-    // Write to a temp file in the destination dir, then atomic rename, so a
-    // crash or disk-full can't leave a truncated file at dest_path. When we
-    // authored a layer, serialize the modified document; otherwise copy the
-    // source bytes verbatim — an unchanged copy should be byte-identical, since
-    // lopdf re-serialization would reorder objects and could drop structures it
-    // doesn't model.
-    let tmp_path = format!("{dest_path}.tmp-{}", uuid::Uuid::new_v4());
-    let write_result = match doc.as_mut() {
-        Some(d) if pages_written > 0 => d
-            .save(&tmp_path)
-            .map(|_| ())
-            .map_err(|e| AppError::io("Failed to save searchable copy", e)),
-        _ => std::fs::copy(&file_path, &tmp_path)
-            .map(|_| ())
-            .map_err(|e| AppError::io("Failed to copy source PDF", e)),
+    // Serialize the modified document only when a layer was actually authored;
+    // otherwise return None so the caller leaves the buffer untouched (a lopdf
+    // re-serialization for no reason would reorder objects and could drop
+    // structures it doesn't model).
+    let edited_bytes = match doc.as_mut() {
+        Some(d) if pages_written > 0 => {
+            let mut out = Vec::new();
+            d.save_to(&mut out)
+                .map_err(|e| AppError::io("Failed to serialize text layer", e))?;
+            Some(out)
+        }
+        _ => None,
     };
-    if let Err(e) = write_result {
-        let _ = std::fs::remove_file(&tmp_path);
-        return Err(e);
-    }
-    std::fs::rename(&tmp_path, &dest_path).map_err(|e| {
-        let _ = std::fs::remove_file(&tmp_path);
-        AppError::io("Failed to move searchable copy into place", e)
-    })?;
 
-    Ok(SaveSearchableResult {
-        pages_written,
-        pages_skipped_unsupported_geometry,
-        cancelled: false,
-    })
+    Ok((
+        AddTextLayerResult {
+            pages_written,
+            pages_skipped_unsupported_geometry,
+            cancelled: false,
+        },
+        edited_bytes,
+    ))
 }
 
 #[cfg(test)]
@@ -635,7 +648,7 @@ mod tests {
         write_pdf_with_content(path, b"");
     }
 
-    /// Saves a searchable copy of a one-page PDF whose page content is
+    /// Adds a text layer to a one-page PDF whose page content is
     /// `page_content`, seeded with a single OCR `word`, then returns the unioned
     /// loose bounds `(left, bottom, right, top)` pdfium reports for the authored
     /// layer. Used to assert the layer lands on the OCR box regardless of the
@@ -645,7 +658,6 @@ mod tests {
         let pdfium = crate::test_pdfium();
         let src = temp_path("src.pdf");
         write_pdf_with_content(&src, page_content);
-        let dest = temp_path("out.pdf");
 
         let engine: Arc<dyn OcrEngine> = Arc::new(FakeOcrEngine { words: vec![word.clone()] });
         let state = AppState::new(pdfium, None).with_ocr_engine(engine.clone());
@@ -657,18 +669,19 @@ mod tests {
             .expect("insert");
 
         let entry = state.get_document("doc1").expect("get");
-        save_searchable_copy_impl(
+        let (_, bytes) = add_text_layer_impl(
             |_, _| {},
             entry,
             "doc1".to_string(),
-            dest.clone(),
             engine,
             state.ocr_cache_handle(),
             Arc::new(AtomicBool::new(false)),
         )
-        .expect("save");
+        .expect("add layer");
 
-        let reopened = pdfium.load_pdf_from_file(&dest, None).expect("reopen");
+        let reopened = pdfium
+            .load_pdf_from_byte_vec(bytes.expect("edited bytes"), None)
+            .expect("reopen");
         let page = reopened.pages().get(0).expect("page");
         let text = page.text().expect("text");
         let (mut left, mut bottom, mut right, mut top) =
@@ -683,7 +696,6 @@ mod tests {
         }
         drop(reopened);
         std::fs::remove_file(&src).ok();
-        std::fs::remove_file(&dest).ok();
         (left, bottom, right, top)
     }
 
@@ -924,17 +936,17 @@ mod tests {
 
     // ── The decisive round-trip: searchable in any reader ───────────────────
 
-    /// A blank (scanned-style) page + cached OCR words → save copy → reopen the
-    /// output with pdfium → pdfium's **native** text API returns the words. This
-    /// proves the layer is real text operators, not a Tumbler-only overlay.
+    /// A blank (scanned-style) page + cached OCR words → add layer → reopen the
+    /// edited bytes with pdfium → pdfium's **native** text API returns the
+    /// words. This proves the layer is real text operators, not a Tumbler-only
+    /// overlay.
     #[test]
-    fn saved_copy_is_natively_searchable() {
+    fn edited_bytes_are_natively_searchable() {
         let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
 
         let src = temp_path("src.pdf");
         write_blank_pdf(&src);
-        let dest = temp_path("out.pdf");
 
         let engine: Arc<dyn OcrEngine> = Arc::new(FakeOcrEngine { words: vec![px_word("Scanned")] });
         let state = AppState::new(pdfium, None).with_ocr_engine(engine.clone());
@@ -948,22 +960,23 @@ mod tests {
             .expect("insert");
 
         let entry = state.get_document("doc1").expect("get");
-        let result = save_searchable_copy_impl(
+        let (result, bytes) = add_text_layer_impl(
             |_, _| {},
             entry,
             "doc1".to_string(),
-            dest.clone(),
             engine,
             state.ocr_cache_handle(),
             Arc::new(AtomicBool::new(false)),
         )
-        .expect("save searchable");
+        .expect("add layer");
 
         assert_eq!(result.pages_written, 1);
         assert!(!result.cancelled);
 
-        // Reopen the saved copy and read text through pdfium's native API.
-        let reopened = pdfium.load_pdf_from_file(&dest, None).expect("reopen copy");
+        // Reopen the edited bytes and read text through pdfium's native API.
+        let reopened = pdfium
+            .load_pdf_from_byte_vec(bytes.expect("edited bytes"), None)
+            .expect("reopen edited bytes");
         let text = reopened
             .pages()
             .get(0)
@@ -978,7 +991,6 @@ mod tests {
 
         drop(reopened);
         std::fs::remove_file(&src).ok();
-        std::fs::remove_file(&dest).ok();
     }
 
     /// The saved layer's text-extraction (loose) box — which drives the
@@ -992,7 +1004,6 @@ mod tests {
 
         let src = temp_path("src.pdf");
         write_blank_pdf(&src);
-        let dest = temp_path("out.pdf");
 
         let word = OcrWord {
             text: "Scanned".to_string(),
@@ -1009,19 +1020,20 @@ mod tests {
             .expect("insert");
 
         let entry = state.get_document("doc1").expect("get");
-        save_searchable_copy_impl(
+        let (_, bytes) = add_text_layer_impl(
             |_, _| {},
             entry,
             "doc1".to_string(),
-            dest.clone(),
             engine,
             state.ocr_cache_handle(),
             Arc::new(AtomicBool::new(false)),
         )
-        .expect("save");
+        .expect("add layer");
 
         // Union the loose bounds of every character in the run.
-        let reopened = pdfium.load_pdf_from_file(&dest, None).expect("reopen");
+        let reopened = pdfium
+            .load_pdf_from_byte_vec(bytes.expect("edited bytes"), None)
+            .expect("reopen");
         let page = reopened.pages().get(0).expect("page");
         let text = page.text().expect("text");
         let mut bottom = f32::INFINITY;
@@ -1057,7 +1069,6 @@ mod tests {
 
         drop(reopened);
         std::fs::remove_file(&src).ok();
-        std::fs::remove_file(&dest).ok();
     }
 
     // ── B1: appended layer must not inherit the page's leftover graphics state ─
@@ -1146,7 +1157,6 @@ mod tests {
             doc.trailer.set("Root", catalog_id);
             doc.save(&src).expect("write array-contents pdf");
         }
-        let dest = temp_path("out.pdf");
 
         let word = OcrWord {
             text: "Scanned".to_string(),
@@ -1161,19 +1171,20 @@ mod tests {
             .expect("insert");
 
         let entry = state.get_document("doc1").expect("get");
-        let result = save_searchable_copy_impl(
+        let (result, bytes) = add_text_layer_impl(
             |_, _| {},
             entry,
             "doc1".to_string(),
-            dest.clone(),
             engine,
             state.ocr_cache_handle(),
             Arc::new(AtomicBool::new(false)),
         )
-        .expect("save");
+        .expect("add layer");
         assert_eq!(result.pages_written, 1);
 
-        let reopened = pdfium.load_pdf_from_file(&dest, None).expect("reopen");
+        let reopened = pdfium
+            .load_pdf_from_byte_vec(bytes.expect("edited bytes"), None)
+            .expect("reopen");
         let page = reopened.pages().get(0).expect("page");
         let text = page.text().expect("text");
         let (mut left, mut right) = (f32::INFINITY, f32::NEG_INFINITY);
@@ -1188,7 +1199,6 @@ mod tests {
 
         drop(reopened);
         std::fs::remove_file(&src).ok();
-        std::fs::remove_file(&dest).ok();
     }
 
     /// A document with one plain page and one offset-origin page: both are
@@ -1241,7 +1251,6 @@ mod tests {
             doc.trailer.set("Root", catalog_id);
             doc.save(&src).expect("write two-page pdf");
         }
-        let dest = temp_path("out.pdf");
 
         let engine: Arc<dyn OcrEngine> = Arc::new(FakeOcrEngine { words: vec![px_word("Scanned")] });
         let state = AppState::new(pdfium, None).with_ocr_engine(engine.clone());
@@ -1251,32 +1260,32 @@ mod tests {
             .expect("insert");
 
         let entry = state.get_document("doc1").expect("get");
-        let result = save_searchable_copy_impl(
+        let (result, bytes) = add_text_layer_impl(
             |_, _| {},
             entry,
             "doc1".to_string(),
-            dest.clone(),
             engine,
             state.ocr_cache_handle(),
             Arc::new(AtomicBool::new(false)),
         )
-        .expect("save");
+        .expect("add layer");
 
         assert_eq!(result.pages_written, 1, "the plain page should get a layer");
         assert_eq!(
             result.pages_skipped_unsupported_geometry, 1,
             "the offset page should be counted as skipped"
         );
+        assert!(bytes.is_some(), "one page got a layer, so bytes must be returned");
 
         std::fs::remove_file(&src).ok();
-        std::fs::remove_file(&dest).ok();
     }
 
     /// A page with a native text layer must not receive a duplicate OCR layer.
     /// The fixture's single page has real text ("Test Fixture"), so no page is
-    /// text-less and nothing is written.
+    /// text-less and no edit is produced — the buffer must be left alone (a
+    /// lopdf re-serialization for no reason would churn the bytes).
     #[test]
-    fn pages_with_native_text_are_not_modified() {
+    fn pages_with_native_text_produce_no_edit() {
         let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
         let state = AppState::new(pdfium, None);
@@ -1285,30 +1294,23 @@ mod tests {
         let entry = DocEntry::load(pdfium, &src.to_string_lossy()).expect("load fixture");
         state.insert_document("doc1".to_string(), entry).expect("insert");
 
-        let dest = temp_path("native.pdf");
         let entry = state.get_document("doc1").expect("get");
-        let result = save_searchable_copy_impl(
+        let (result, bytes) = add_text_layer_impl(
             |_, _| {},
             entry,
             "doc1".to_string(),
-            dest.clone(),
             state.ocr_engine.clone(),
             state.ocr_cache_handle(),
             Arc::new(AtomicBool::new(false)),
         )
-        .expect("save searchable");
+        .expect("add layer");
 
         assert_eq!(result.pages_written, 0, "native-text page must get no layer");
-        // With nothing to author, the copy must be byte-identical to the source
-        // (a faithful copy, not a lopdf re-serialization).
-        let src_bytes = std::fs::read(&src).expect("read source");
-        let dest_bytes = std::fs::read(&dest).expect("read dest");
-        assert_eq!(src_bytes, dest_bytes, "unchanged copy should be byte-identical");
-        std::fs::remove_file(&dest).ok();
+        assert!(bytes.is_none(), "no layer authored → no edited bytes");
     }
 
-    /// "Save As" only: the source file's bytes are untouched even though the
-    /// destination gains a text layer.
+    /// The layer is a deferred buffer edit: the source file's bytes on disk
+    /// are untouched by the run (only an explicit Save writes them).
     #[test]
     fn source_file_is_unchanged() {
         let _guard = crate::test_pdfium_guard();
@@ -1317,7 +1319,6 @@ mod tests {
         let src = temp_path("src.pdf");
         write_blank_pdf(&src);
         let before = std::fs::read(&src).expect("read src");
-        let dest = temp_path("out.pdf");
 
         let engine: Arc<dyn OcrEngine> = Arc::new(FakeOcrEngine { words: vec![px_word("Scanned")] });
         let state = AppState::new(pdfium, None).with_ocr_engine(engine.clone());
@@ -1330,35 +1331,32 @@ mod tests {
             .expect("insert");
 
         let entry = state.get_document("doc1").expect("get");
-        let result = save_searchable_copy_impl(
+        let (result, bytes) = add_text_layer_impl(
             |_, _| {},
             entry,
             "doc1".to_string(),
-            dest.clone(),
             engine,
             state.ocr_cache_handle(),
             Arc::new(AtomicBool::new(false)),
         )
-        .expect("save searchable");
+        .expect("add layer");
         assert_eq!(result.pages_written, 1);
+        assert!(bytes.is_some());
 
         let after = std::fs::read(&src).expect("read src again");
         assert_eq!(before, after, "source file must not be modified");
 
         std::fs::remove_file(&src).ok();
-        std::fs::remove_file(&dest).ok();
     }
 
-    /// A pre-set cancel token stops before any file is written.
+    /// A pre-set cancel token stops before any edit is produced.
     #[test]
-    fn cancellation_writes_no_file() {
+    fn cancellation_produces_no_edit() {
         let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
 
         let src = temp_path("src.pdf");
         write_blank_pdf(&src);
-        let dest = temp_path("out.pdf");
-        std::fs::remove_file(&dest).ok();
 
         let state = AppState::new(pdfium, None);
         let document = pdfium.load_pdf_from_file(&src, None).expect("load blank");
@@ -1370,20 +1368,19 @@ mod tests {
             .expect("insert");
 
         let entry = state.get_document("doc1").expect("get");
-        let result = save_searchable_copy_impl(
+        let (result, bytes) = add_text_layer_impl(
             |_, _| {},
             entry,
             "doc1".to_string(),
-            dest.clone(),
             state.ocr_engine.clone(),
             state.ocr_cache_handle(),
             Arc::new(AtomicBool::new(true)),
         )
-        .expect("save searchable");
+        .expect("add layer");
 
         assert!(result.cancelled);
         assert_eq!(result.pages_written, 0);
-        assert!(!std::path::Path::new(&dest).exists(), "cancelled run must not write");
+        assert!(bytes.is_none(), "cancelled run must produce no edit");
 
         std::fs::remove_file(&src).ok();
     }

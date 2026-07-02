@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { save, message } from "@tauri-apps/plugin-dialog";
+import { message } from "@tauri-apps/plugin-dialog";
 import { usePdfStore } from "../store/usePdfStore";
 import { confirmBreakingEdit } from "../utils/confirmBreakingEdit";
 import { isSigned, SIGNATURE_EDIT_WARNING } from "../utils/signature";
+import { saveTabAs } from "../utils/saveDocument";
 
 interface ConformanceClaims {
   declared: string[];
@@ -172,8 +173,9 @@ export function OptimizePanel() {
 
     // Guard: compressing a file that declares PDF/A or PDF/X will void that
     // conformance (XMP removal + lossy image re-encode). Warn before running;
-    // the warning is overridable. The output is staged, not saved, so this is
-    // about informed consent rather than preventing the run.
+    // the warning is overridable. The result is applied to the in-memory
+    // buffer, not the file, so this is about informed consent rather than
+    // preventing the run.
     try {
       const { declared } = await invoke<ConformanceClaims>("get_conformance", { docId });
       const breaking = breakingClaims(declared);
@@ -208,30 +210,18 @@ export function OptimizePanel() {
     }
   };
 
+  // The optimized bytes are already applied to the document's buffer (the run
+  // marked it dirty), so saving is the ordinary Save As flow — just with a
+  // "-compressed" name suggested.
   const handleSave = async () => {
-    const destPath = await save({
-      defaultPath: suggestName(activeTab.fileName),
-      filters: [{ name: "PDF Documents", extensions: ["pdf"] }],
-    });
-    if (!destPath) return;
     setSaving(true);
     try {
-      await invoke("save_optimized_copy", { docId, destPath });
-      // The staged bytes are consumed by the save, so there's nothing left to
-      // save again — hide the Save As button to mark the task complete.
-      setSaved(true);
-    } catch (err) {
-      await message(String(err), { title: "Save Failed", kind: "error" });
+      if (await saveTabAs(activeTab, suggestName(activeTab.fileName))) {
+        setSaved(true);
+      }
     } finally {
       setSaving(false);
     }
-  };
-
-  // Discard the optimization result without saving, returning the panel to its
-  // pre-run state.
-  const handleCancel = () => {
-    setReport(null);
-    setSaved(false);
   };
 
   const results = report?.results ?? [];
@@ -333,19 +323,15 @@ export function OptimizePanel() {
             <div className="optimize-saved">✓ Saved</div>
           ) : (
             <div className="optimize-actions">
+              {/* The result is applied to the document (unsaved); Ctrl+S /
+                  toolbar Save also work. This button is the Save As shortcut
+                  with a "-compressed" name suggested. */}
               <button
                 className="optimize-save-button"
                 onClick={handleSave}
                 disabled={saving}
               >
                 {saving ? "Saving…" : "Save As…"}
-              </button>
-              <button
-                className="optimize-cancel-button"
-                onClick={handleCancel}
-                disabled={saving}
-              >
-                Cancel
               </button>
             </div>
           )}

@@ -98,12 +98,11 @@ Key fields:
 | `pdfium` | `&'static Pdfium` | Leaked box; lives for the whole process. One pdfium instance per process. |
 | `documents` | `Mutex<HashMap<String, Arc<Mutex<DocEntry>>>>` | Open documents keyed by `doc_id` (a UUID string). The two-level mutex (outer for the map, inner per document) means long operations on one document don't block other tabs. |
 | `ocr_cache` | `Arc<Mutex<HashMap<(String,u32), Vec<OcrWord>>>>` | Recognized words keyed by `(doc_id, page_1based)`. Session-only — never written to disk. |
-| `pending_optimized` | `Mutex<HashMap<String, Vec<u8>>>` | Compressed bytes staged after a compression run, waiting for "Save As…". Cleared on save or document close. |
 | `ocr_job` / `compress_job` / `print_job` | `Mutex<Option<Arc<AtomicBool>>>` | Cancellation tokens for long-running operations. |
 
 `DocEntry` holds the `PdfDocument<'static>` (pdfium handle), the `file_path` string, plus — for non-destructive editing (issue #31) — `buffer: Vec<u8>` (the authoritative current bytes, including unsaved edits; `document` is always a pdfium render of it) and `dirty: bool` (true exactly when `buffer` differs from disk). Buffer-model edits end with `state.set_buffer_and_refresh(doc_id, bytes)` and emit `document-dirty-changed`; `save_document` / `save_document_as` (in `commands/save.rs`) are the only commands that write the buffer to disk.
 
-**Migration status (issue #31):** `rotate_pages` is buffer-based (deferred; needs an explicit Save). All other edits (delete/reorder/merge/metadata) still write to disk immediately, after which `reload_documents_with_path` re-syncs the buffer from disk and clears `dirty`. Phase 2 migrates them.
+**Migration status (issue #31):** Phase 2 complete — all edits (rotate/delete/reorder/merge/metadata/compression/OCR text layer) are buffer-based and deferred until an explicit Save. Reads that need the current bytes (compression, text-layer authoring, metadata write, signature/conformance) parse the buffer via `lopdf::Document::load_mem`; exports (`split_document`, `export_text`) read the pdfium view of the buffer; printing a dirty document hands the buffer to the GDI path via a temp file. Phase 3 is cleanup (retire `reload_documents_with_path`, update the lopdf edit-pattern docs below).
 
 Accessing a document safely:
 ```rust

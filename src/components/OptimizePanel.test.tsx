@@ -59,6 +59,7 @@ describe("OptimizePanel", () => {
     vi.mocked(invoke).mockImplementation(async (cmd: string) => {
       if (cmd === "run_optimization_steps") return REPORT;
       if (cmd === "get_conformance") return { declared: [] };
+      if (cmd === "save_document_as") return "C:\\out\\report-optimized.pdf";
       return undefined;
     });
 
@@ -179,7 +180,7 @@ describe("OptimizePanel", () => {
     });
   });
 
-  it("saves the optimized copy to the chosen path with a suggested name", async () => {
+  it("saves via the ordinary Save As flow with a suggested name", async () => {
     vi.mocked(save).mockResolvedValue("C:\\out\\report-optimized.pdf");
     render(<OptimizePanel />);
 
@@ -195,7 +196,7 @@ describe("OptimizePanel", () => {
     expect(vi.mocked(save).mock.calls[0][0]).toMatchObject({
       defaultPath: "report-compressed.pdf",
     });
-    const saveCall = vi.mocked(invoke).mock.calls.find((c) => c[0] === "save_optimized_copy");
+    const saveCall = vi.mocked(invoke).mock.calls.find((c) => c[0] === "save_document_as");
     expect(saveCall![1]).toMatchObject({
       docId: "doc-1",
       destPath: "C:\\out\\report-optimized.pdf",
@@ -219,7 +220,8 @@ describe("OptimizePanel", () => {
     expect(screen.queryByText("Save As…")).toBeNull();
   });
 
-  it("Cancel discards the result and returns to the pre-run state", async () => {
+  it("keeps the report and Save As button when the save dialog is cancelled", async () => {
+    vi.mocked(save).mockResolvedValue(null); // user dismisses the dialog
     render(<OptimizePanel />);
 
     await act(async () => {
@@ -227,11 +229,14 @@ describe("OptimizePanel", () => {
     });
     await waitFor(() => expect(screen.getByText("Save As…")).toBeTruthy());
 
-    fireEvent.click(screen.getByText("Cancel"));
+    await act(async () => {
+      fireEvent.click(screen.getByText("Save As…"));
+    });
 
-    expect(screen.queryByText("Save As…")).toBeNull();
-    expect(screen.queryByText(/Total:/)).toBeNull();
-    expect(screen.getByText("Run")).toBeTruthy();
+    // No save happened; the result (already applied to the buffer) can still
+    // be saved later, so the button stays.
+    expect(vi.mocked(invoke).mock.calls.find((c) => c[0] === "save_document_as")).toBeUndefined();
+    expect(screen.getByText("Save As…")).toBeTruthy();
   });
 
   it("warns before compressing a file that declares PDF/A and aborts if declined", async () => {
