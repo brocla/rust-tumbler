@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, act } from "@testing-library/react";
 import { invoke } from "@tauri-apps/api/core";
-import { save, message, ask } from "@tauri-apps/plugin-dialog";
+import { save, message, ask, confirm } from "@tauri-apps/plugin-dialog";
 import { Toolbar } from "./Toolbar";
 import { usePdfStore } from "../store/usePdfStore";
 import type { TabState } from "../store/usePdfStore";
@@ -11,6 +11,7 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
   save: vi.fn(),
   message: vi.fn(),
   ask: vi.fn(),
+  confirm: vi.fn(),
 }));
 
 function makeTab(overrides: Partial<TabState> = {}): TabState {
@@ -58,6 +59,13 @@ async function clickExport() {
 async function clickMakeSearchable() {
   await act(async () => {
     fireEvent.click(screen.getByTitle("OCR - Make Text Searchable"));
+    await new Promise((r) => setTimeout(r, 0));
+  });
+}
+
+async function clickSaveSearchable() {
+  await act(async () => {
+    fireEvent.click(screen.getByTitle("Save Searchable Copy..."));
     await new Promise((r) => setTimeout(r, 0));
   });
 }
@@ -182,5 +190,117 @@ describe("Toolbar make searchable", () => {
       expect.objectContaining({ title: "Make Searchable" }),
     );
     expect(usePdfStore.getState().tabs[0].ocrEpoch).toBe(0);
+  });
+});
+
+describe("Toolbar save searchable copy", () => {
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset();
+    vi.mocked(save).mockReset();
+    vi.mocked(message).mockReset();
+    vi.mocked(confirm).mockReset();
+    vi.mocked(message).mockResolvedValue(undefined as never);
+  });
+
+  it("saves a copy to the chosen path and reports pages OCR'd", async () => {
+    vi.mocked(save).mockResolvedValue("C:\\out (searchable).pdf");
+    vi.mocked(invoke).mockResolvedValue({
+      pagesWritten: 2,
+      pagesSkippedUnsupportedGeometry: 0,
+      cancelled: false,
+    });
+
+    renderToolbar();
+    await clickSaveSearchable();
+
+    expect(confirm).not.toHaveBeenCalled(); // unsigned document → no warning
+    expect(invoke).toHaveBeenCalledWith("save_searchable_copy", {
+      docId: "doc-1",
+      destPath: "C:\\out (searchable).pdf",
+    });
+    expect(message).toHaveBeenCalledWith(
+      expect.stringContaining("Saved a searchable copy (2 pages OCR'd)."),
+      expect.objectContaining({ title: "Save Searchable Copy" }),
+    );
+  });
+
+  it("reports rotated/offset pages that were left un-searchable", async () => {
+    vi.mocked(save).mockResolvedValue("C:\\out (searchable).pdf");
+    vi.mocked(invoke).mockResolvedValue({
+      pagesWritten: 2,
+      pagesSkippedUnsupportedGeometry: 1,
+      cancelled: false,
+    });
+
+    renderToolbar();
+    await clickSaveSearchable();
+
+    const [[text]] = vi.mocked(message).mock.calls;
+    expect(text).toContain("2 pages OCR'd");
+    expect(text).toContain("1 rotated or offset page couldn't be made searchable");
+  });
+
+  it("explains when every scanned page was skipped for geometry", async () => {
+    vi.mocked(save).mockResolvedValue("C:\\out (searchable).pdf");
+    vi.mocked(invoke).mockResolvedValue({
+      pagesWritten: 0,
+      pagesSkippedUnsupportedGeometry: 3,
+      cancelled: false,
+    });
+
+    renderToolbar();
+    await clickSaveSearchable();
+
+    expect(message).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "3 rotated or offset pages couldn't be made searchable",
+      ),
+      expect.objectContaining({ title: "Save Searchable Copy" }),
+    );
+  });
+
+  it("does not invoke the backend when the user cancels the save dialog", async () => {
+    vi.mocked(save).mockResolvedValue(null);
+
+    renderToolbar();
+    await clickSaveSearchable();
+
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("warns before saving a signed document and aborts if declined", async () => {
+    vi.mocked(save).mockResolvedValue("C:\\out (searchable).pdf");
+    vi.mocked(confirm).mockResolvedValue(false);
+    usePdfStore.setState({
+      tabs: [makeTab({ signatureStatus: "verified" })],
+      activeTabId: "tab-1",
+      ocrProgress: null,
+    });
+    render(<Toolbar onOpenFile={vi.fn()} onPrint={vi.fn()} />);
+
+    await clickSaveSearchable();
+
+    expect(confirm).toHaveBeenCalled();
+    expect(invoke).not.toHaveBeenCalledWith(
+      "save_searchable_copy",
+      expect.anything(),
+    );
+  });
+
+  it("reports when no OCR layer was needed", async () => {
+    vi.mocked(save).mockResolvedValue("C:\\out (searchable).pdf");
+    vi.mocked(invoke).mockResolvedValue({
+      pagesWritten: 0,
+      pagesSkippedUnsupportedGeometry: 0,
+      cancelled: false,
+    });
+
+    renderToolbar();
+    await clickSaveSearchable();
+
+    expect(message).toHaveBeenCalledWith(
+      expect.stringContaining("no OCR text layer was added"),
+      expect.objectContaining({ title: "Save Searchable Copy" }),
+    );
   });
 });

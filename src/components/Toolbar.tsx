@@ -1,13 +1,21 @@
-import { BookOpen, ChevronLeft, ChevronRight, Moon, MoveHorizontal, MoveVertical, Printer, ScanSearch, ScrollText, Sun, ZoomIn, ZoomOut } from "lucide-react";
+import { BookOpen, ChevronLeft, ChevronRight, FileSearch, Moon, MoveHorizontal, MoveVertical, Printer, ScanSearch, ScrollText, Sun, ZoomIn, ZoomOut } from "lucide-react";
 import { save, message, ask } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { usePdfStore } from "../store/usePdfStore";
 import type { DisplayMode } from "../store/usePdfStore";
 import { ZOOM_PRESETS } from "../utils/zoomConstants";
+import { confirmBreakingEdit } from "../utils/confirmBreakingEdit";
+import { isSigned, SIGNATURE_SAVE_COPY_WARNING } from "../utils/signature";
 
 interface TextExportResult {
   pages: number;
   ocrPages: number;
+  cancelled: boolean;
+}
+
+interface SaveSearchableResult {
+  pagesWritten: number;
+  pagesSkippedUnsupportedGeometry: number;
   cancelled: boolean;
 }
 
@@ -205,6 +213,63 @@ export function Toolbar({ onOpenFile, onPrint }: ToolbarProps) {
     }
   };
 
+  // "Save Searchable Copy…": write a NEW PDF whose scanned pages carry an
+  // invisible OCR text layer, searchable in any reader. The source is untouched.
+  const handleSaveSearchableCopy = async () => {
+    if (!activeTab) return;
+
+    const dir = activeTab.filePath.replace(/[\\/][^\\/]*$/, "");
+    const baseName = activeTab.fileName.replace(/\.pdf$/i, "");
+    const destPath = await save({
+      filters: [{ name: "PDF", extensions: ["pdf"] }],
+      defaultPath: `${dir}/${baseName} (searchable).pdf`,
+    });
+    if (!destPath) return;
+
+    // The added text layer means a signed document's copy won't verify. Warn
+    // first; the warning is overridable and the original file stays intact.
+    if (isSigned(activeTab.signatureStatus)) {
+      const proceed = await confirmBreakingEdit(SIGNATURE_SAVE_COPY_WARNING);
+      if (!proceed) return;
+    }
+
+    setOcrProgress({ page: 0, total: activeTab.pageCount });
+    try {
+      const result = await invoke<SaveSearchableResult>("save_searchable_copy", {
+        docId: activeTab.docId,
+        destPath,
+      });
+      const plural = (n: number) => (n === 1 ? "" : "s");
+      const written = result.pagesWritten;
+      const skipped = result.pagesSkippedUnsupportedGeometry;
+      // A "rotated or offset" clause describing the skipped pages, or "" when
+      // there were none. These pages were OCR'd but their geometry isn't yet
+      // supported, so they got no searchable layer — say so rather than hide it.
+      const skippedNote =
+        skipped > 0
+          ? `${skipped} rotated or offset page${plural(skipped)} couldn't be made searchable`
+          : "";
+
+      let text: string;
+      if (result.cancelled) {
+        text = `Cancelled after making ${written} page${plural(written)} searchable.`;
+      } else if (written > 0 && skipped > 0) {
+        text = `Saved a searchable copy (${written} page${plural(written)} OCR'd). ${skippedNote}.`;
+      } else if (written > 0) {
+        text = `Saved a searchable copy (${written} page${plural(written)} OCR'd).`;
+      } else if (skipped > 0) {
+        text = `Saved a copy, but ${skippedNote} (unsupported page geometry).`;
+      } else {
+        text = "Saved a copy (no OCR text layer was added).";
+      }
+      await message(text, { title: "Save Searchable Copy", kind: "info" });
+    } catch (err) {
+      await message(String(err), { title: "Save Searchable Copy", kind: "error" });
+    } finally {
+      setOcrProgress(null);
+    }
+  };
+
   return (
     <div className="toolbar">
       <div className="toolbar-group">
@@ -314,6 +379,13 @@ export function Toolbar({ onOpenFile, onPrint }: ToolbarProps) {
             title="OCR - Make Text Searchable"
           >
             <ScanSearch size={18} />
+          </button>
+          <button
+            className="toolbar-button"
+            onClick={handleSaveSearchableCopy}
+            title="Save Searchable Copy..."
+          >
+            <FileSearch size={18} />
           </button>
           <button
             className="toolbar-button"
