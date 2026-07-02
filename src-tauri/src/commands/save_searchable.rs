@@ -202,7 +202,12 @@ fn encode_for_font(text: &str) -> Vec<u8> {
 /// `fs = height / (ascent + descent)` the box height matches, and placing the
 /// baseline at `box_bottom + descent·fs` makes the box bottom sit on the OCR
 /// box bottom (the descent hangs down to exactly the box bottom, not below it).
-pub fn build_invisible_text_stream(words: &[OcrWord], font_name: &str) -> Vec<u8> {
+///
+/// Returns `Ok(vec![])` when no line has representable text (e.g. a pure-CJK
+/// page) — a legitimate "nothing to write". An encoding failure is returned as
+/// `Err` rather than collapsed into an empty stream, so the caller can't mistake
+/// a real error for an empty page and silently drop the layer.
+pub fn build_invisible_text_stream(words: &[OcrWord], font_name: &str) -> Result<Vec<u8>, AppError> {
     let mut ops: Vec<Operation> = Vec::new();
     for line in ocr_words_to_lines(words) {
         let encoded = encode_for_font(&line.text);
@@ -231,7 +236,9 @@ pub fn build_invisible_text_stream(words: &[OcrWord], font_name: &str) -> Vec<u8
         ));
         ops.push(Operation::new("ET", vec![]));
     }
-    Content { operations: ops }.encode().unwrap_or_default()
+    Content { operations: ops }
+        .encode()
+        .map_err(|e| AppError::lopdf("Failed to encode OCR text content", e))
 }
 
 // ── Page geometry ───────────────────────────────────────────────────────────
@@ -471,9 +478,9 @@ fn save_searchable_copy_impl(
                 continue;
             }
 
-            let stream_bytes = build_invisible_text_stream(&words, FONT_NAME);
+            let stream_bytes = build_invisible_text_stream(&words, FONT_NAME)?;
             if stream_bytes.is_empty() {
-                continue; // no representable text recognized for this page
+                continue; // genuinely no representable text — not an error
             }
 
             let fid = *font_id.get_or_insert_with(|| {
@@ -684,7 +691,8 @@ mod tests {
 
     #[test]
     fn builds_invisible_text_ops() {
-        let bytes = build_invisible_text_stream(&[pt_word("Hello", 10.0, 100.0, 60.0, 12.0)], FONT_NAME);
+        let bytes = build_invisible_text_stream(&[pt_word("Hello", 10.0, 100.0, 60.0, 12.0)], FONT_NAME)
+            .expect("encode");
         let s = String::from_utf8_lossy(&bytes);
         assert!(s.contains("3 Tr"), "missing invisible render mode: {s}");
         assert!(s.contains("BT") && s.contains("ET"), "missing BT/ET: {s}");
@@ -694,7 +702,7 @@ mod tests {
 
     #[test]
     fn empty_words_produce_empty_stream() {
-        assert!(build_invisible_text_stream(&[], FONT_NAME).is_empty());
+        assert!(build_invisible_text_stream(&[], FONT_NAME).expect("encode").is_empty());
     }
 
     /// Words sharing a baseline become a single continuous line run (one BT…ET,
@@ -706,7 +714,7 @@ mod tests {
             pt_word("Hello", 10.0, 100.0, 30.0, 12.0),
             pt_word("World", 50.0, 100.0, 30.0, 12.0),
         ];
-        let bytes = build_invisible_text_stream(&words, FONT_NAME);
+        let bytes = build_invisible_text_stream(&words, FONT_NAME).expect("encode");
         let content = Content::decode(&bytes).expect("decode content");
         let runs = content
             .operations
@@ -721,7 +729,8 @@ mod tests {
     #[test]
     fn unrepresentable_only_word_is_skipped() {
         // A pure-CJK token has no WinAnsi bytes, so it contributes nothing.
-        let bytes = build_invisible_text_stream(&[pt_word("日本語", 0.0, 0.0, 30.0, 10.0)], FONT_NAME);
+        let bytes = build_invisible_text_stream(&[pt_word("日本語", 0.0, 0.0, 30.0, 10.0)], FONT_NAME)
+            .expect("encode");
         assert!(bytes.is_empty(), "CJK-only word should be dropped under WinAnsi");
     }
 
