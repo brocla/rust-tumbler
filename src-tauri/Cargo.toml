@@ -31,6 +31,9 @@ image = { version = "0.25", default-features = false, features = ["jpeg"] }
 # zlib inflate for the FlateDecode raw-raster path (decompressed_content()
 # deliberately refuses Image XObjects, so we inflate those ourselves).
 flate2 = "1"
+# std::fs::canonicalize returns \\?\-prefixed paths on Windows; dunce strips
+# the prefix when the plain path is equivalent (see canonicalize_path).
+dunce = "1"
 
 # Pin time to avoid blanket impl conflict with cookie 0.18
 time = "=0.3.41"

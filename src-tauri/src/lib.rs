@@ -43,6 +43,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::document::open_document,
             commands::document::close_document,
+            commands::document::canonicalize_path,
             commands::render::render_page,
             commands::text::extract_page_text,
             commands::text::search_document,

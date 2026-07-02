@@ -48,15 +48,31 @@ function App() {
 
   // Open a PDF by path in a new tab. Used by the file picker, the startup
   // file-association path, and "open-file" events from a second instance.
+  // A file may only be open in one tab at a time: if the path (after
+  // canonicalization, so case/slashes/`..` spellings can't slip through)
+  // matches an existing tab, that tab is focused instead. Every open entry
+  // point must funnel through this function to keep that invariant.
   const openDocumentByPath = async (path: string) => {
     try {
-      const info = await invoke<DocInfo>("open_document", { path });
+      // Canonicalization only fails for paths that don't resolve (missing
+      // file, permissions); fall back to the raw path and let open_document
+      // report the real error rather than blocking here.
+      const canonical = await invoke<string>("canonicalize_path", { path }).catch(() => path);
+
+      const store = usePdfStore.getState();
+      const existing = store.tabs.find((t) => t.filePath === canonical);
+      if (existing) {
+        store.setActiveTab(existing.id);
+        return;
+      }
+
+      const info = await invoke<DocInfo>("open_document", { path: canonical });
       const tabId = crypto.randomUUID();
       addTab({
         id: tabId,
         docId: info.docId,
-        fileName: path.split(/[\\/]/).pop() ?? "Untitled",
-        filePath: path,
+        fileName: canonical.split(/[\\/]/).pop() ?? "Untitled",
+        filePath: canonical,
         pageCount: info.pageCount,
         pageDimensions: info.pageDimensions,
         currentPage: 1,

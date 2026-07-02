@@ -58,6 +58,21 @@ fn open_document_impl(state: &AppState, path: String) -> Result<DocInfo, AppErro
     })
 }
 
+/// Resolves a path to its canonical form (absolute, symlinks resolved,
+/// Windows case/8.3 normalized) so the frontend can compare paths for the
+/// single-instance-per-file guard. `dunce` avoids the `\\?\` extended-length
+/// prefix that `std::fs::canonicalize` produces on Windows.
+#[tauri::command]
+pub fn canonicalize_path(path: String) -> Result<String, String> {
+    canonicalize_path_impl(&path).map_err(String::from)
+}
+
+fn canonicalize_path_impl(path: &str) -> Result<String, AppError> {
+    let canonical = dunce::canonicalize(path)
+        .map_err(|e| AppError::io(format!("Failed to canonicalize path {path:?}"), e))?;
+    Ok(canonical.to_string_lossy().into_owned())
+}
+
 #[tauri::command]
 pub fn close_document(state: State<'_, AppState>, doc_id: String) -> Result<(), String> {
     state.clear_ocr_cache_for_doc(&doc_id);
@@ -86,6 +101,39 @@ mod tests {
         assert!(!info.doc_id.is_empty());
 
         assert!(state.get_document(&info.doc_id).is_ok());
+    }
+
+    /// The same file expressed with different case and an inserted `..`
+    /// segment must canonicalize to the identical string, and the result
+    /// must be a plain `C:\...` path (no `\\?\` extended-length prefix),
+    /// since it is stored on tabs and shown in the UI.
+    #[test]
+    fn canonicalize_path_unifies_spellings_without_unc_prefix() {
+        let src = crate::fixture_path();
+        let direct = canonicalize_path_impl(&src.to_string_lossy()).expect("canonicalize");
+
+        // Different case (Windows paths are case-insensitive).
+        let upper = src.to_string_lossy().to_uppercase();
+        let via_upper = canonicalize_path_impl(&upper).expect("canonicalize uppercase");
+        assert_eq!(direct, via_upper);
+
+        // A redundant `dir\..\dir` segment.
+        let parent = src.parent().unwrap();
+        let dir_name = parent.file_name().unwrap();
+        let dotted = parent
+            .join("..")
+            .join(dir_name)
+            .join(src.file_name().unwrap());
+        let via_dotted = canonicalize_path_impl(&dotted.to_string_lossy()).expect("canonicalize ..");
+        assert_eq!(direct, via_dotted);
+
+        assert!(!direct.starts_with(r"\\?\"), "unexpected UNC prefix: {direct}");
+    }
+
+    #[test]
+    fn canonicalize_path_for_missing_file_is_error() {
+        let missing = std::env::temp_dir().join("tumbler_does_not_exist.pdf");
+        assert!(canonicalize_path_impl(&missing.to_string_lossy()).is_err());
     }
 
     #[test]
