@@ -67,11 +67,22 @@ async fn print_document_impl(
     state: &AppState,
     doc_id: String,
 ) -> Result<PrintResult, AppError> {
-    // Look up the file path for this document
-    let file_path = {
+    // The GDI print path loads its own pdfium from a file path on the STA
+    // thread, so a dirty document (unsaved buffer edits, issue #31) is handed
+    // off via a temp file holding the buffer; a clean document prints straight
+    // from its file. The temp file is removed after the print thread finishes.
+    let (file_path, temp_handoff) = {
         let entry = state.get_document(&doc_id)?;
         let entry = lock_mutex(&entry)?;
-        entry.file_path.clone()
+        if entry.dirty {
+            let tmp = std::env::temp_dir()
+                .join(format!("tumbler-print-{}.pdf", uuid::Uuid::new_v4()));
+            std::fs::write(&tmp, &entry.buffer)
+                .map_err(|e| AppError::io("Failed to write print copy", e))?;
+            (tmp.to_string_lossy().into_owned(), Some(tmp))
+        } else {
+            (entry.file_path.clone(), None)
+        }
     };
 
     // Resolve pdfium.dll path (same logic as lib.rs)
@@ -91,6 +102,11 @@ async fn print_document_impl(
 
     let result = rx.recv().map_err(|e| AppError::Other(format!("channel recv failed: {e}")));
     state.take_print_job();
+    // The print thread has exited (recv returned), so its pdfium instance has
+    // closed the document and the temp copy can be removed.
+    if let Some(tmp) = temp_handoff {
+        let _ = std::fs::remove_file(tmp);
+    }
     result?
 }
 

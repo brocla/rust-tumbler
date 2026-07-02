@@ -63,10 +63,10 @@ fn read_meta_tag(meta: &PdfMetadata, tag: PdfDocumentMetadataTagType) -> String 
 }
 
 /// Writes Title, Author, Subject, Keywords, and Creator into the document's
-/// info dictionary via lopdf, then reloads every open tab pointing at this
-/// file so all in-memory pdfium handles reflect the saved bytes. Emits
-/// `document-metadata-changed` with the reloaded doc_ids so other tabs can
-/// refresh their displayed metadata.
+/// info dictionary via lopdf — as an in-memory buffer edit (issue #31), so
+/// nothing touches the file until the user saves. Emits
+/// `document-metadata-changed` with the edited doc_id so any open metadata
+/// panel refreshes, and `document-dirty-changed` for the Save UX.
 #[tauri::command]
 pub fn set_metadata(
     app: tauri::AppHandle,
@@ -74,9 +74,12 @@ pub fn set_metadata(
     doc_id: String,
     metadata: MetadataUpdate,
 ) -> Result<DocumentMetadata, String> {
-    let (result, reloaded_ids) =
-        set_metadata_impl(&state, doc_id, metadata).map_err(String::from)?;
-    let _ = app.emit("document-metadata-changed", &reloaded_ids);
+    let result = set_metadata_impl(&state, doc_id.clone(), metadata).map_err(String::from)?;
+    let _ = app.emit("document-metadata-changed", vec![doc_id.clone()]);
+    let _ = app.emit(
+        "document-dirty-changed",
+        crate::commands::save::DirtyChangedPayload { doc_id, dirty: true },
+    );
     Ok(result)
 }
 
@@ -84,30 +87,26 @@ fn set_metadata_impl(
     state: &AppState,
     doc_id: String,
     metadata: MetadataUpdate,
-) -> Result<(DocumentMetadata, Vec<String>), AppError> {
+) -> Result<DocumentMetadata, AppError> {
     let entry = state.get_document(&doc_id)?;
-    let (file_path, producer, creation_date, mod_date) = {
+    let (buffer, producer, creation_date, mod_date) = {
         let entry = lock_mutex(&entry)?;
         let meta = entry.document.metadata();
         (
-            entry.file_path.clone(),
+            entry.buffer.clone(),
             read_meta_tag(&meta, PdfDocumentMetadataTagType::Producer),
             read_meta_tag(&meta, PdfDocumentMetadataTagType::CreationDate),
             read_meta_tag(&meta, PdfDocumentMetadataTagType::ModificationDate),
         )
     };
 
-    write_metadata(&file_path, &metadata)?;
-
-    let reloaded_ids = state.reload_documents_with_path(&file_path)?;
+    let edited = write_metadata(&buffer, &metadata)?;
+    state.set_buffer_and_refresh(&doc_id, edited)?;
 
     // `write_metadata` only touches Title/Author/Subject/Keywords/Creator, so
     // the result can be built from the values just written plus the
-    // producer/dates read above. This avoids re-fetching `doc_id` from
-    // `state` here, which would otherwise report a misleading failure if this
-    // tab's document was closed during the save even though the write to
-    // disk (and the reload of any other tabs sharing the file) succeeded.
-    let result = DocumentMetadata {
+    // producer/dates read above.
+    Ok(DocumentMetadata {
         title: metadata.title,
         author: metadata.author,
         subject: metadata.subject,
@@ -116,16 +115,14 @@ fn set_metadata_impl(
         producer,
         creation_date,
         mod_date,
-    };
-
-    Ok((result, reloaded_ids))
+    })
 }
 
 /// Writes Title, Author, Subject, Keywords, and Creator into the info
-/// dictionary of the PDF at `file_path`, in place, via lopdf.
-fn write_metadata(file_path: &str, metadata: &MetadataUpdate) -> Result<(), AppError> {
-    let mut lopdf_doc = lopdf::Document::load(file_path)
-        .map_err(|e| AppError::lopdf("Failed to open PDF for metadata update", e))?;
+/// dictionary of the PDF given as `bytes`, returning the edited bytes.
+fn write_metadata(bytes: &[u8], metadata: &MetadataUpdate) -> Result<Vec<u8>, AppError> {
+    let mut lopdf_doc = lopdf::Document::load_mem(bytes)
+        .map_err(|e| AppError::lopdf("Failed to parse PDF for metadata update", e))?;
 
     let info_id = lopdf_doc
         .trailer
@@ -154,22 +151,11 @@ fn write_metadata(file_path: &str, metadata: &MetadataUpdate) -> Result<(), AppE
         }
     }
 
-    // Save to a temporary file in the same directory, then atomically replace
-    // the original. This avoids corrupting/truncating the user's PDF if the
-    // save is interrupted partway through.
-    let tmp_path = format!("{file_path}.tmp-{}", uuid::Uuid::new_v4());
-
-    if let Err(e) = lopdf_doc.save(&tmp_path) {
-        let _ = std::fs::remove_file(&tmp_path);
-        return Err(AppError::io("Failed to save PDF", e));
-    }
-
-    std::fs::rename(&tmp_path, file_path).map_err(|e| {
-        let _ = std::fs::remove_file(&tmp_path);
-        AppError::io("Failed to replace PDF with updated copy", e)
-    })?;
-
-    Ok(())
+    let mut out = Vec::new();
+    lopdf_doc
+        .save_to(&mut out)
+        .map_err(|e| AppError::io("Failed to serialize PDF after metadata update", e))?;
+    Ok(out)
 }
 
 /// Encodes a string as a PDF text string: PDFDocEncoding-compatible literal
@@ -192,14 +178,11 @@ mod tests {
     use super::*;
     use crate::state::DocEntry;
 
-    /// Writes new metadata into a real PDF via lopdf, then confirms pdfium
-    /// can still open the saved file and reads back the new values.
+    /// Writes new metadata into a real PDF's bytes via lopdf, then confirms
+    /// pdfium can still open the edited bytes and reads back the new values.
     #[test]
     fn write_metadata_round_trip_with_pdfium() {
-        let src = crate::fixture_path();
-
-        let tmp = std::env::temp_dir().join("tumbler_metadata_test.pdf");
-        std::fs::copy(&src, &tmp).expect("copy fixture");
+        let bytes = std::fs::read(crate::fixture_path()).expect("read fixture");
 
         let update = MetadataUpdate {
             title: "Test Title".to_string(),
@@ -209,11 +192,11 @@ mod tests {
             creator: "Tumbler".to_string(),
         };
 
-        write_metadata(tmp.to_str().unwrap(), &update).expect("write_metadata");
+        let edited = write_metadata(&bytes, &update).expect("write_metadata");
 
         let pdfium = crate::test_pdfium();
         let doc = pdfium
-            .load_pdf_from_file(tmp.to_str().unwrap(), None)
+            .load_pdf_from_byte_vec(edited, None)
             .expect("pdfium reload");
         let meta = doc.metadata();
 
@@ -222,17 +205,13 @@ mod tests {
         assert_eq!(read_meta_tag(&meta, PdfDocumentMetadataTagType::Subject), "Test Subject");
         assert_eq!(read_meta_tag(&meta, PdfDocumentMetadataTagType::Keywords), "alpha, beta");
         assert_eq!(read_meta_tag(&meta, PdfDocumentMetadataTagType::Creator), "Tumbler");
-
-        drop(doc);
-        std::fs::remove_file(&tmp).ok();
     }
 
     /// `set_metadata_impl` builds its returned `DocumentMetadata` from the
-    /// values just written plus the producer/dates read before the write,
-    /// without re-fetching `doc_id` from `state` afterward. Confirms the
-    /// returned result has the new editable fields and unchanged read-only
-    /// fields, the document is reloaded in place (still reachable via the
-    /// original `doc_id`), and `reloaded_ids` includes it.
+    /// values just written plus the producer/dates read before the write.
+    /// Confirms the returned result has the new editable fields and unchanged
+    /// read-only fields, the edit lands in the buffer (dirty, pdfium view
+    /// refreshed) and the file on disk stays untouched until an explicit save.
     #[test]
     fn set_metadata_returns_new_values_and_reloads_document_in_place() {
         let src = crate::fixture_path();
@@ -274,7 +253,8 @@ mod tests {
             creator: "Tumbler".to_string(),
         };
 
-        let (result, reloaded_ids) = set_metadata_impl(&state, "doc-1".to_string(), update)
+        let disk_before = std::fs::read(&tmp).expect("read disk");
+        let result = set_metadata_impl(&state, "doc-1".to_string(), update)
             .expect("set_metadata_impl");
 
         assert_eq!(result.title, "New Title");
@@ -286,14 +266,19 @@ mod tests {
         assert_eq!(result.creation_date, original_creation_date);
         assert_eq!(result.mod_date, original_mod_date);
 
-        assert_eq!(reloaded_ids, vec!["doc-1".to_string()]);
-
-        // doc-1 is still reachable and was reloaded in place to reflect the save.
+        // The edit lands in the buffer: the pdfium view reflects it, the doc is
+        // dirty, and the file on disk is byte-identical.
         let entry = state.get_document("doc-1").expect("get doc-1");
         let entry = lock_mutex(&entry).expect("lock doc-1");
         let meta = entry.document.metadata();
         assert_eq!(read_meta_tag(&meta, PdfDocumentMetadataTagType::Title), "New Title");
+        assert!(entry.dirty, "metadata edit is a buffer edit, so the doc must be dirty");
         drop(entry);
+        assert_eq!(
+            std::fs::read(&tmp).expect("read disk"),
+            disk_before,
+            "metadata edit must not touch the file until an explicit save"
+        );
 
         std::fs::remove_file(&tmp).ok();
     }

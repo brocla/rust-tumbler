@@ -25,11 +25,13 @@ export async function saveTab(tab: TabState): Promise<boolean> {
 /**
  * Prompts for a destination and writes the buffer there; the tab is retargeted
  * to the new path. Returns false if the user cancelled the dialog.
+ * `defaultPath` overrides the dialog's suggested name (e.g. the Optimize
+ * panel suggests "<name>-compressed.pdf"); it defaults to the tab's own path.
  */
-export async function saveTabAs(tab: TabState): Promise<boolean> {
+export async function saveTabAs(tab: TabState, defaultPath?: string): Promise<boolean> {
   const destPath = await save({
     filters: [{ name: "PDF", extensions: ["pdf"] }],
-    defaultPath: tab.filePath,
+    defaultPath: defaultPath ?? tab.filePath,
   });
   if (!destPath) return false;
 

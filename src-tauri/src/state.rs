@@ -57,11 +57,6 @@ pub struct AppState {
     /// pages without re-running recognition. Shared (`Arc`) so the blocking
     /// export task can hold a handle without borrowing `AppState`.
     ocr_cache: OcrCache,
-    /// Optimized PDF bytes staged by `run_optimization_steps`, awaiting an
-    /// explicit "Save As..." (`save_optimized_copy`). Keyed by `doc_id`; the
-    /// entry is cleared on save and when the document is closed. Nothing here
-    /// touches the on-disk file until the user saves.
-    pending_optimized: Mutex<HashMap<String, Vec<u8>>>,
 }
 
 impl AppState {
@@ -75,7 +70,6 @@ impl AppState {
             compress_job: Mutex::new(None),
             ocr_engine: Arc::new(WindowsOcrEngine::new()),
             ocr_cache: Arc::new(Mutex::new(HashMap::new())),
-            pending_optimized: Mutex::new(HashMap::new()),
         }
     }
 
@@ -165,30 +159,7 @@ impl AppState {
 
     pub fn remove_document(&self, doc_id: &str) -> Result<(), AppError> {
         lock_mutex(&self.documents)?.remove(doc_id);
-        // Staged optimization output shouldn't outlive the document it belongs
-        // to.
-        self.clear_pending_optimized(doc_id);
         Ok(())
-    }
-
-    /// Stages optimized PDF bytes for `doc_id`, awaiting `save_optimized_copy`.
-    /// Replaces any previously staged output for that document.
-    pub fn set_pending_optimized(&self, doc_id: String, bytes: Vec<u8>) {
-        if let Ok(mut pending) = self.pending_optimized.lock() {
-            pending.insert(doc_id, bytes);
-        }
-    }
-
-    /// A clone of the staged optimized bytes for `doc_id`, if any. Cloning lets
-    /// the caller write to disk and only clear the entry on success.
-    pub fn get_pending_optimized(&self, doc_id: &str) -> Option<Vec<u8>> {
-        self.pending_optimized.lock().ok()?.get(doc_id).cloned()
-    }
-
-    pub fn clear_pending_optimized(&self, doc_id: &str) {
-        if let Ok(mut pending) = self.pending_optimized.lock() {
-            pending.remove(doc_id);
-        }
     }
 
     pub fn set_print_job(&self, token: Arc<AtomicBool>) {
@@ -210,8 +181,11 @@ impl AppState {
     }
 
     /// Reloads every open document whose file matches `file_path` from disk.
-    /// Used after an in-place edit (e.g. metadata) so other tabs viewing the
-    /// same file pick up the change. Returns the doc_ids that were reloaded.
+    ///
+    /// No production callers remain after issue #31 Phase 2 (all edits are
+    /// buffer-based now); kept until Phase 3 decides whether external-change
+    /// detection wants it. Returns the doc_ids that were reloaded.
+    #[allow(dead_code)]
     pub fn reload_documents_with_path(&self, file_path: &str) -> Result<Vec<String>, AppError> {
         let matches: Vec<(String, Arc<Mutex<DocEntry>>)> = {
             let docs = lock_mutex(&self.documents)?;

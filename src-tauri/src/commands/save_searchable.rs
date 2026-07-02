@@ -406,9 +406,11 @@ fn save_searchable_copy_impl(
     cache: OcrCache,
     cancel: Arc<AtomicBool>,
 ) -> Result<SaveSearchableResult, AppError> {
-    let (file_path, page_count) = {
+    // The buffer is the authoritative bytes (it carries any unsaved edits), so
+    // the searchable copy is built from it, not from the file on disk.
+    let (source_bytes, page_count) = {
         let entry = lock_mutex(&entry)?;
-        (entry.file_path.clone(), entry.document.pages().len() as u32)
+        (entry.buffer.clone(), entry.document.pages().len() as u32)
     };
 
     // Phase A (pdfium): ensure every text-less page is OCR'd into the cache, and
@@ -447,16 +449,16 @@ fn save_searchable_copy_impl(
         }
     }
 
-    // Phase B (lopdf): author the invisible text into a fresh copy read from
-    // disk. pdfium's handle is never used for writing. Only parse/rewrite the
-    // PDF when at least one page actually needs a layer — see the write step.
+    // Phase B (lopdf): author the invisible text into a fresh copy parsed from
+    // the buffer. pdfium's handle is never used for writing. Only parse/rewrite
+    // the PDF when at least one page actually needs a layer — see the write step.
     let mut pages_written = 0u32;
     let mut pages_skipped_unsupported_geometry = 0u32;
     let mut doc: Option<Document> = None;
 
     if !textless_pages.is_empty() {
-        let mut d = Document::load(&file_path)
-            .map_err(|e| AppError::lopdf("Failed to open PDF for searchable copy", e))?;
+        let mut d = Document::load_mem(&source_bytes)
+            .map_err(|e| AppError::lopdf("Failed to parse PDF for searchable copy", e))?;
         let pages = d.get_pages();
         // Add the shared font object lazily — only when a page first needs it.
         let mut font_id: Option<ObjectId> = None;
@@ -524,7 +526,7 @@ fn save_searchable_copy_impl(
 
     // Write to a temp file in the destination dir, then atomic rename, so a
     // crash or disk-full can't leave a truncated file at dest_path. When we
-    // authored a layer, serialize the modified document; otherwise copy the
+    // authored a layer, serialize the modified document; otherwise write the
     // source bytes verbatim — an unchanged copy should be byte-identical, since
     // lopdf re-serialization would reorder objects and could drop structures it
     // doesn't model.
@@ -534,8 +536,7 @@ fn save_searchable_copy_impl(
             .save(&tmp_path)
             .map(|_| ())
             .map_err(|e| AppError::io("Failed to save searchable copy", e)),
-        _ => std::fs::copy(&file_path, &tmp_path)
-            .map(|_| ())
+        _ => std::fs::write(&tmp_path, &source_bytes)
             .map_err(|e| AppError::io("Failed to copy source PDF", e)),
     };
     if let Err(e) = write_result {

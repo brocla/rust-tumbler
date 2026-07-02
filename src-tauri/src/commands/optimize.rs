@@ -2,15 +2,11 @@
 //!
 //! Each optimization is a small, individually-runnable transform on an
 //! in-memory `lopdf::Document`. `run_optimization_steps` applies the chosen
-//! steps in order, reporting the serialized size before and after each one, and
-//! stages the result in `AppState` so the user can write it out via
-//! `save_optimized_copy` ("Save As..."). Nothing touches the on-disk file until
-//! that explicit save — important because the image step (added later) is lossy.
-//!
-//! This first cut covers the four lopdf-only steps (recompress streams, prune
-//! unused objects, delete zero-length streams, strip non-essential extras).
-//! Image downsampling/recompression (`RecompressImages`) lands in a later
-//! commit and is a no-op here.
+//! steps in order, reporting the serialized size before and after each one,
+//! and applies the result to the document's in-memory buffer (issue #31): the
+//! document becomes dirty and the viewer shows the optimized output — a live
+//! preview, important because the image step is lossy. Nothing touches the
+//! on-disk file until the user does an ordinary Save / Save As.
 
 use crate::error::AppError;
 use crate::state::{lock_mutex, AppState};
@@ -559,6 +555,7 @@ fn serialized_size(doc: &Document) -> u64 {
 
 #[tauri::command]
 pub async fn run_optimization_steps(
+    app: tauri::AppHandle,
     window: WebviewWindow,
     state: State<'_, AppState>,
     doc_id: String,
@@ -566,14 +563,13 @@ pub async fn run_optimization_steps(
     target_dpi: f32,
     jpeg_quality: u8,
 ) -> Result<OptimizationReport, String> {
-    // The file on disk is the source of truth (in-place edits like page ops and
-    // metadata already write through to it); load from there rather than the
-    // pdfium handle. Resolve the path before the blocking work so the closure
-    // captures only owned, `Send` data.
-    let file_path = {
+    // The buffer is the authoritative bytes (it carries any unsaved edits).
+    // Clone it before the blocking work so the closure captures only owned,
+    // `Send` data.
+    let pdf_bytes = {
         let entry = state.get_document(&doc_id).map_err(String::from)?;
         let entry = lock_mutex(&entry).map_err(String::from)?;
-        entry.file_path.clone()
+        entry.buffer.clone()
     };
 
     let cancel = Arc::new(AtomicBool::new(false));
@@ -586,7 +582,7 @@ pub async fn run_optimization_steps(
     // The work is CPU-bound (image decode/resize/re-encode), so run it off the
     // async runtime to keep the app responsive and let progress events flow.
     let outcome = tauri::async_runtime::spawn_blocking(move || {
-        run_optimization_steps_impl(&emit, &file_path, steps, target_dpi, jpeg_quality, &cancel)
+        run_optimization_steps_impl(&emit, &pdf_bytes, steps, target_dpi, jpeg_quality, &cancel)
     })
     .await
     .map_err(|e| e.to_string());
@@ -594,30 +590,39 @@ pub async fn run_optimization_steps(
     state.take_compress_job();
 
     let (report, output) = outcome?.map_err(String::from)?;
-    // Only stage output for a completed run; a cancelled run leaves nothing to
-    // save.
+    // A completed run becomes the document's buffer — dirty until the user
+    // saves. A cancelled run applies nothing.
     if let Some(bytes) = output {
-        state.set_pending_optimized(doc_id, bytes);
+        state
+            .set_buffer_and_refresh(&doc_id, bytes)
+            .map_err(String::from)?;
+        let info = {
+            let entry = state.get_document(&doc_id).map_err(String::from)?;
+            let entry = lock_mutex(&entry).map_err(String::from)?;
+            crate::commands::pages::page_info_from_doc(&entry.document).map_err(String::from)?
+        };
+        // Compression rewrites page content (image downsampling), so the
+        // frontend must evict its render caches and re-render — the same
+        // signal a page edit sends.
+        crate::commands::pages::emit_pages_edited(&app, doc_id, &info);
     }
     Ok(report)
 }
 
-/// Runs the pipeline against the file at `file_path`, reporting progress via
-/// `emit` and bailing out when `cancel` is set. Returns the report plus the
-/// serialized output bytes to stage (`None` if cancelled). Pure with respect to
-/// `AppState` so it can run inside `spawn_blocking`.
+/// Runs the pipeline against `pdf_bytes`, reporting progress via `emit` and
+/// bailing out when `cancel` is set. Returns the report plus the serialized
+/// output bytes (`None` if cancelled). Pure with respect to `AppState` so it
+/// can run inside `spawn_blocking`.
 #[allow(clippy::type_complexity)]
 fn run_optimization_steps_impl(
     emit: &dyn Fn(CompressProgress),
-    file_path: &str,
+    pdf_bytes: &[u8],
     steps: Vec<StepId>,
     target_dpi: f32,
     jpeg_quality: u8,
     cancel: &AtomicBool,
 ) -> Result<(OptimizationReport, Option<Vec<u8>>), AppError> {
-    let pdf_bytes =
-        std::fs::read(file_path).map_err(|e| AppError::io("Failed to read PDF for optimization", e))?;
-    let mut doc = Document::load_mem(&pdf_bytes)
+    let mut doc = Document::load_mem(pdf_bytes)
         .map_err(|e| AppError::lopdf("Failed to parse PDF for optimization", e))?;
 
     let step_count = steps.len() as u32;
@@ -700,41 +705,6 @@ fn run_optimization_steps_impl(
 #[tauri::command]
 pub fn cancel_compress(state: State<'_, AppState>) {
     state.cancel_compress_job();
-}
-
-#[tauri::command]
-pub fn save_optimized_copy(
-    state: State<'_, AppState>,
-    doc_id: String,
-    dest_path: String,
-) -> Result<(), String> {
-    save_optimized_copy_impl(&state, doc_id, dest_path).map_err(String::from)
-}
-
-fn save_optimized_copy_impl(
-    state: &AppState,
-    doc_id: String,
-    dest_path: String,
-) -> Result<(), AppError> {
-    let bytes = state.get_pending_optimized(&doc_id).ok_or_else(|| {
-        AppError::Other("No optimized output to save — run optimization first.".to_string())
-    })?;
-
-    // Write to a temp file in the destination directory, then atomically
-    // replace, so an interrupted write can't truncate an existing file at
-    // `dest_path`. Mirrors the save pattern in `metadata.rs`.
-    let tmp_path = format!("{dest_path}.tmp-{}", uuid::Uuid::new_v4());
-    if let Err(e) = std::fs::write(&tmp_path, &bytes) {
-        let _ = std::fs::remove_file(&tmp_path);
-        return Err(AppError::io("Failed to write optimized PDF", e));
-    }
-    std::fs::rename(&tmp_path, &dest_path).map_err(|e| {
-        let _ = std::fs::remove_file(&tmp_path);
-        AppError::io("Failed to save optimized PDF", e)
-    })?;
-
-    state.clear_pending_optimized(&doc_id);
-    Ok(())
 }
 
 #[cfg(test)]
@@ -907,15 +877,12 @@ mod tests {
         assert!(page.get(b"Thumb").is_err(), "Thumb should be removed");
     }
 
-    /// The pipeline records one result per requested step, stages a valid
-    /// output for Save As, and clears the staged bytes once saved (so a second
-    /// save with nothing pending errors).
+    /// The pipeline records one result per requested step and returns output
+    /// bytes that are still valid PDF and loadable by both lopdf and pdfium
+    /// (the command applies them to the buffer via `set_buffer_and_refresh`).
     #[test]
-    fn pipeline_records_steps_and_returns_stageable_output() {
-        let src = crate::fixture_path();
-        let tmp = std::env::temp_dir().join("tumbler_optimize_in.pdf");
-        std::fs::copy(&src, &tmp).expect("copy fixture");
-        let file_path = tmp.to_string_lossy().into_owned();
+    fn pipeline_records_steps_and_returns_valid_output() {
+        let pdf_bytes = std::fs::read(crate::fixture_path()).expect("read fixture");
 
         let steps = vec![
             StepId::RecompressStreams,
@@ -925,7 +892,7 @@ mod tests {
         ];
         let cancel = AtomicBool::new(false);
         let (report, output) =
-            run_optimization_steps_impl(&|_p| {}, &file_path, steps, 150.0, 80, &cancel)
+            run_optimization_steps_impl(&|_p| {}, &pdf_bytes, steps, 150.0, 80, &cancel)
                 .expect("run optimization");
 
         assert_eq!(report.results.len(), 4);
@@ -933,48 +900,28 @@ mod tests {
         assert!(!report.cancelled);
         assert_eq!(report.results[0].step, StepId::RecompressStreams);
 
-        // Stage as the command would, then exercise Save As.
+        let out_bytes = output.expect("output bytes");
+        Document::load_mem(&out_bytes).expect("optimized output should be valid PDF");
         let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None);
-        state.set_pending_optimized("doc-1".to_string(), output.expect("output bytes"));
-
-        let dest = std::env::temp_dir().join("tumbler_optimize_out.pdf");
-        let dest_path = dest.to_string_lossy().into_owned();
-        save_optimized_copy_impl(&state, "doc-1".to_string(), dest_path.clone())
-            .expect("save optimized copy");
-
-        let out_bytes = std::fs::read(&dest).expect("read saved output");
-        Document::load_mem(&out_bytes).expect("saved output should be valid PDF");
-
-        // Pending bytes were cleared by the successful save.
-        assert!(
-            save_optimized_copy_impl(&state, "doc-1".to_string(), dest_path).is_err(),
-            "second save should fail with nothing pending"
-        );
-
-        std::fs::remove_file(&tmp).ok();
-        std::fs::remove_file(&dest).ok();
+        pdfium
+            .load_pdf_from_byte_vec(out_bytes, None)
+            .expect("pdfium should load the optimized output");
     }
 
-    /// A pre-cancelled run produces a cancelled report and no stageable output.
+    /// A pre-cancelled run produces a cancelled report and no output to apply.
     #[test]
-    fn pipeline_reports_cancellation_and_stages_nothing() {
-        let src = crate::fixture_path();
-        let tmp = std::env::temp_dir().join("tumbler_optimize_cancel.pdf");
-        std::fs::copy(&src, &tmp).expect("copy fixture");
-        let file_path = tmp.to_string_lossy().into_owned();
+    fn pipeline_reports_cancellation_and_returns_no_output() {
+        let pdf_bytes = std::fs::read(crate::fixture_path()).expect("read fixture");
 
         let steps = vec![StepId::RecompressStreams, StepId::StripExtras];
         let cancel = AtomicBool::new(true); // already cancelled
         let (report, output) =
-            run_optimization_steps_impl(&|_p| {}, &file_path, steps, 150.0, 80, &cancel)
+            run_optimization_steps_impl(&|_p| {}, &pdf_bytes, steps, 150.0, 80, &cancel)
                 .expect("run optimization");
 
         assert!(report.cancelled);
         assert!(report.results.is_empty());
         assert!(output.is_none());
-
-        std::fs::remove_file(&tmp).ok();
     }
 
     /// A 600px image shown across 1 inch (600 DPI) recompresses smaller when
@@ -1095,15 +1042,4 @@ mod tests {
         assert_eq!(skipped[0].reason, "unreferenced");
     }
 
-    /// Saving with no prior optimization run is an error, not a panic.
-    #[test]
-    fn save_without_pending_output_errors() {
-        let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None);
-        let dest = std::env::temp_dir()
-            .join("tumbler_optimize_none.pdf")
-            .to_string_lossy()
-            .into_owned();
-        assert!(save_optimized_copy_impl(&state, "missing".to_string(), dest).is_err());
-    }
 }

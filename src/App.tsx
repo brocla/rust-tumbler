@@ -204,8 +204,9 @@ function App() {
     return () => window.removeEventListener("keydown", handleCtrlP);
   }, []);
 
-  // Sync page count and dimensions after any page operation (delete, rotate, reorder, merge, split).
-  // The backend emits this event for all tabs sharing the same file, so a second open tab also updates.
+  // Sync page count and dimensions after any operation that rewrites the
+  // document's buffer (delete, rotate, reorder, merge, compression). Buffer
+  // edits are per-document (issue #31), so docIds is the edited doc only.
   useEffect(() => {
     interface PagesChangedPayload {
       docIds: string[];
@@ -242,8 +243,8 @@ function App() {
             contentEpoch: tab.contentEpoch + 1,
           });
         }
-        // A page operation rewrote the file, so any signature is now invalid —
-        // re-verify so the badge reflects reality.
+        // The edit rewrote the document's bytes, so any signature is now
+        // invalid — re-verify (against the buffer) so the badge reflects reality.
         refreshSignatureStatus(tab.docId, tab.id);
       }
     });

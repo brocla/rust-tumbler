@@ -25,7 +25,7 @@ struct PagesChangedPayload {
     page_dimensions: Vec<PageDimension>,
 }
 
-fn page_info_from_doc(doc: &PdfDocument) -> Result<PageInfo, AppError> {
+pub(crate) fn page_info_from_doc(doc: &PdfDocument) -> Result<PageInfo, AppError> {
     let len = doc.pages().len();
     let mut dims = Vec::with_capacity(len as usize);
     for i in 0..len {
@@ -55,21 +55,22 @@ fn rotation_add_turns(
     }
 }
 
-fn write_and_reload(
-    state: &AppState,
-    file_path: &str,
-    bytes: Vec<u8>,
-) -> Result<Vec<String>, AppError> {
-    let tmp_path = format!("{file_path}.tmp-{}", uuid::Uuid::new_v4());
-    if let Err(e) = std::fs::write(&tmp_path, &bytes) {
-        let _ = std::fs::remove_file(&tmp_path);
-        return Err(AppError::io("Failed to write temporary PDF", e));
-    }
-    std::fs::rename(&tmp_path, file_path).map_err(|e| {
-        let _ = std::fs::remove_file(&tmp_path);
-        AppError::io("Failed to replace PDF with updated copy", e)
-    })?;
-    state.reload_documents_with_path(file_path)
+/// Emits the pair of events every buffer-model page edit ends with: the page
+/// content/layout changed for this document, and the document now has unsaved
+/// changes. Also used by the compression pipeline, which rewrites every page.
+pub(crate) fn emit_pages_edited(app: &tauri::AppHandle, doc_id: String, info: &PageInfo) {
+    let _ = app.emit(
+        "document-pages-changed",
+        PagesChangedPayload {
+            doc_ids: vec![doc_id.clone()],
+            page_count: info.page_count,
+            page_dimensions: info.page_dimensions.clone(),
+        },
+    );
+    let _ = app.emit(
+        "document-dirty-changed",
+        crate::commands::save::DirtyChangedPayload { doc_id, dirty: true },
+    );
 }
 
 // ── delete_pages ──────────────────────────────────────────────────────────────
@@ -81,15 +82,9 @@ pub fn delete_pages(
     doc_id: String,
     page_numbers: Vec<u32>,
 ) -> Result<PageInfo, String> {
-    let (info, doc_ids) = delete_pages_impl(&state, doc_id, page_numbers).map_err(String::from)?;
-    let _ = app.emit(
-        "document-pages-changed",
-        PagesChangedPayload {
-            doc_ids,
-            page_count: info.page_count,
-            page_dimensions: info.page_dimensions.clone(),
-        },
-    );
+    let info =
+        delete_pages_impl(&state, doc_id.clone(), page_numbers).map_err(String::from)?;
+    emit_pages_edited(&app, doc_id, &info);
     Ok(info)
 }
 
@@ -97,7 +92,7 @@ fn delete_pages_impl(
     state: &AppState,
     doc_id: String,
     page_numbers: Vec<u32>,
-) -> Result<(PageInfo, Vec<String>), AppError> {
+) -> Result<PageInfo, AppError> {
     if page_numbers.is_empty() {
         return Err(AppError::Other("No page numbers provided".to_string()));
     }
@@ -140,11 +135,12 @@ fn delete_pages_impl(
         .document
         .save_to_bytes()
         .map_err(|e| AppError::pdfium("Failed to save PDF after deletion", e))?;
-    let file_path = entry.file_path.clone();
     drop(entry);
 
-    let doc_ids = write_and_reload(state, &file_path, bytes)?;
-    Ok((info, doc_ids))
+    // Non-destructive (issue #31): the deletion lives only in the in-memory
+    // buffer until the user saves. Nothing is written to disk here.
+    state.set_buffer_and_refresh(&doc_id, bytes)?;
+    Ok(info)
 }
 
 // ── rotate_pages ──────────────────────────────────────────────────────────────
@@ -159,18 +155,7 @@ pub fn rotate_pages(
 ) -> Result<PageInfo, String> {
     let info = rotate_pages_impl(&state, doc_id.clone(), page_numbers, clockwise_turns)
         .map_err(String::from)?;
-    let _ = app.emit(
-        "document-pages-changed",
-        PagesChangedPayload {
-            doc_ids: vec![doc_id.clone()],
-            page_count: info.page_count,
-            page_dimensions: info.page_dimensions.clone(),
-        },
-    );
-    let _ = app.emit(
-        "document-dirty-changed",
-        crate::commands::save::DirtyChangedPayload { doc_id, dirty: true },
-    );
+    emit_pages_edited(&app, doc_id, &info);
     Ok(info)
 }
 
@@ -232,15 +217,8 @@ pub fn reorder_pages(
     doc_id: String,
     new_order: Vec<u32>,
 ) -> Result<PageInfo, String> {
-    let (info, doc_ids) = reorder_pages_impl(&state, doc_id, new_order).map_err(String::from)?;
-    let _ = app.emit(
-        "document-pages-changed",
-        PagesChangedPayload {
-            doc_ids,
-            page_count: info.page_count,
-            page_dimensions: info.page_dimensions.clone(),
-        },
-    );
+    let info = reorder_pages_impl(&state, doc_id.clone(), new_order).map_err(String::from)?;
+    emit_pages_edited(&app, doc_id, &info);
     Ok(info)
 }
 
@@ -248,7 +226,7 @@ fn reorder_pages_impl(
     state: &AppState,
     doc_id: String,
     new_order: Vec<u32>,
-) -> Result<(PageInfo, Vec<String>), AppError> {
+) -> Result<PageInfo, AppError> {
     let entry_arc = state.get_document(&doc_id)?;
     let entry = lock_mutex(&entry_arc)?;
 
@@ -304,11 +282,12 @@ fn reorder_pages_impl(
     let bytes = new_doc
         .save_to_bytes()
         .map_err(|e| AppError::pdfium("Failed to save reordered PDF", e))?;
-    let file_path = entry.file_path.clone();
     drop(entry);
 
-    let doc_ids = write_and_reload(state, &file_path, bytes)?;
-    Ok((info, doc_ids))
+    // Non-destructive (issue #31): the new page order lives only in the
+    // in-memory buffer until the user saves.
+    state.set_buffer_and_refresh(&doc_id, bytes)?;
+    Ok(info)
 }
 
 // ── merge_document ────────────────────────────────────────────────────────────
@@ -321,16 +300,9 @@ pub fn merge_document(
     source_path: String,
     insert_after_page: u32,
 ) -> Result<PageInfo, String> {
-    let (info, doc_ids) =
-        merge_document_impl(&state, doc_id, source_path, insert_after_page).map_err(String::from)?;
-    let _ = app.emit(
-        "document-pages-changed",
-        PagesChangedPayload {
-            doc_ids,
-            page_count: info.page_count,
-            page_dimensions: info.page_dimensions.clone(),
-        },
-    );
+    let info = merge_document_impl(&state, doc_id.clone(), source_path, insert_after_page)
+        .map_err(String::from)?;
+    emit_pages_edited(&app, doc_id, &info);
     Ok(info)
 }
 
@@ -339,7 +311,7 @@ fn merge_document_impl(
     doc_id: String,
     source_path: String,
     insert_after_page: u32,
-) -> Result<(PageInfo, Vec<String>), AppError> {
+) -> Result<PageInfo, AppError> {
     let src_doc = state
         .pdfium
         .load_pdf_from_file(&source_path, None)
@@ -385,11 +357,12 @@ fn merge_document_impl(
         .document
         .save_to_bytes()
         .map_err(|e| AppError::pdfium("Failed to save merged PDF", e))?;
-    let file_path = entry.file_path.clone();
     drop(entry);
 
-    let doc_ids = write_and_reload(state, &file_path, bytes)?;
-    Ok((info, doc_ids))
+    // Non-destructive (issue #31): the merged pages live only in the in-memory
+    // buffer until the user saves.
+    state.set_buffer_and_refresh(&doc_id, bytes)?;
+    Ok(info)
 }
 
 // ── split_document ────────────────────────────────────────────────────────────
@@ -510,8 +483,8 @@ mod tests {
         save_doc(&doc, &path);
         open_doc_in_state(&state, "doc1", doc, &path);
 
-        let (info, _) =
-            delete_pages_impl(&state, "doc1".to_string(), vec![2]).expect("delete page 2");
+        let disk_before = std::fs::read(&path).expect("read disk");
+        let info = delete_pages_impl(&state, "doc1".to_string(), vec![2]).expect("delete page 2");
 
         assert_eq!(info.page_count, 2);
         // Page 1 stays (200x200), page 3 shifts to position 2 (400x200)
@@ -521,6 +494,13 @@ mod tests {
         let entry_arc = state.get_document("doc1").expect("get doc");
         let entry = lock_mutex(&entry_arc).expect("lock");
         assert_eq!(entry.document.pages().len(), 2);
+        assert!(entry.dirty, "deletion is a buffer edit, so the doc must be dirty");
+        drop(entry);
+        assert_eq!(
+            std::fs::read(&path).expect("read disk"),
+            disk_before,
+            "deletion must not touch the file until an explicit save"
+        );
 
         std::fs::remove_file(&path).ok();
     }
@@ -558,8 +538,7 @@ mod tests {
         open_doc_in_state(&state, "doc1", doc, &path);
 
         // Reverse: [3, 2, 1] → 400x200, 300x300, 200x200
-        let (info, _) =
-            reorder_pages_impl(&state, "doc1".to_string(), vec![3, 2, 1]).expect("reorder");
+        let info = reorder_pages_impl(&state, "doc1".to_string(), vec![3, 2, 1]).expect("reorder");
 
         assert_eq!(info.page_count, 3);
         assert_eq!(info.page_dimensions[0].width, 400.0);
@@ -570,6 +549,7 @@ mod tests {
         let entry = lock_mutex(&entry_arc).expect("lock");
         let p0 = entry.document.pages().get(0).expect("page 0");
         assert_eq!(p0.width().value, 400.0);
+        assert!(entry.dirty, "reorder is a buffer edit, so the doc must be dirty");
 
         std::fs::remove_file(&path).ok();
     }
@@ -646,7 +626,8 @@ mod tests {
         let src_path = tmp_path("tumbler_merge_src.pdf");
         save_doc(&src, &src_path);
 
-        let (info, _) = merge_document_impl(
+        let base_before = std::fs::read(&base_path).expect("read base");
+        let info = merge_document_impl(
             &state,
             "doc1".to_string(),
             src_path.clone(),
@@ -656,6 +637,12 @@ mod tests {
 
         assert_eq!(info.page_count, 4);
         assert_eq!(info.page_dimensions[3].width, 100.0);
+        assert!(state.is_dirty("doc1").expect("is_dirty"));
+        assert_eq!(
+            std::fs::read(&base_path).expect("read base"),
+            base_before,
+            "merge must not touch the file until an explicit save"
+        );
 
         std::fs::remove_file(&base_path).ok();
         std::fs::remove_file(&src_path).ok();

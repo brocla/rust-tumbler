@@ -65,7 +65,6 @@ pub fn run() {
             commands::save::save_document,
             commands::save::save_document_as,
             commands::optimize::run_optimization_steps,
-            commands::optimize::save_optimized_copy,
             commands::optimize::cancel_compress,
             commands::print::print_document,
             commands::print::cancel_print,
