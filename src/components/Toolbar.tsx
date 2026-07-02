@@ -285,6 +285,24 @@ export function Toolbar({ onOpenFile, onPrint }: ToolbarProps) {
 
       {activeTab && (
         <>
+          <div className="toolbar-group">
+            <button
+              className="toolbar-button"
+              onClick={() => void saveTab(activeTab)}
+              disabled={!activeTab.isDirty}
+              title="Save (Ctrl+S)"
+            >
+              <Save size={18} />
+            </button>
+            <button
+              className="toolbar-button"
+              onClick={() => void saveTabAs(activeTab)}
+              title="Save As... (Ctrl+Shift+S)"
+            >
+              <SaveAll size={18} />
+            </button>
+          </div>
+
           <div className="toolbar-spacer" />
           <div className="toolbar-group">
             <button
@@ -372,23 +390,6 @@ export function Toolbar({ onOpenFile, onPrint }: ToolbarProps) {
               </button>
             );
           })()}
-
-          <div className="toolbar-separator" />
-          <button
-            className="toolbar-button"
-            onClick={() => void saveTab(activeTab)}
-            disabled={!activeTab.isDirty}
-            title="Save (Ctrl+S)"
-          >
-            <Save size={18} />
-          </button>
-          <button
-            className="toolbar-button"
-            onClick={() => void saveTabAs(activeTab)}
-            title="Save As... (Ctrl+Shift+S)"
-          >
-            <SaveAll size={18} />
-          </button>
 
           <div className="toolbar-separator" />
           <button
