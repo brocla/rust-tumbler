@@ -55,6 +55,8 @@ pub fn run() {
             commands::ocr::cancel_ocr,
             commands::metadata::get_metadata,
             commands::metadata::set_metadata,
+            commands::forms::get_form_fields,
+            commands::forms::set_form_field_value,
             commands::conformance::get_conformance,
             commands::signature::get_signature_info,
             commands::pages::delete_pages,

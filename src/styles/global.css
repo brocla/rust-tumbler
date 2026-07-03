@@ -447,6 +447,68 @@ body {
   line-height: 1;
 }
 
+/* Form layer — interactive AcroForm controls (issue #2) */
+.form-layer {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+}
+
+.form-field {
+  box-sizing: border-box;
+  font: inherit;
+  font-size: 0.9em;
+  padding: 0 2px;
+  border: 1px solid var(--color-accent, #4a90d9);
+  background: rgba(255, 255, 230, 0.6);
+  color: #000;
+  resize: none;
+}
+
+.form-field:focus {
+  outline: 2px solid var(--color-accent, #4a90d9);
+  background: #fff;
+}
+
+/* Strip the native control (Chromium draws checkboxes/radios with a dark body,
+   especially at form-widget sizes) so our own pale-yellow fill — matching the
+   text fields — shows through. The checked state is drawn as an inset accent
+   ring rather than a black fill. */
+.form-check {
+  appearance: none;
+  -webkit-appearance: none;
+  padding: 0;
+  cursor: pointer;
+  /* Opaque so it fully covers whatever the PDF drew underneath; tuned to look
+     like the text fields' translucent pale yellow composited over the page. */
+  background-color: rgb(255, 255, 241);
+}
+
+/* Radio buttons stay round. */
+input[type="radio"].form-check {
+  border-radius: 50%;
+}
+
+/* Selected state: the box stays pale yellow and the border is unchanged. A
+   checked checkbox shows a check mark; a selected radio shows a small centered
+   black dot. */
+.form-check:checked {
+  background-repeat: no-repeat;
+  background-position: center;
+}
+
+input[type="checkbox"].form-check:checked {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath fill='none' stroke='%23000' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round' d='M1.5 8.5 6 13 14.5 3'/%3E%3C/svg%3E");
+  background-size: 100%;
+}
+
+/* An SVG circle anti-aliases cleanly, unlike a small hard-stop radial-gradient
+   (which rendered visibly faceted). */
+input[type="radio"].form-check:checked {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='3.5' fill='%23000'/%3E%3C/svg%3E");
+  background-size: 100%;
+}
+
 /* Highlight layer — search result highlights */
 .highlight-layer {
   position: absolute;
