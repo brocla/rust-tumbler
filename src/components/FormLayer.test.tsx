@@ -96,6 +96,35 @@ describe("FormLayer", () => {
     );
   });
 
+  it("caps a /MaxLen text field via the maxLength attribute", async () => {
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_form_fields")
+        return [
+          {
+            id: "ssn",
+            name: "ssn",
+            fieldType: "text",
+            value: "",
+            exportValue: "",
+            rect: { x: 50, y: 50, width: 150, height: 20 },
+            page: 1,
+            options: [],
+            readOnly: false,
+            maxLen: 9,
+            comb: true,
+            label: "",
+            buttonAction: "none",
+          },
+        ];
+      return undefined;
+    });
+    await act(async () => {
+      render(<FormLayer docId="doc-1" pageNumber={1} zoom={100} />);
+    });
+    const input = (await screen.findByRole("textbox")) as HTMLInputElement;
+    expect(input.maxLength).toBe(9);
+  });
+
   it("renders nothing when the page has no fields", async () => {
     mockInvoke.mockImplementation(async () => []);
     const { container } = render(
