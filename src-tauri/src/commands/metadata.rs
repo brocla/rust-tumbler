@@ -151,6 +151,14 @@ fn write_metadata(bytes: &[u8], metadata: &MetadataUpdate) -> Result<Vec<u8>, Ap
         }
     }
 
+    // `save_to` rewrites every object under one fresh cross-reference table, so
+    // the trailer's `/Prev` (and hybrid `/XRefStm`) pointers into the original
+    // file are now stale — lopdf itself rejects them on the next `load_mem`
+    // ("invalid start value in Prev field"). Incrementally-updated real-world
+    // PDFs carry `/Prev`, so a second edit would otherwise fail to reparse.
+    lopdf_doc.trailer.remove(b"Prev");
+    lopdf_doc.trailer.remove(b"XRefStm");
+
     let mut out = Vec::new();
     lopdf_doc
         .save_to(&mut out)
@@ -281,5 +289,38 @@ mod tests {
         );
 
         std::fs::remove_file(&tmp).ok();
+    }
+
+    /// Regression: incrementally-updated real-world PDFs (e.g. the IRS form
+    /// f8946) carry a `/Prev` cross-reference chain. After one metadata edit,
+    /// lopdf's re-serialized output must still parse on the *next* edit — it
+    /// didn't until `write_metadata` dropped the stale `/Prev`/`/XRefStm`.
+    #[test]
+    fn consecutive_metadata_edits_survive_reparse_on_pdf_with_prev_xref() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/forms/f8946.pdf");
+        let bytes = std::fs::read(&path).expect("read f8946");
+
+        let update = |title: &str| MetadataUpdate {
+            title: title.to_string(),
+            author: String::new(),
+            subject: String::new(),
+            keywords: String::new(),
+            creator: String::new(),
+        };
+
+        let once = write_metadata(&bytes, &update("First")).expect("first write");
+        // The second write reparses the first write's output — the point of
+        // failure before the fix.
+        let twice = write_metadata(&once, &update("Second")).expect("second write must reparse");
+
+        let pdfium = crate::test_pdfium();
+        let doc = pdfium
+            .load_pdf_from_byte_vec(twice, None)
+            .expect("pdfium reload");
+        assert_eq!(
+            read_meta_tag(&doc.metadata(), PdfDocumentMetadataTagType::Title),
+            "Second"
+        );
     }
 }

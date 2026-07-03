@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCached, putCached } from "../utils/renderCache";
 import { TextLayer } from "./TextLayer";
+import { FormLayer } from "./FormLayer";
 import { HighlightLayer } from "./HighlightLayer";
 
 interface HighlightRect {
@@ -152,6 +153,11 @@ export function PageSlot({
       {rendered && (
         <>
           <TextLayer
+            docId={docId}
+            pageNumber={pageNumber}
+            zoom={zoom}
+          />
+          <FormLayer
             docId={docId}
             pageNumber={pageNumber}
             zoom={zoom}
