@@ -154,6 +154,17 @@ export function FormLayer({ docId, pageNumber, zoom }: FormLayerProps) {
             onChange: (
               e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>,
             ) => setEdits((prev) => ({ ...prev, [field.id]: e.target.value })),
+            onKeyDown: (
+              e: React.KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>,
+            ) => {
+              // Enter commits a single-line field by blurring it (which runs the
+              // commit and, for a comb field, the ghost repaint). In a textarea
+              // Enter must stay a newline.
+              if (e.key === "Enter" && field.fieldType !== "multiline_text") {
+                e.preventDefault();
+                e.currentTarget.blur();
+              }
+            },
             onBlur: async (
               e: React.FocusEvent<HTMLInputElement | HTMLTextAreaElement>,
             ) => {

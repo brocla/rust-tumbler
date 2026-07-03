@@ -96,6 +96,27 @@ describe("FormLayer", () => {
     );
   });
 
+  it("commits a single-line text field on Enter", async () => {
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_form_fields") return fields; // includes single-line fullName
+      return undefined;
+    });
+    await act(async () => {
+      render(<FormLayer docId="doc-1" pageNumber={1} zoom={100} />);
+    });
+    const textbox = await screen.findByRole("textbox");
+    textbox.focus(); // blur() only fires a blur event on the focused element
+    fireEvent.change(textbox, { target: { value: "Grace" } });
+    fireEvent.keyDown(textbox, { key: "Enter" });
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("set_form_field_value", {
+        docId: "doc-1",
+        fieldId: "fullName",
+        value: "Grace",
+      }),
+    );
+  });
+
   it("caps a /MaxLen text field via the maxLength attribute", async () => {
     mockInvoke.mockImplementation(async (cmd: string) => {
       if (cmd === "get_form_fields")
