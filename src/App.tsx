@@ -10,6 +10,7 @@ import { Sidebar } from "./components/Sidebar";
 import { ViewerArea } from "./components/ViewerArea";
 import { StatusBar } from "./components/StatusBar";
 import { UnsavedChangesDialog } from "./components/UnsavedChangesDialog";
+import { Notice } from "./components/Notice";
 import { saveTab, saveTabAs, confirmCloseDirtyTab } from "./utils/saveDocument";
 import { usePdfStore, suppressedReloadDocs } from "./store/usePdfStore";
 import type { PageDimension, CompressProgress } from "./store/usePdfStore";
@@ -387,6 +388,7 @@ function App() {
       </div>
       <StatusBar />
       <UnsavedChangesDialog />
+      <Notice />
       {printProgress && (
         <div className="print-progress-overlay">
           <div className="print-progress-dialog">

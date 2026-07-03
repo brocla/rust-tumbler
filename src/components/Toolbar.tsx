@@ -1,4 +1,5 @@
-import { BookOpen, ChevronLeft, ChevronRight, FileSearch, Moon, MoveHorizontal, MoveVertical, Printer, Save, SaveAll, ScanSearch, ScrollText, Sun, ZoomIn, ZoomOut } from "lucide-react";
+import { BookOpen, ChevronLeft, ChevronRight, Eraser, FileSearch, Moon, MoveHorizontal, MoveVertical, Printer, Save, SaveAll, ScanSearch, ScrollText, Sun, ZoomIn, ZoomOut } from "lucide-react";
+import { useEffect, useState } from "react";
 import { save, message, ask } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { usePdfStore } from "../store/usePdfStore";
@@ -40,6 +41,43 @@ export function Toolbar({ onOpenFile, onPrint }: ToolbarProps) {
   );
   const updateTab = usePdfStore((s) => s.updateTab);
   const setOcrProgress = usePdfStore((s) => s.setOcrProgress);
+  const bumpFormEpoch = usePdfStore((s) => s.bumpFormEpoch);
+
+  // Whether the active document has any AcroForm fields — gates the Clear-form
+  // button. Re-checked when the active document changes.
+  const [hasForm, setHasForm] = useState(false);
+  const activeDocId = activeTab?.docId;
+  useEffect(() => {
+    if (!activeDocId) {
+      setHasForm(false);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const v = await invoke<boolean>("document_has_form", { docId: activeDocId });
+        if (!cancelled) setHasForm(!!v);
+      } catch {
+        if (!cancelled) setHasForm(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeDocId]);
+
+  const handleClearForm = async () => {
+    if (!activeTab) return;
+    try {
+      await invoke("clear_form", { docId: activeTab.docId });
+      bumpFormEpoch(activeTab.docId);
+    } catch (err) {
+      await message(`Failed to clear form: ${err}`, {
+        title: "Clear form",
+        kind: "error",
+      });
+    }
+  };
 
   const handlePrevPage = () => {
     if (!activeTab || activeTab.currentPage <= 1) return;
@@ -310,6 +348,15 @@ export function Toolbar({ onOpenFile, onPrint }: ToolbarProps) {
             >
               <SaveAll size={18} />
             </button>
+            {hasForm && (
+              <button
+                className="toolbar-button"
+                onClick={handleClearForm}
+                title="Clear form fields"
+              >
+                <Eraser size={18} />
+              </button>
+            )}
           </div>
 
           <div className="toolbar-spacer" />
