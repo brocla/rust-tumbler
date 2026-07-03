@@ -1375,6 +1375,21 @@ mod tests {
         assert!(total > 0, "f8946 hybrid form should yield fields");
     }
 
+    /// Real-world comb coverage: the IRS 1040 has SSN/EIN comb text fields
+    /// (`/Ff` bit 25, `/MaxLen 9`). Confirms discovery surfaces `comb` +
+    /// `max_len` on a genuine form, not just the synthetic fixture.
+    #[test]
+    fn f1040_has_comb_ssn_fields() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/forms/f1040.pdf");
+        let bytes = std::fs::read(&path).expect("read f1040");
+        let state = state_with_bytes(bytes, "f1040.pdf");
+        let found = (1..=2)
+            .flat_map(|p| get_form_fields_impl(&state, "doc-1".into(), p).unwrap_or_default())
+            .any(|f| f.comb && f.max_len == Some(9));
+        assert!(found, "f1040 should expose comb SSN/EIN fields (MaxLen 9)");
+    }
+
     /// Regression: real-world forms (f8946) are incrementally updated and carry
     /// a `/Prev` cross-reference chain. After one edit, lopdf's re-serialized
     /// output must still be parseable by the *next* edit — it wasn't until we

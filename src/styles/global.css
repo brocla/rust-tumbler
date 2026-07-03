@@ -487,6 +487,16 @@ body {
   background: #fff;
 }
 
+/* Comb fields at rest: the overlay paints nothing so pdfium's combed value
+   (spaced into /MaxLen cells, drawn on the page canvas) shows through. On
+   focus the field drops this class and becomes a normal opaque editor. */
+.form-ghost {
+  background: transparent;
+  border-color: transparent;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+}
+
 /* Pushbutton widget (Reset / unsupported script buttons). */
 .form-button {
   display: flex;

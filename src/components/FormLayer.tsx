@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { usePdfStore } from "../store/usePdfStore";
+import { evictPageCache } from "../utils/renderCache";
 
 type FieldType =
   | "text"
@@ -47,6 +48,11 @@ export function FormLayer({ docId, pageNumber, zoom }: FormLayerProps) {
   // Local edits keyed by field id (radio buttons in a group share one id, so
   // selecting one deselects the others).
   const [edits, setEdits] = useState<Record<string, string>>({});
+  // The comb field currently being edited, if any. A comb field is a
+  // transparent "ghost" at rest (pdfium draws its combed value on the canvas)
+  // and flips to an opaque HTML editor only while focused.
+  const [focusedComb, setFocusedComb] = useState<string | null>(null);
+  const updateTab = usePdfStore((s) => s.updateTab);
   // Re-fetch after a buffer edit (e.g. a page op) rebuilds the document, or
   // after a form Clear/Reset (formEpoch).
   const pagesVersion = usePdfStore(
@@ -94,6 +100,15 @@ export function FormLayer({ docId, pageNumber, zoom }: FormLayerProps) {
 
   const current = (f: FormField) => edits[f.id] ?? f.value;
 
+  // After committing a comb field, pdfium's canvas render of it is stale — evict
+  // the page's cached bitmap and bump contentEpoch so PageSlot repaints with the
+  // freshly combed value.
+  const repaintPage = () => {
+    evictPageCache(docId, pageNumber);
+    const tab = usePdfStore.getState().tabs.find((t) => t.docId === docId);
+    if (tab) updateTab(tab.id, { contentEpoch: tab.contentEpoch + 1 });
+  };
+
   const clickButton = async (field: FormField) => {
     if (field.buttonAction === "reset_form") {
       try {
@@ -121,22 +136,34 @@ export function FormLayer({ docId, pageNumber, zoom }: FormLayerProps) {
         };
 
         if (field.fieldType === "text" || field.fieldType === "multiline_text") {
+          // A comb field is a transparent ghost at rest (pdfium shows the combed
+          // value) and only opaque while focused.
+          const ghost = field.comb && focusedComb !== field.id;
           // Controlled so a Clear/Reset (which re-fetches cleared values) always
           // updates the DOM. Uncontrolled `defaultValue` only applies on mount,
           // so React would keep showing the pre-reset text on the reused node.
           const common = {
-            className: "form-field",
+            className: `form-field${ghost ? " form-ghost" : ""}`,
             style,
             value: current(field),
             disabled: field.readOnly,
             maxLength: field.maxLen ?? undefined,
+            onFocus: () => {
+              if (field.comb) setFocusedComb(field.id);
+            },
             onChange: (
               e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>,
             ) => setEdits((prev) => ({ ...prev, [field.id]: e.target.value })),
-            onBlur: (
+            onBlur: async (
               e: React.FocusEvent<HTMLInputElement | HTMLTextAreaElement>,
             ) => {
-              if (e.target.value !== field.value) commit(field.id, e.target.value);
+              const changed = e.target.value !== field.value;
+              if (changed) await commit(field.id, e.target.value);
+              if (field.comb) {
+                setFocusedComb((cur) => (cur === field.id ? null : cur));
+                // Repaint so pdfium's combed render replaces the ghost.
+                if (changed) repaintPage();
+              }
             },
           };
           return field.fieldType === "multiline_text" ? (

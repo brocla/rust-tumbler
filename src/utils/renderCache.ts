@@ -21,6 +21,7 @@ interface Cache {
   get(docId: string, page: number, sig: string): ImageBitmap | null;
   put(docId: string, page: number, sig: string, bitmap: ImageBitmap): void;
   evict(docId: string): void;
+  evictPage(docId: string, page: number): void;
   permute(docId: string, newOrder: number[]): void;
 }
 
@@ -64,6 +65,17 @@ function createCache(maxEntries: number): Cache {
     evict(docId) {
       for (let i = entries.length - 1; i >= 0; i--) {
         if (entries[i].key.startsWith(docId + ":")) {
+          entries[i].bitmap.close();
+          entries.splice(i, 1);
+        }
+      }
+    },
+
+    evictPage(docId, page) {
+      // Drop every sig (zoom/dpr) variant of this one page.
+      const prefix = `${docId}:${page}:`;
+      for (let i = entries.length - 1; i >= 0; i--) {
+        if (entries[i].key.startsWith(prefix)) {
           entries[i].bitmap.close();
           entries.splice(i, 1);
         }
@@ -119,6 +131,15 @@ export function evictDoc(docId: string): void {
  */
 export function evictPages(docId: string): void {
   pageCache.evict(docId);
+}
+
+/**
+ * Evict a single page's full-size renders (all zoom/dpr variants). Used after a
+ * form-field edit on a comb field, whose value is drawn by pdfium onto the page
+ * canvas — the cached bitmap is now stale and must be re-rendered.
+ */
+export function evictPageCache(docId: string, page: number): void {
+  pageCache.evictPage(docId, page);
 }
 
 // ── Thumbnail cache (small fixed-scale renders) ────────────────────────────
