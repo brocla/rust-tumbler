@@ -403,6 +403,10 @@ body {
   position: relative;
   box-shadow: var(--shadow-md);
   background: white;
+  /* Kills the inline gap under the page canvas. NOTE: `.form-field` overrides
+     this with `line-height: normal` — a zero line-height makes overlaid form
+     <textarea>s uneditable in WebView2 (no caret). Don't rely on children
+     inheriting this value. */
   line-height: 0;
 }
 
@@ -457,6 +461,12 @@ body {
 .form-field {
   box-sizing: border-box;
   font: inherit;
+  /* `font: inherit` pulls in .page-slot's `line-height: 0` (set there to kill
+     the inline gap under the canvas). A zero line-height makes a <textarea>
+     uneditable in Chromium — no caret box can be laid out, so typing produces
+     no beforeinput at all (single-line <input> normalizes its line-height and
+     is unaffected). Restore a real line height for the form controls. */
+  line-height: normal;
   font-size: 0.9em;
   padding: 0 2px;
   border: 1px solid var(--color-accent, #4a90d9);
@@ -466,6 +476,10 @@ body {
   background: rgb(255, 255, 241);
   color: #000;
   resize: none;
+  /* Editable fields should allow text selection despite the app-wide
+     `body { user-select: none }`. */
+  user-select: text;
+  -webkit-user-select: text;
 }
 
 .form-field:focus {
