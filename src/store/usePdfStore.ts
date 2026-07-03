@@ -41,6 +41,10 @@ export interface TabState {
   // whole-doc via "Make Searchable"), so the text overlay re-fetches and the
   // newly-recognized pages become selectable/copyable.
   ocrEpoch: number;
+  // Bumped after a form Clear/Reset so the FormLayer overlay re-fetches field
+  // values and drops any in-progress local edits. Optional so existing tab
+  // construction sites don't need updating.
+  formEpoch?: number;
   // Digital-signature status for the bottom status-bar badge and the
   // edit-invalidation guards. Populated on open and refreshed after edits;
   // undefined until the first verification completes. (issue #17)
@@ -101,6 +105,9 @@ interface PdfStore {
   compressProgress: CompressProgress | null;
   // Non-null while an unsaved-changes prompt is showing (close guards await it).
   unsavedPrompt: UnsavedPrompt | null;
+  // A transient status message shown as a dismissible toast (e.g. clicking a
+  // form button whose scripted action Tumbler can't run). Null when none.
+  notice: string | null;
 
   // Actions
   setActiveTab: (id: string) => void;
@@ -110,6 +117,10 @@ interface PdfStore {
   setSidebarWidth: (width: number) => void;
   setOcrProgress: (progress: { page: number; total: number } | null) => void;
   setCompressProgress: (progress: CompressProgress | null) => void;
+
+  showNotice: (message: string) => void;
+  clearNotice: () => void;
+  bumpFormEpoch: (docId: string) => void;
 
   addTab: (tab: TabState) => void;
   removeTab: (id: string) => void;
@@ -131,8 +142,19 @@ export const usePdfStore = create<PdfStore>((set, get) => ({
   ocrProgress: null,
   compressProgress: null,
   unsavedPrompt: null,
+  notice: null,
 
   setActiveTab: (id) => set({ activeTabId: id }),
+
+  showNotice: (message) => set({ notice: message }),
+  clearNotice: () => set({ notice: null }),
+
+  bumpFormEpoch: (docId) =>
+    set((state) => ({
+      tabs: state.tabs.map((t) =>
+        t.docId === docId ? { ...t, formEpoch: (t.formEpoch ?? 0) + 1 } : t,
+      ),
+    })),
 
   askUnsaved: (fileName) =>
     new Promise((resolve) => set({ unsavedPrompt: { fileName, resolve } })),

@@ -52,7 +52,17 @@ fn main() {
     let page_id = doc.new_object_id();
 
     // A tiny visible label so the page isn't blank when opened.
-    let content = b"BT /F1 14 Tf 50 740 Td (Tumbler AcroForm test fixture) Tj ET".to_vec();
+    // Title plus a description drawn beside each field so a dev can see what
+    // type each one is. Each BT/ET resets the text matrix, so Td is an absolute
+    // page position. Avoid literal parentheses (they'd need PDF escaping).
+    let content = b"\
+        BT /F1 13 Tf 50 740 Td (Tumbler AcroForm test fixture) Tj ET\n\
+        BT /F1 9 Tf 310 706 Td (fullName: single-line text field) Tj ET\n\
+        BT /F1 9 Tf 310 668 Td (comments: multiline text field) Tj ET\n\
+        BT /F1 9 Tf 75 563 Td (subscribe: checkbox, on-state Yes) Tj ET\n\
+        BT /F1 9 Tf 105 523 Td (color: radio group, options Red / Blue) Tj ET\n\
+        BT /F1 9 Tf 210 484 Td (country: dropdown, options USA / Canada / Mexico) Tj ET"
+        .to_vec();
     let content_id = doc.add_object(Stream::new(dictionary! {}, content));
 
     // --- Text field: single line -------------------------------------------
@@ -220,6 +230,130 @@ fn main() {
         .save(&sig_path)
         .unwrap_or_else(|e| panic!("save signature fixture: {e}"));
     println!("wrote {}", sig_path.display());
+
+    let reset_path = out_dir.join("acroform_reset.pdf");
+    build_reset_fixture()
+        .save(&reset_path)
+        .unwrap_or_else(|e| panic!("save reset fixture: {e}"));
+    println!("wrote {}", reset_path.display());
+}
+
+/// A one-page PDF for exercising form *actions* (issue: form buttons):
+///
+/// | Field       | /FT | Notes |
+/// |-------------|-----|-------|
+/// | `hasDefault`| Tx  | current value "typed", `/DV "Default"` — reset restores it |
+/// | `noDefault` | Tx  | current value "stuff", no `/DV` — reset clears it |
+/// | `agree`     | Btn | checkbox, current `/Yes`, `/DV /Off` |
+/// | `resetBtn`  | Btn | pushbutton with `/A << /S /ResetForm >>` (all fields) |
+/// | `jsBtn`     | Btn | pushbutton with `/A << /S /JavaScript >>` (unsupported) |
+fn build_reset_fixture() -> Document {
+    let mut doc = Document::with_version("1.7");
+
+    let font_id = doc.add_object(dictionary! {
+        "Type" => "Font",
+        "Subtype" => "Type1",
+        "BaseFont" => "Helvetica",
+    });
+
+    let page_id = doc.new_object_id();
+    // Descriptions drawn on the page, one per row beside its field, so a dev
+    // knows each field's intent. Fields are pre-filled so Clear/Reset visibly
+    // acts on them. Each BT/ET resets the text matrix, so Td is an absolute
+    // page position. Avoid literal parentheses (they'd need PDF escaping).
+    let content = b"\
+        BT /F1 13 Tf 50 762 Td (Tumbler form-actions test fixture) Tj ET\n\
+        BT /F1 9 Tf 50 746 Td (Fields are pre-filled so you can watch Clear/Reset act on them.) Tj ET\n\
+        BT /F1 9 Tf 260 710 Td (hasDefault: has /DV Default -> Clear/Reset RESTORES Default, not empty) Tj ET\n\
+        BT /F1 9 Tf 260 676 Td (noDefault: no /DV -> Clear/Reset EMPTIES it) Tj ET\n\
+        BT /F1 9 Tf 76 642 Td (agree: checkbox /DV Off -> Clear/Reset UNCHECKS it) Tj ET\n\
+        BT /F1 9 Tf 160 610 Td (Reset button: /S /ResetForm action -> WORKS, clears the form) Tj ET\n\
+        BT /F1 9 Tf 160 574 Td (Clear button: JavaScript action -> NOT supported, shows a toast only) Tj ET"
+        .to_vec();
+    let content_id = doc.add_object(Stream::new(dictionary! {}, content));
+
+    let has_default_id = doc.add_object(dictionary! {
+        "Type" => "Annot", "Subtype" => "Widget", "FT" => "Tx",
+        "T" => text("hasDefault"),
+        "V" => text("typed"),
+        "DV" => text("Default"),
+        "Rect" => vec![50.into(), 704.into(), 250.into(), 722.into()],
+        "P" => page_id, "F" => 4, "DA" => text("/F1 12 Tf 0 g"),
+    });
+    let no_default_id = doc.add_object(dictionary! {
+        "Type" => "Annot", "Subtype" => "Widget", "FT" => "Tx",
+        "T" => text("noDefault"),
+        "V" => text("stuff"),
+        "Rect" => vec![50.into(), 670.into(), 250.into(), 688.into()],
+        "P" => page_id, "F" => 4, "DA" => text("/F1 12 Tf 0 g"),
+    });
+    let agree_id = doc.add_object(dictionary! {
+        "Type" => "Annot", "Subtype" => "Widget", "FT" => "Btn",
+        "T" => text("agree"),
+        "V" => Object::Name(b"Yes".to_vec()),
+        "AS" => Object::Name(b"Yes".to_vec()),
+        "DV" => Object::Name(b"Off".to_vec()),
+        "Rect" => vec![50.into(), 638.into(), 66.into(), 654.into()],
+        "P" => page_id, "F" => 4,
+        "AP" => dictionary! { "N" => dictionary! {
+            "Yes" => Object::Reference(content_id),
+            "Off" => Object::Reference(content_id),
+        } },
+    });
+
+    // Pushbutton with a standard ResetForm action (no /Fields → reset all).
+    let reset_btn_id = doc.add_object(dictionary! {
+        "Type" => "Annot", "Subtype" => "Widget", "FT" => "Btn",
+        "Ff" => 1i64 << 16, // pushbutton
+        "T" => text("resetBtn"),
+        "Rect" => vec![50.into(), 602.into(), 150.into(), 622.into()],
+        "P" => page_id, "F" => 4,
+        "MK" => dictionary! { "CA" => text("Reset") },
+        "A" => dictionary! { "S" => "ResetForm" },
+    });
+    // Pushbutton whose action is JavaScript → unsupported.
+    let js_btn_id = doc.add_object(dictionary! {
+        "Type" => "Annot", "Subtype" => "Widget", "FT" => "Btn",
+        "Ff" => 1i64 << 16,
+        "T" => text("jsBtn"),
+        "Rect" => vec![50.into(), 566.into(), 150.into(), 586.into()],
+        "P" => page_id, "F" => 4,
+        "MK" => dictionary! { "CA" => text("Clear") },
+        "A" => dictionary! {
+            "S" => "JavaScript",
+            "JS" => text("this.resetForm();"),
+        },
+    });
+
+    doc.set_object(page_id, dictionary! {
+        "Type" => "Page",
+        "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+        "Contents" => content_id,
+        "Annots" => vec![
+            has_default_id.into(), no_default_id.into(), agree_id.into(),
+            reset_btn_id.into(), js_btn_id.into(),
+        ],
+        "Resources" => dictionary! { "Font" => dictionary! { "F1" => font_id } },
+    });
+    let pages_id = doc.add_object(dictionary! {
+        "Type" => "Pages", "Kids" => vec![page_id.into()], "Count" => 1,
+    });
+    if let Ok(page) = doc.get_dictionary_mut(page_id) {
+        page.set("Parent", pages_id);
+    }
+    let acroform_id = doc.add_object(dictionary! {
+        "Fields" => vec![
+            has_default_id.into(), no_default_id.into(), agree_id.into(),
+            reset_btn_id.into(), js_btn_id.into(),
+        ],
+        "DA" => text("/F1 12 Tf 0 g"),
+        "DR" => dictionary! { "Font" => dictionary! { "F1" => font_id } },
+    });
+    let catalog_id = doc.add_object(dictionary! {
+        "Type" => "Catalog", "Pages" => pages_id, "AcroForm" => acroform_id,
+    });
+    doc.trailer.set("Root", catalog_id);
+    doc
 }
 
 /// A one-page PDF with a single *genuine* signature field — an empty (unsigned)

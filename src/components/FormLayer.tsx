@@ -8,7 +8,10 @@ type FieldType =
   | "checkbox"
   | "radio"
   | "dropdown"
+  | "button"
   | "unknown";
+
+type ButtonAction = "none" | "reset_form" | "unsupported";
 
 interface FormField {
   id: string;
@@ -20,6 +23,8 @@ interface FormField {
   page: number;
   options: string[];
   readOnly: boolean;
+  label: string;
+  buttonAction: ButtonAction;
 }
 
 interface FormLayerProps {
@@ -40,10 +45,16 @@ export function FormLayer({ docId, pageNumber, zoom }: FormLayerProps) {
   // Local edits keyed by field id (radio buttons in a group share one id, so
   // selecting one deselects the others).
   const [edits, setEdits] = useState<Record<string, string>>({});
-  // Re-fetch after a buffer edit (e.g. a page op) rebuilds the document.
+  // Re-fetch after a buffer edit (e.g. a page op) rebuilds the document, or
+  // after a form Clear/Reset (formEpoch).
   const pagesVersion = usePdfStore(
     (s) => s.tabs.find((t) => t.docId === docId)?.pagesVersion ?? 0,
   );
+  const formEpoch = usePdfStore(
+    (s) => s.tabs.find((t) => t.docId === docId)?.formEpoch ?? 0,
+  );
+  const showNotice = usePdfStore((s) => s.showNotice);
+  const bumpFormEpoch = usePdfStore((s) => s.bumpFormEpoch);
 
   useEffect(() => {
     let cancelled = false;
@@ -66,7 +77,7 @@ export function FormLayer({ docId, pageNumber, zoom }: FormLayerProps) {
     return () => {
       cancelled = true;
     };
-  }, [docId, pageNumber, pagesVersion]);
+  }, [docId, pageNumber, pagesVersion, formEpoch]);
 
   const scale = zoom / 100;
 
@@ -80,6 +91,19 @@ export function FormLayer({ docId, pageNumber, zoom }: FormLayerProps) {
   };
 
   const current = (f: FormField) => edits[f.id] ?? f.value;
+
+  const clickButton = async (field: FormField) => {
+    if (field.buttonAction === "reset_form") {
+      try {
+        await invoke("reset_form_via_button", { docId, fieldId: field.id });
+        bumpFormEpoch(docId);
+      } catch (err) {
+        console.error(`Failed to reset form via ${field.id}:`, err);
+      }
+    } else {
+      showNotice("This button's action is not supported");
+    }
+  };
 
   if (fields.length === 0) return null;
 
@@ -95,11 +119,17 @@ export function FormLayer({ docId, pageNumber, zoom }: FormLayerProps) {
         };
 
         if (field.fieldType === "text" || field.fieldType === "multiline_text") {
+          // Controlled so a Clear/Reset (which re-fetches cleared values) always
+          // updates the DOM. Uncontrolled `defaultValue` only applies on mount,
+          // so React would keep showing the pre-reset text on the reused node.
           const common = {
             className: "form-field",
             style,
-            defaultValue: current(field),
+            value: current(field),
             disabled: field.readOnly,
+            onChange: (
+              e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>,
+            ) => setEdits((prev) => ({ ...prev, [field.id]: e.target.value })),
             onBlur: (
               e: React.FocusEvent<HTMLInputElement | HTMLTextAreaElement>,
             ) => {
@@ -164,6 +194,26 @@ export function FormLayer({ docId, pageNumber, zoom }: FormLayerProps) {
                 </option>
               ))}
             </select>
+          );
+        }
+
+        if (field.fieldType === "button") {
+          return (
+            <button
+              key={i}
+              type="button"
+              className="form-field form-button"
+              style={style}
+              disabled={field.readOnly}
+              title={
+                field.buttonAction === "reset_form"
+                  ? "Reset form fields"
+                  : "This button's action is not supported"
+              }
+              onClick={() => clickButton(field)}
+            >
+              {field.label}
+            </button>
           );
         }
 

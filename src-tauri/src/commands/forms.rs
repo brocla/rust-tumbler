@@ -30,7 +30,20 @@ pub enum FieldType {
     Checkbox,
     Radio,
     Dropdown,
+    Button,
     Unknown,
+}
+
+/// What a pushbutton does when clicked. Tumbler honors `ResetForm`; anything
+/// scripted (JavaScript, or an XFA-driven button with no PDF `/A`) or otherwise
+/// unhandled (SubmitForm, ImportData, …) is `Unsupported` — the frontend still
+/// renders it clickable but reports that it can't run the action.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ButtonAction {
+    None,
+    ResetForm,
+    Unsupported,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -56,6 +69,10 @@ pub struct FormField {
     /// Dropdown options (empty for other field types).
     pub options: Vec<String>,
     pub read_only: bool,
+    /// Caption for a `Button` field (from `/MK /CA`); empty otherwise.
+    pub label: String,
+    /// For `Button` fields, what clicking it does; `None` for data fields.
+    pub button_action: ButtonAction,
 }
 
 // ---------------------------------------------------------------------------
@@ -80,6 +97,47 @@ pub fn set_form_field_value(
     value: String,
 ) -> Result<(), String> {
     set_form_field_value_impl(&state, doc_id.clone(), field_id, value).map_err(String::from)?;
+    let _ = app.emit(
+        "document-dirty-changed",
+        crate::commands::save::DirtyChangedPayload { doc_id, dirty: true },
+    );
+    Ok(())
+}
+
+/// True if the document has any AcroForm fields — used to decide whether to
+/// show the "Clear form" action.
+#[tauri::command]
+pub fn document_has_form(state: State<'_, AppState>, doc_id: String) -> Result<bool, String> {
+    document_has_form_impl(&state, doc_id).map_err(String::from)
+}
+
+/// Reset every field in the document to its default (`/DV`) or empty — the
+/// universal "Clear form" action, independent of any button in the PDF.
+#[tauri::command]
+pub fn clear_form(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    doc_id: String,
+) -> Result<(), String> {
+    reset_scope_impl(&state, doc_id.clone(), ResetScope::All).map_err(String::from)?;
+    let _ = app.emit(
+        "document-dirty-changed",
+        crate::commands::save::DirtyChangedPayload { doc_id, dirty: true },
+    );
+    Ok(())
+}
+
+/// Run a standard `/S /ResetForm` button: reset the fields its action names
+/// (honoring the Include/Exclude `/Flags`), or all fields if it names none.
+#[tauri::command]
+pub fn reset_form_via_button(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    doc_id: String,
+    field_id: String,
+) -> Result<(), String> {
+    let scope = reset_scope_for_button(&state, &doc_id, &field_id).map_err(String::from)?;
+    reset_scope_impl(&state, doc_id.clone(), scope).map_err(String::from)?;
     let _ = app.emit(
         "document-dirty-changed",
         crate::commands::save::DirtyChangedPayload { doc_id, dirty: true },
@@ -212,6 +270,8 @@ fn collect_field(
                 page,
                 options: Vec::new(),
                 read_only,
+                label: String::new(),
+                button_action: ButtonAction::None,
             });
         }
         return;
@@ -226,9 +286,29 @@ fn collect_field(
     };
     let Some(page) = place(doc, widget_id, widget_page) else { return };
 
+    // Pushbutton: a clickable action rather than a data field.
+    if ft.as_deref() == Some(b"Btn") && ff & FF_PUSHBUTTON != 0 {
+        let action = button_action(doc, dict);
+        let label = button_caption(doc, dict).unwrap_or_else(|| leaf_name.clone());
+        out.push(FormField {
+            id: fq,
+            name: leaf_name,
+            field_type: FieldType::Button,
+            value: String::new(),
+            export_value: String::new(),
+            rect: widget_rect(doc, widget_id),
+            page,
+            options: Vec::new(),
+            read_only,
+            label,
+            button_action: action,
+        });
+        return;
+    }
+
     let (field_type, value, export_value, options) = classify(doc, dict, ft.as_deref());
     if field_type == FieldType::Unknown {
-        return; // e.g. pushbuttons carry no data — nothing to fill
+        return; // nothing renderable (e.g. an unsupported field type)
     }
 
     out.push(FormField {
@@ -241,7 +321,38 @@ fn collect_field(
         page,
         options,
         read_only,
+        label: String::new(),
+        button_action: ButtonAction::None,
     });
+}
+
+/// A pushbutton's action: `ResetForm` if that's its `/A` action, else
+/// `Unsupported` (JavaScript/submit/import, or an XFA-scripted button with no
+/// PDF `/A` at all).
+fn button_action(doc: &Document, dict: &Dictionary) -> ButtonAction {
+    match dict
+        .get(b"A")
+        .ok()
+        .map(|o| deref(doc, o))
+        .and_then(|o| o.as_dict().ok())
+    {
+        Some(a) => match a.get(b"S").ok().and_then(|o| o.as_name().ok()) {
+            Some(b"ResetForm") => ButtonAction::ResetForm,
+            _ => ButtonAction::Unsupported,
+        },
+        None => ButtonAction::Unsupported,
+    }
+}
+
+/// A pushbutton's on-face caption, from `/MK /CA`.
+fn button_caption(doc: &Document, dict: &Dictionary) -> Option<String> {
+    dict.get(b"MK")
+        .ok()
+        .map(|o| deref(doc, o))
+        .and_then(|o| o.as_dict().ok())
+        .and_then(|mk| mk.get(b"CA").ok().map(|o| deref(doc, o)))
+        .and_then(|ca| ca.as_str().ok())
+        .map(decode_pdf_string)
 }
 
 /// The 1-based page for a widget, via the page `/Annots` map or the `/P`
@@ -334,26 +445,251 @@ fn set_form_field_value_impl(
         .ok_or_else(|| AppError::Other(format!("Form field not found: {field_id}")))?;
 
     apply_value(&mut doc, target, &value)?;
+    finalize_form_edit(doc, state, &doc_id)
+}
 
-    // Tell viewers to regenerate appearances for the changed value, and drop
-    // /XFA so a hybrid form no longer shows stale /datasets in Acrobat.
+/// Which fields a reset touches.
+#[derive(Debug)]
+enum ResetScope {
+    All,
+    Only(Vec<String>),
+    Except(Vec<String>),
+}
+
+fn document_has_form_impl(state: &AppState, doc_id: String) -> Result<bool, AppError> {
+    let buffer = {
+        let entry = state.get_document(&doc_id)?;
+        let entry = lock_mutex(&entry)?;
+        entry.buffer.clone()
+    };
+    let doc = Document::load_mem(&buffer)
+        .map_err(|e| AppError::lopdf("Failed to parse PDF for form check", e))?;
+    Ok(acroform_dict(&doc)
+        .and_then(|af| {
+            af.get(b"Fields")
+                .ok()
+                .and_then(|o| deref(&doc, o).as_array().ok())
+                .map(|a| !a.is_empty())
+        })
+        .unwrap_or(false))
+}
+
+/// Derive the reset scope encoded in a `/S /ResetForm` button's action.
+fn reset_scope_for_button(
+    state: &AppState,
+    doc_id: &str,
+    field_id: &str,
+) -> Result<ResetScope, AppError> {
+    let buffer = {
+        let entry = state.get_document(doc_id)?;
+        let entry = lock_mutex(&entry)?;
+        entry.buffer.clone()
+    };
+    let doc = Document::load_mem(&buffer)
+        .map_err(|e| AppError::lopdf("Failed to parse PDF for reset button", e))?;
+
+    let top = top_fields(&doc);
+    let button = top
+        .iter()
+        .find_map(|id| find_field_by_fq(&doc, *id, "", field_id))
+        .ok_or_else(|| AppError::Other(format!("Button not found: {field_id}")))?;
+    let dict = doc
+        .get_dictionary(button)
+        .map_err(|e| AppError::lopdf("Failed to read button", e))?;
+    let action = dict
+        .get(b"A")
+        .ok()
+        .map(|o| deref(&doc, o))
+        .and_then(|o| o.as_dict().ok())
+        .ok_or_else(|| AppError::Other("Button has no ResetForm action".into()))?;
+    if action.get(b"S").ok().and_then(|o| o.as_name().ok()) != Some(&b"ResetForm"[..]) {
+        return Err(AppError::Other("Button is not a ResetForm button".into()));
+    }
+
+    // /Fields lists field references or fully-qualified name strings. /Flags
+    // bit 1 set = exclude those fields (reset all others); clear = reset only
+    // those. No /Fields = reset everything.
+    let names: Vec<String> = match action.get(b"Fields").ok().map(|o| deref(&doc, o)) {
+        Some(Object::Array(arr)) => arr
+            .iter()
+            .filter_map(|o| match deref(&doc, o) {
+                Object::String(s, _) => Some(decode_pdf_string(s)),
+                _ => o.as_reference().ok().map(|id| fq_of(&doc, id)),
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    if names.is_empty() {
+        return Ok(ResetScope::All);
+    }
+    let exclude = action.get(b"Flags").ok().and_then(|o| o.as_i64().ok()).unwrap_or(0) & 1 != 0;
+    Ok(if exclude {
+        ResetScope::Except(names)
+    } else {
+        ResetScope::Only(names)
+    })
+}
+
+fn reset_scope_impl(state: &AppState, doc_id: String, scope: ResetScope) -> Result<(), AppError> {
+    let buffer = {
+        let entry = state.get_document(&doc_id)?;
+        let entry = lock_mutex(&entry)?;
+        entry.buffer.clone()
+    };
+    let mut doc = Document::load_mem(&buffer)
+        .map_err(|e| AppError::lopdf("Failed to parse PDF for form reset", e))?;
+
+    let mut terminals = Vec::new();
+    for id in top_fields(&doc) {
+        collect_terminals(&doc, id, "", &mut terminals);
+    }
+    for (id, fq) in terminals {
+        let in_scope = match &scope {
+            ResetScope::All => true,
+            ResetScope::Only(names) => names.iter().any(|n| n == &fq),
+            ResetScope::Except(names) => !names.iter().any(|n| n == &fq),
+        };
+        if in_scope {
+            reset_field(&mut doc, id);
+        }
+    }
+    finalize_form_edit(doc, state, &doc_id)
+}
+
+/// Reset one terminal field to its `/DV` default, or clear it if it has none.
+fn reset_field(doc: &mut Document, field_id: ObjectId) {
+    let ft = inherited_ft(doc, field_id);
+    let dv = doc
+        .get_dictionary(field_id)
+        .ok()
+        .and_then(|d| d.get(b"DV").ok().map(|o| deref(doc, o).clone()));
+    let kids: Vec<ObjectId> = doc
+        .get_dictionary(field_id)
+        .ok()
+        .and_then(|d| d.get(b"Kids").ok().and_then(|o| deref(doc, o).as_array().ok()))
+        .map(|a| a.iter().filter_map(|k| k.as_reference().ok()).collect())
+        .unwrap_or_default();
+
+    if ft.as_deref() == Some(b"Btn") {
+        let on = match &dv {
+            Some(Object::Name(n)) => String::from_utf8_lossy(n).into_owned(),
+            _ => "Off".to_string(),
+        };
+        let name = Object::Name(on.as_bytes().to_vec());
+        if kids.is_empty() {
+            if let Ok(d) = doc.get_dictionary_mut(field_id) {
+                d.set("V", name.clone());
+                d.set("AS", name);
+            }
+        } else {
+            if let Ok(d) = doc.get_dictionary_mut(field_id) {
+                d.set("V", name);
+            }
+            for kid in kids {
+                let matches = match doc.get_dictionary(kid) {
+                    Ok(d) => ap_on_states(doc, d).iter().any(|s| *s == on),
+                    Err(_) => false,
+                };
+                if let Ok(d) = doc.get_dictionary_mut(kid) {
+                    let state = if matches { on.as_str() } else { "Off" };
+                    d.set("AS", Object::Name(state.as_bytes().to_vec()));
+                }
+            }
+        }
+    } else if let Ok(d) = doc.get_dictionary_mut(field_id) {
+        match dv {
+            Some(v) => d.set("V", v),
+            None => {
+                d.remove(b"V");
+            }
+        }
+    }
+}
+
+/// Finalize a mutated form document and apply it to the buffer: regenerate
+/// appearances, drop `/XFA` (so hybrid forms don't show stale XFA data) and the
+/// now-stale `/Prev` cross-reference chain, serialize, and swap the buffer.
+fn finalize_form_edit(mut doc: Document, state: &AppState, doc_id: &str) -> Result<(), AppError> {
     set_need_appearances(&mut doc);
     strip_xfa(&mut doc);
-
-    // `save_to` rewrites every object under one fresh cross-reference table, so
-    // the trailer's `/Prev` (and hybrid `/XRefStm`) pointers into the *original*
-    // file are now stale — lopdf itself rejects them on the next `load_mem`
-    // ("invalid start value in Prev field"). Drop them so our own output
-    // round-trips through a subsequent edit. (Real-world forms like f8946 are
-    // incrementally-updated and carry `/Prev`; freshly-authored PDFs don't.)
+    // See set_form_field_value_impl: `save_to` invalidates the trailer's /Prev
+    // into the original file, which lopdf then rejects on the next load_mem.
     doc.trailer.remove(b"Prev");
     doc.trailer.remove(b"XRefStm");
-
     let mut bytes = Vec::new();
     doc.save_to(&mut bytes)
-        .map_err(|e| AppError::io("Failed to serialize PDF after form update", e))?;
-    state.set_buffer_and_refresh(&doc_id, bytes)?;
-    Ok(())
+        .map_err(|e| AppError::io("Failed to serialize PDF after form edit", e))?;
+    state.set_buffer_and_refresh(doc_id, bytes)
+}
+
+/// Top-level field object ids from the AcroForm `/Fields` array.
+fn top_fields(doc: &Document) -> Vec<ObjectId> {
+    acroform_dict(doc)
+        .and_then(|af| {
+            af.get(b"Fields")
+                .ok()
+                .and_then(|o| deref(doc, o).as_array().ok())
+                .map(|a| a.iter().filter_map(|f| f.as_reference().ok()).collect())
+        })
+        .unwrap_or_default()
+}
+
+/// Collect all terminal field ids with their fully-qualified names.
+fn collect_terminals(
+    doc: &Document,
+    field_id: ObjectId,
+    parent_fq: &str,
+    out: &mut Vec<(ObjectId, String)>,
+) {
+    let Ok(dict) = doc.get_dictionary(field_id) else {
+        return;
+    };
+    let leaf = dict
+        .get(b"T")
+        .ok()
+        .and_then(|o| deref(doc, o).as_str().ok())
+        .map(decode_pdf_string);
+    let fq = match (&leaf, parent_fq.is_empty()) {
+        (Some(l), true) => l.clone(),
+        (Some(l), false) => format!("{parent_fq}.{l}"),
+        (None, _) => parent_fq.to_string(),
+    };
+    let kids: Vec<ObjectId> = dict
+        .get(b"Kids")
+        .ok()
+        .and_then(|o| deref(doc, o).as_array().ok())
+        .map(|a| a.iter().filter_map(|k| k.as_reference().ok()).collect())
+        .unwrap_or_default();
+    let has_subfields = kids
+        .iter()
+        .any(|k| doc.get_dictionary(*k).map(|d| d.has(b"T")).unwrap_or(false));
+    if has_subfields {
+        for k in kids {
+            collect_terminals(doc, k, &fq, out);
+        }
+    } else {
+        out.push((field_id, fq));
+    }
+}
+
+/// Fully-qualified name of a field, built by climbing `/Parent`.
+fn fq_of(doc: &Document, id: ObjectId) -> String {
+    let mut parts = Vec::new();
+    let mut cur = Some(id);
+    while let Some(c) = cur {
+        let Ok(d) = doc.get_dictionary(c) else { break };
+        if let Some(t) = d
+            .get(b"T")
+            .ok()
+            .and_then(|o| deref(doc, o).as_str().ok())
+            .map(decode_pdf_string)
+        {
+            parts.push(t);
+        }
+        cur = d.get(b"Parent").ok().and_then(|o| o.as_reference().ok());
+    }
+    parts.reverse();
+    parts.join(".")
 }
 
 /// Locate the terminal field whose fully-qualified name equals `want`.
@@ -716,6 +1052,110 @@ mod tests {
             )
             .expect("insert");
         state
+    }
+
+    fn reset_fixture() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/forms/acroform_reset.pdf")
+    }
+
+    fn field<'a>(fields: &'a [FormField], id: &str) -> &'a FormField {
+        fields.iter().find(|f| f.id == id).unwrap_or_else(|| panic!("no field {id}"))
+    }
+
+    #[test]
+    fn discovers_reset_and_unsupported_buttons() {
+        let bytes = std::fs::read(reset_fixture()).expect("read reset fixture");
+        let state = state_with_bytes(bytes, "mem.pdf");
+        let fields = get_form_fields_impl(&state, "doc-1".into(), 1).expect("fields");
+
+        let reset = field(&fields, "resetBtn");
+        assert_eq!(reset.field_type, FieldType::Button);
+        assert_eq!(reset.button_action, ButtonAction::ResetForm);
+        assert_eq!(reset.label, "Reset");
+
+        let js = field(&fields, "jsBtn");
+        assert_eq!(js.field_type, FieldType::Button);
+        assert_eq!(js.button_action, ButtonAction::Unsupported);
+        assert_eq!(js.label, "Clear");
+    }
+
+    #[test]
+    fn clear_form_resets_to_default_or_empty_and_leaves_disk_untouched() {
+        let _guard = crate::test_pdfium_guard();
+        let bytes = std::fs::read(reset_fixture()).expect("read reset fixture");
+        let tmp = std::env::temp_dir().join("tumbler_clear_form_test.pdf");
+        std::fs::write(&tmp, &bytes).expect("write tmp");
+        let path = tmp.to_string_lossy().into_owned();
+        let state = state_with_bytes(bytes, &path);
+        let disk_before = std::fs::read(&tmp).expect("read disk");
+
+        reset_scope_impl(&state, "doc-1".into(), ResetScope::All).expect("clear");
+
+        let fields = get_form_fields_impl(&state, "doc-1".into(), 1).expect("fields");
+        assert_eq!(field(&fields, "hasDefault").value, "Default"); // reset to /DV
+        assert_eq!(field(&fields, "noDefault").value, ""); // no /DV → cleared
+        assert_eq!(field(&fields, "agree").value, "Off"); // checkbox /DV /Off
+
+        let entry = state.get_document("doc-1").unwrap();
+        let entry = lock_mutex(&entry).unwrap();
+        assert!(entry.dirty, "clear must mark the doc dirty");
+        drop(entry);
+        assert_eq!(
+            std::fs::read(&tmp).expect("read disk"),
+            disk_before,
+            "clear must not touch the file until an explicit save"
+        );
+        std::fs::remove_file(&tmp).ok();
+    }
+
+    #[test]
+    fn reset_form_via_button_resets_all_fields() {
+        let _guard = crate::test_pdfium_guard();
+        let bytes = std::fs::read(reset_fixture()).expect("read reset fixture");
+        let state = state_with_bytes(bytes, "mem.pdf");
+
+        let scope = reset_scope_for_button(&state, "doc-1", "resetBtn").expect("scope");
+        assert!(matches!(scope, ResetScope::All)); // no /Fields → all
+        reset_scope_impl(&state, "doc-1".into(), scope).expect("reset");
+
+        let fields = get_form_fields_impl(&state, "doc-1".into(), 1).expect("fields");
+        assert_eq!(field(&fields, "hasDefault").value, "Default");
+        assert_eq!(field(&fields, "noDefault").value, "");
+        assert_eq!(field(&fields, "agree").value, "Off");
+    }
+
+    #[test]
+    fn reset_scope_rejects_non_reset_button() {
+        let bytes = std::fs::read(reset_fixture()).expect("read reset fixture");
+        let state = state_with_bytes(bytes, "mem.pdf");
+        // jsBtn has a JavaScript action, not ResetForm.
+        let err = reset_scope_for_button(&state, "doc-1", "jsBtn").unwrap_err();
+        assert!(err.to_string().contains("ResetForm"), "got: {err}");
+    }
+
+    #[test]
+    fn document_has_form_detects_forms() {
+        let with = std::fs::read(reset_fixture()).expect("read reset fixture");
+        let state = state_with_bytes(with, "mem.pdf");
+        assert!(document_has_form_impl(&state, "doc-1".into()).unwrap());
+    }
+
+    /// Real-world coverage: APP117217's "CLEAR" button is XFA-scripted with no
+    /// PDF `/A` action, so it must classify as an unsupported Button (clickable,
+    /// but Tumbler can't run it) rather than being silently dropped.
+    #[test]
+    fn app117217_clear_button_is_unsupported() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/forms/APP117217-06-01.pdf");
+        let bytes = std::fs::read(&path).expect("read APP117217");
+        let state = state_with_bytes(bytes, "app.pdf");
+
+        let button = (1..=5)
+            .flat_map(|p| get_form_fields_impl(&state, "doc-1".into(), p).unwrap_or_default())
+            .find(|f| f.field_type == FieldType::Button && f.label.eq_ignore_ascii_case("clear"))
+            .expect("CLEAR button should be discovered");
+        assert_eq!(button.button_action, ButtonAction::Unsupported);
     }
 
     /// A minimal in-memory PDF whose AcroForm carries the given /Fields and,

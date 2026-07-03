@@ -129,6 +129,13 @@ describe("Toolbar save / save as (issue #31)", () => {
     vi.mocked(save).mockResolvedValue(null);
 
     renderToolbar();
+    // The toolbar checks document_has_form on mount; ignore that and assert on
+    // what the cancelled Save As does (or rather, doesn't do).
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    vi.mocked(invoke).mockClear();
+
     await act(async () => {
       fireEvent.click(screen.getByTitle("Save As... (Ctrl+Shift+S)"));
       await new Promise((r) => setTimeout(r, 0));
