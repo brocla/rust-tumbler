@@ -63,7 +63,7 @@ fn main() {
         BT /F1 9 Tf 75 563 Td (subscribe: checkbox, on-state Yes) Tj ET\n\
         BT /F1 9 Tf 105 523 Td (color: radio group, options Red / Blue) Tj ET\n\
         BT /F1 9 Tf 210 484 Td (country: dropdown, options USA / Canada / Mexico) Tj ET\n\
-        BT /F1 9 Tf 210 444 Td (ssn: comb text field, /MaxLen 9 - caps input at 9 chars) Tj ET"
+        BT /F1 9 Tf 260 444 Td (ssn: comb text field, /MaxLen 9 - caps input at 9 chars) Tj ET"
         .to_vec();
     let content_id = doc.add_object(Stream::new(dictionary! {}, content));
 
@@ -172,6 +172,8 @@ fn main() {
     });
 
     // --- Comb text field: SSN-style, /MaxLen 9 -----------------------------
+    // A border makes pdfium draw the comb cell dividers (self-contained grid);
+    // real forms often omit it and rely on printed page artwork instead.
     let ssn_id = doc.add_object(dictionary! {
         "Type" => "Annot",
         "Subtype" => "Widget",
@@ -180,10 +182,12 @@ fn main() {
         "MaxLen" => 9,
         "T" => text("ssn"),
         "V" => text(""),
-        "Rect" => vec![50.into(), 440.into(), 200.into(), 460.into()],
+        "Rect" => vec![50.into(), 438.into(), 230.into(), 462.into()],
         "P" => page_id,
         "F" => 4,
         "DA" => text("/F1 12 Tf 0 g"),
+        "MK" => dictionary! { "BC" => vec![0.into()] },
+        "BS" => dictionary! { "W" => 1, "S" => "S" },
     });
 
     // --- Page ---------------------------------------------------------------
