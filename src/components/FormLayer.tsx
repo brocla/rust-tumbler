@@ -23,6 +23,8 @@ interface FormField {
   page: number;
   options: string[];
   readOnly: boolean;
+  maxLen: number | null;
+  comb: boolean;
   label: string;
   buttonAction: ButtonAction;
 }
@@ -127,6 +129,7 @@ export function FormLayer({ docId, pageNumber, zoom }: FormLayerProps) {
             style,
             value: current(field),
             disabled: field.readOnly,
+            maxLength: field.maxLen ?? undefined,
             onChange: (
               e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>,
             ) => setEdits((prev) => ({ ...prev, [field.id]: e.target.value })),

@@ -21,6 +21,7 @@ const FF_READ_ONLY: i64 = 1 << 0; // bit 1
 const FF_MULTILINE: i64 = 1 << 12; // Tx, bit 13
 const FF_PUSHBUTTON: i64 = 1 << 16; // Btn, bit 17
 const FF_RADIO: i64 = 1 << 15; // Btn, bit 16
+const FF_COMB: i64 = 1 << 24; // Tx, bit 25 (spread chars into /MaxLen cells)
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -69,6 +70,12 @@ pub struct FormField {
     /// Dropdown options (empty for other field types).
     pub options: Vec<String>,
     pub read_only: bool,
+    /// Character cap from `/MaxLen` for text fields; `None` if unlimited.
+    pub max_len: Option<u32>,
+    /// True for a comb text field (`/Ff` bit 25): its characters are meant to
+    /// be spread across `max_len` equal cells (e.g. an SSN box grid). The cell
+    /// rendering is a follow-up; for now it just rides alongside `max_len`.
+    pub comb: bool,
     /// Caption for a `Button` field (from `/MK /CA`); empty otherwise.
     pub label: String,
     /// For `Button` fields, what clicking it does; `None` for data fields.
@@ -270,6 +277,8 @@ fn collect_field(
                 page,
                 options: Vec::new(),
                 read_only,
+                max_len: None,
+                comb: false,
                 label: String::new(),
                 button_action: ButtonAction::None,
             });
@@ -300,6 +309,8 @@ fn collect_field(
             page,
             options: Vec::new(),
             read_only,
+            max_len: None,
+            comb: false,
             label,
             button_action: action,
         });
@@ -311,6 +322,20 @@ fn collect_field(
         return; // nothing renderable (e.g. an unsupported field type)
     }
 
+    // /MaxLen and the comb flag are text-field properties. Comb (bit 25) is
+    // only meaningful on a single-line text field with a /MaxLen.
+    let is_text = matches!(field_type, FieldType::Text | FieldType::MultilineText);
+    let max_len = if is_text {
+        dict.get(b"MaxLen")
+            .ok()
+            .and_then(|o| deref(doc, o).as_i64().ok())
+            .filter(|n| *n > 0)
+            .map(|n| n as u32)
+    } else {
+        None
+    };
+    let comb = field_type == FieldType::Text && ff & FF_COMB != 0 && max_len.is_some();
+
     out.push(FormField {
         id: fq,
         name: leaf_name,
@@ -321,6 +346,8 @@ fn collect_field(
         page,
         options,
         read_only,
+        max_len,
+        comb,
         label: String::new(),
         button_action: ButtonAction::None,
     });
@@ -1224,6 +1251,15 @@ mod tests {
         radios.sort();
         assert_eq!(radios, vec!["Blue", "Red"]);
         assert!(fields.iter().filter(|f| f.id == "color").all(|f| f.field_type == FieldType::Radio));
+
+        // The SSN field is a comb text field capped at 9 characters; a plain
+        // text field (fullName) has no cap and isn't comb.
+        let ssn = field(&fields, "ssn");
+        assert_eq!(ssn.field_type, FieldType::Text);
+        assert_eq!(ssn.max_len, Some(9));
+        assert!(ssn.comb);
+        assert_eq!(by_id("fullName").unwrap().max_len, None);
+        assert!(!by_id("fullName").unwrap().comb);
     }
 
     #[test]

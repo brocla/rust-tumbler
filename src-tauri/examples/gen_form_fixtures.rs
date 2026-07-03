@@ -29,6 +29,7 @@ use std::path::Path;
 const FF_MULTILINE: i64 = 1 << 12; // Tx, bit 13
 const FF_RADIO: i64 = 1 << 15; // Btn, bit 16
 const FF_COMBO: i64 = 1 << 17; // Ch, bit 18
+const FF_COMB: i64 = 1 << 24; // Tx, bit 25 (spread chars into /MaxLen cells)
 
 /// A PDF literal text string.
 fn text(s: &str) -> Object {
@@ -61,7 +62,8 @@ fn main() {
         BT /F1 9 Tf 310 668 Td (comments: multiline text field) Tj ET\n\
         BT /F1 9 Tf 75 563 Td (subscribe: checkbox, on-state Yes) Tj ET\n\
         BT /F1 9 Tf 105 523 Td (color: radio group, options Red / Blue) Tj ET\n\
-        BT /F1 9 Tf 210 484 Td (country: dropdown, options USA / Canada / Mexico) Tj ET"
+        BT /F1 9 Tf 210 484 Td (country: dropdown, options USA / Canada / Mexico) Tj ET\n\
+        BT /F1 9 Tf 210 444 Td (ssn: comb text field, /MaxLen 9 - caps input at 9 chars) Tj ET"
         .to_vec();
     let content_id = doc.add_object(Stream::new(dictionary! {}, content));
 
@@ -169,6 +171,21 @@ fn main() {
         "DA" => text("/F1 12 Tf 0 g"),
     });
 
+    // --- Comb text field: SSN-style, /MaxLen 9 -----------------------------
+    let ssn_id = doc.add_object(dictionary! {
+        "Type" => "Annot",
+        "Subtype" => "Widget",
+        "FT" => "Tx",
+        "Ff" => FF_COMB,
+        "MaxLen" => 9,
+        "T" => text("ssn"),
+        "V" => text(""),
+        "Rect" => vec![50.into(), 440.into(), 200.into(), 460.into()],
+        "P" => page_id,
+        "F" => 4,
+        "DA" => text("/F1 12 Tf 0 g"),
+    });
+
     // --- Page ---------------------------------------------------------------
     doc.set_object(
         page_id,
@@ -183,6 +200,7 @@ fn main() {
                 red_kid_id.into(),
                 blue_kid_id.into(),
                 country_id.into(),
+                ssn_id.into(),
             ],
             "Resources" => dictionary! {
                 "Font" => dictionary! { "F1" => font_id },
@@ -207,6 +225,7 @@ fn main() {
             subscribe_id.into(),
             color_id.into(),
             country_id.into(),
+            ssn_id.into(),
         ],
         "DA" => text("/F1 12 Tf 0 g"),
         "DR" => dictionary! {
