@@ -310,9 +310,17 @@ export function ContinuousViewer() {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (!activeTab) return;
 
-      // Don't capture when typing in an input
+      // Don't capture when typing in a form field (incl. the multiline
+      // textarea) or any editable element.
       const target = e.target as HTMLElement;
-      if (target.tagName === "INPUT" || target.tagName === "SELECT") return;
+      if (
+        target.tagName === "INPUT" ||
+        target.tagName === "SELECT" ||
+        target.tagName === "TEXTAREA" ||
+        target.isContentEditable
+      ) {
+        return;
+      }
 
       if (e.key === "PageDown") {
         e.preventDefault();
