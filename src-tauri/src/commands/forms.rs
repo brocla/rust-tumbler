@@ -81,6 +81,10 @@ pub struct FormField {
     pub label: String,
     /// For `Button` fields, what clicking it does; `None` for data fields.
     pub button_action: ButtonAction,
+    /// Human-readable label from `/TU` (the field's "alternate name") — used as
+    /// the hover tooltip and the accessible name, since `/T` is often a cryptic
+    /// machine key. `None` when the field has no `/TU`.
+    pub tooltip: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -279,6 +283,13 @@ fn collect_field(
     let read_only = flags(dict) & FF_READ_ONLY != 0;
     let leaf_name = leaf.unwrap_or_else(|| fq.clone());
     let ff = flags(dict);
+    // /TU (alternate name) → tooltip/accessible label. On a radio group it sits
+    // on the parent field, so each button widget inherits it.
+    let tooltip = dict
+        .get(b"TU")
+        .ok()
+        .and_then(|o| deref(doc, o).as_str().ok())
+        .map(decode_pdf_string);
 
     // Radio group: one FormField per button widget, each at its own /Rect with
     // its own export value, all sharing the group's fq id and current value.
@@ -302,6 +313,7 @@ fn collect_field(
                 comb: false,
                 label: String::new(),
                 button_action: ButtonAction::None,
+                tooltip: tooltip.clone(),
             });
         }
         return;
@@ -334,6 +346,7 @@ fn collect_field(
             comb: false,
             label,
             button_action: action,
+            tooltip,
         });
         return;
     }
@@ -371,6 +384,7 @@ fn collect_field(
         comb,
         label: String::new(),
         button_action: ButtonAction::None,
+        tooltip,
     });
 }
 
@@ -1495,6 +1509,27 @@ mod tests {
         assert!(ssn.comb);
         assert_eq!(by_id("fullName").unwrap().max_len, None);
         assert!(!by_id("fullName").unwrap().comb);
+
+        // /TU becomes the tooltip; a field without /TU has none.
+        assert_eq!(
+            by_id("fullName").unwrap().tooltip.as_deref(),
+            Some("Your full legal name")
+        );
+        assert_eq!(by_id("comments").unwrap().tooltip, None);
+    }
+
+    /// Real-world coverage: f8946 tags its fields with /TU alternate names for
+    /// accessibility, so discovery should surface tooltips.
+    #[test]
+    fn f8946_fields_carry_tu_tooltips() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/forms/f8946.pdf");
+        let bytes = std::fs::read(&path).expect("read f8946");
+        let state = state_with_bytes(bytes, "f8946.pdf");
+        let any_tooltip = (1..=3)
+            .flat_map(|p| get_form_fields_impl(&state, "doc-1".into(), p).unwrap_or_default())
+            .any(|f| f.tooltip.as_deref().map(|t| !t.is_empty()).unwrap_or(false));
+        assert!(any_tooltip, "f8946 fields should expose /TU tooltips");
     }
 
     #[test]

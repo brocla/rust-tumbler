@@ -30,6 +30,7 @@ interface FormField {
   comb: boolean;
   label: string;
   buttonAction: ButtonAction;
+  tooltip: string | null;
 }
 
 interface FormLayerProps {
@@ -142,6 +143,7 @@ export function FormLayer({ docId, pageNumber, zoom }: FormLayerProps) {
               fieldId={field.id}
               rect={field.rect}
               zoom={zoom}
+              tooltip={field.tooltip}
             />
           );
         }
@@ -154,6 +156,12 @@ export function FormLayer({ docId, pageNumber, zoom }: FormLayerProps) {
           height: field.rect.height * scale,
         };
 
+        // /TU alternate name → native hover tooltip and accessible name (form
+        // controls have no visible <label>). Spread onto every control.
+        const a11y = field.tooltip
+          ? { title: field.tooltip, "aria-label": field.tooltip }
+          : {};
+
         if (field.fieldType === "text" || field.fieldType === "multiline_text") {
           // A comb field is a transparent ghost at rest (pdfium shows the combed
           // value) and only opaque while focused.
@@ -162,6 +170,7 @@ export function FormLayer({ docId, pageNumber, zoom }: FormLayerProps) {
           // updates the DOM. Uncontrolled `defaultValue` only applies on mount,
           // so React would keep showing the pre-reset text on the reused node.
           const common = {
+            ...a11y,
             className: `form-field${ghost ? " form-ghost" : ""}`,
             style,
             value: current(field),
@@ -207,6 +216,7 @@ export function FormLayer({ docId, pageNumber, zoom }: FormLayerProps) {
           return (
             <input
               key={i}
+              {...a11y}
               type="checkbox"
               className="form-field form-check"
               style={style}
@@ -223,6 +233,7 @@ export function FormLayer({ docId, pageNumber, zoom }: FormLayerProps) {
           return (
             <input
               key={i}
+              {...a11y}
               type="radio"
               className="form-field form-check"
               style={style}
@@ -238,6 +249,7 @@ export function FormLayer({ docId, pageNumber, zoom }: FormLayerProps) {
           return (
             <select
               key={i}
+              {...a11y}
               className="form-field"
               style={style}
               disabled={field.readOnly}
@@ -266,10 +278,12 @@ export function FormLayer({ docId, pageNumber, zoom }: FormLayerProps) {
               style={style}
               disabled={field.readOnly}
               title={
-                field.buttonAction === "reset_form"
+                field.tooltip ??
+                (field.buttonAction === "reset_form"
                   ? "Reset form fields"
-                  : "This button's action is not supported"
+                  : "This button's action is not supported")
               }
+              aria-label={field.tooltip ?? field.label}
               onClick={() => clickButton(field)}
             >
               {field.label}

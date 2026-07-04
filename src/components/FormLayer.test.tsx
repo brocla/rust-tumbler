@@ -176,6 +176,37 @@ describe("FormLayer", () => {
     );
   });
 
+  it("exposes /TU as the control's title and accessible name", async () => {
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_form_fields")
+        return [
+          {
+            id: "fullName",
+            name: "fullName",
+            fieldType: "text",
+            value: "",
+            exportValue: "",
+            rect: { x: 50, y: 50, width: 200, height: 20 },
+            page: 1,
+            options: [],
+            readOnly: false,
+            maxLen: null,
+            comb: false,
+            label: "",
+            buttonAction: "none",
+            tooltip: "Your full legal name",
+          },
+        ];
+      return undefined;
+    });
+    await act(async () => {
+      render(<FormLayer docId="doc-1" pageNumber={1} zoom={100} />);
+    });
+    // aria-label drives the accessible name; title drives the hover tooltip.
+    const input = await screen.findByRole("textbox", { name: "Your full legal name" });
+    expect(input.getAttribute("title")).toBe("Your full legal name");
+  });
+
   it("renders nothing when the page has no fields", async () => {
     mockInvoke.mockImplementation(async () => []);
     const { container } = render(

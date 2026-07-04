@@ -73,6 +73,7 @@ fn main() {
         "Subtype" => "Widget",
         "FT" => "Tx",
         "T" => text("fullName"),
+        "TU" => text("Your full legal name"),
         "V" => text(""),
         "Rect" => vec![50.into(), 700.into(), 300.into(), 720.into()],
         "P" => page_id,

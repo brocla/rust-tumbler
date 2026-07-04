@@ -13,6 +13,7 @@ interface SignatureFieldProps {
   fieldId: string;
   rect: { x: number; y: number; width: number; height: number };
   zoom: number;
+  tooltip?: string | null;
 }
 
 const clamp01 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v);
@@ -26,7 +27,7 @@ const clamp01 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v);
  * while being drawn). No Clear button: Undo (Ctrl+Z) / Redo (Ctrl+Y) per
  * stroke, Esc to start over, and a hover-revealed reset when there's ink.
  */
-export function SignatureField({ docId, pageNumber, fieldId, rect, zoom }: SignatureFieldProps) {
+export function SignatureField({ docId, pageNumber, fieldId, rect, zoom, tooltip }: SignatureFieldProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const strokesRef = useRef<Stroke[]>([]);
   const redoRef = useRef<Stroke[]>([]);
@@ -207,6 +208,9 @@ export function SignatureField({ docId, pageNumber, fieldId, rect, zoom }: Signa
         width={Math.round(cssW * dpr)}
         height={Math.round(cssH * dpr)}
         style={{ width: cssW, height: cssH }}
+        title={tooltip ?? "Signature field"}
+        aria-label={tooltip ?? "Signature field"}
+        role="img"
         tabIndex={0}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
