@@ -4,6 +4,15 @@ import { usePdfStore } from "../store/usePdfStore";
 import { evictPageCache, evictPages } from "../utils/renderCache";
 import { SignatureField } from "./SignatureField";
 
+// Reused canvas for measuring text width (auto-size fit-to-width).
+let measureCtx: CanvasRenderingContext2D | null = null;
+function measureTextWidth(text: string, fontPx: number, fontFamily: string): number {
+  if (!measureCtx) measureCtx = document.createElement("canvas").getContext("2d");
+  if (!measureCtx) return 0;
+  measureCtx.font = `${fontPx}px ${fontFamily}`;
+  return measureCtx.measureText(text).width;
+}
+
 type FieldType =
   | "text"
   | "multiline_text"
@@ -30,6 +39,10 @@ interface FormField {
   comb: boolean;
   label: string;
   buttonAction: ButtonAction;
+  align: "left" | "center" | "right";
+  fontSize: number | null;
+  color: string | null;
+  fontFamily: string | null;
 }
 
 interface FormLayerProps {
@@ -154,6 +167,37 @@ export function FormLayer({ docId, pageNumber, zoom }: FormLayerProps) {
           height: field.rect.height * scale,
         };
 
+        // Text styling from /DA + /Q (variable-text fields). Points scale like
+        // the rect (1 pt = `scale` css px at the current zoom).
+        const explicitPt = field.fontSize && field.fontSize > 0 ? field.fontSize : null;
+        const fontFamily = field.fontFamily ?? undefined;
+        let fontPx: number;
+        if (explicitPt) {
+          fontPx = explicitPt * scale;
+        } else if (field.fieldType === "multiline_text") {
+          fontPx = 11 * scale; // multiline auto-size: sensible default (wraps)
+        } else {
+          // Single-line/dropdown auto-size (/DA `0 Tf`): the largest size that
+          // fits both the box height and — the usual binding constraint — the
+          // text width. Recomputed per render, so it shrinks as you type.
+          // Measure in the SAME font the input renders in (its own /DA font, or
+          // the app's inherited font when it has none) — measuring in a
+          // different font mis-sizes the fit and lets text overflow.
+          const measureFamily =
+            field.fontFamily ?? "'Segoe UI', system-ui, sans-serif";
+          const heightCap = field.rect.height * scale * 0.8;
+          const avail = field.rect.width * scale - 8; // border + padding
+          const text = current(field);
+          const w = text ? measureTextWidth(text, heightCap, measureFamily) : 0;
+          fontPx = w > avail && w > 0 ? Math.max(5, heightCap * (avail / w)) : heightCap;
+        }
+        const textStyle: React.CSSProperties = {
+          fontSize: fontPx,
+          textAlign: field.align,
+          color: field.color ?? undefined,
+          fontFamily,
+        };
+
         if (field.fieldType === "text" || field.fieldType === "multiline_text") {
           // A comb field is a transparent ghost at rest (pdfium shows the combed
           // value) and only opaque while focused.
@@ -163,7 +207,7 @@ export function FormLayer({ docId, pageNumber, zoom }: FormLayerProps) {
           // so React would keep showing the pre-reset text on the reused node.
           const common = {
             className: `form-field${ghost ? " form-ghost" : ""}`,
-            style,
+            style: { ...style, ...textStyle },
             value: current(field),
             disabled: field.readOnly,
             maxLength: field.maxLen ?? undefined,
@@ -239,7 +283,7 @@ export function FormLayer({ docId, pageNumber, zoom }: FormLayerProps) {
             <select
               key={i}
               className="form-field"
-              style={style}
+              style={{ ...style, ...textStyle }}
               disabled={field.readOnly}
               value={current(field)}
               onChange={(e) => commit(field.id, e.target.value)}

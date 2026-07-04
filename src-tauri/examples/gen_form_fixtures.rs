@@ -259,6 +259,80 @@ fn main() {
         .save(&reset_path)
         .unwrap_or_else(|e| panic!("save reset fixture: {e}"));
     println!("wrote {}", reset_path.display());
+
+    let styling_path = out_dir.join("acroform_styling.pdf");
+    build_styling_fixture()
+        .save(&styling_path)
+        .unwrap_or_else(|e| panic!("save styling fixture: {e}"));
+    println!("wrote {}", styling_path.display());
+}
+
+/// A one-page PDF exercising text styling from `/DA` + `/Q`: alignment, size,
+/// color, and auto-size. Each text field is pre-filled and labeled with its
+/// expected styling so a live test is self-describing.
+fn build_styling_fixture() -> Document {
+    let mut doc = Document::with_version("1.7");
+    let font_id = doc.add_object(dictionary! {
+        "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
+    });
+    let page_id = doc.new_object_id();
+    let content = b"\
+        BT /F1 13 Tf 50 762 Td (Tumbler field-text-styling test fixture) Tj ET\n\
+        BT /F1 9 Tf 360 716 Td (left, 12pt, black) Tj ET\n\
+        BT /F1 9 Tf 360 681 Td (center, 12pt, red) Tj ET\n\
+        BT /F1 9 Tf 360 646 Td (right, 10pt, blue) Tj ET\n\
+        BT /F1 9 Tf 360 606 Td (left, 20pt, black) Tj ET\n\
+        BT /F1 9 Tf 360 561 Td (auto-size: Tf 0 fills the box) Tj ET"
+        .to_vec();
+    let content_id = doc.add_object(Stream::new(dictionary! {}, content));
+
+    // (name, value, rect, /Q, /DA)
+    let specs: [(&str, &str, [i64; 4], i64, &str); 5] = [
+        ("leftBlack", "Left aligned", [50, 710, 350, 730], 0, "/F1 12 Tf 0 g"),
+        ("centerRed", "Centered", [50, 675, 350, 695], 1, "/F1 12 Tf 1 0 0 rg"),
+        ("rightBlue", "Right", [50, 640, 350, 660], 2, "/F1 10 Tf 0 0 1 rg"),
+        ("bigText", "Big", [50, 595, 350, 625], 0, "/F1 20 Tf 0 g"),
+        ("autoSize", "Auto-sized to fit this tall box", [50, 545, 350, 585], 0, "/F1 0 Tf 0 g"),
+    ];
+    let mut field_ids = Vec::new();
+    for (name, value, r, q, da) in specs {
+        let id = doc.add_object(dictionary! {
+            "Type" => "Annot", "Subtype" => "Widget", "FT" => "Tx",
+            "T" => text(name),
+            "V" => text(value),
+            "Q" => q,
+            "Rect" => vec![r[0].into(), r[1].into(), r[2].into(), r[3].into()],
+            "P" => page_id, "F" => 4,
+            "DA" => text(da),
+            "MK" => dictionary! { "BC" => vec![0.into()] },
+            "BS" => dictionary! { "W" => 1, "S" => "S" },
+        });
+        field_ids.push(id);
+    }
+
+    let annots: Vec<Object> = field_ids.iter().map(|id| (*id).into()).collect();
+    doc.set_object(page_id, dictionary! {
+        "Type" => "Page",
+        "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+        "Contents" => content_id,
+        "Annots" => annots.clone(),
+        "Resources" => dictionary! { "Font" => dictionary! { "F1" => font_id } },
+    });
+    let pages_id = doc.add_object(dictionary! {
+        "Type" => "Pages", "Kids" => vec![page_id.into()], "Count" => 1,
+    });
+    if let Ok(p) = doc.get_dictionary_mut(page_id) { p.set("Parent", pages_id); }
+
+    let acroform_id = doc.add_object(dictionary! {
+        "Fields" => annots,
+        "DA" => text("/F1 12 Tf 0 g"),
+        "DR" => dictionary! { "Font" => dictionary! { "F1" => font_id } },
+    });
+    let catalog_id = doc.add_object(dictionary! {
+        "Type" => "Catalog", "Pages" => pages_id, "AcroForm" => acroform_id,
+    });
+    doc.trailer.set("Root", catalog_id);
+    doc
 }
 
 /// A one-page PDF for exercising form *actions* (issue: form buttons):

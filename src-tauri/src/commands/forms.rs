@@ -81,6 +81,122 @@ pub struct FormField {
     pub label: String,
     /// For `Button` fields, what clicking it does; `None` for data fields.
     pub button_action: ButtonAction,
+    // --- text styling (variable-text fields: text + choice) ---
+    /// Text alignment from `/Q`: `"left"`, `"center"`, or `"right"`.
+    pub align: String,
+    /// Font size in points from `/DA` (`… size Tf`). `None` or `0` means
+    /// auto-size (fit the box).
+    pub font_size: Option<f32>,
+    /// Text color from `/DA` as a CSS hex string (e.g. `#0000ff`); `None` = black.
+    pub color: Option<String>,
+    /// CSS font family mapped from the `/DA` font name; `None` = default.
+    pub font_family: Option<String>,
+}
+
+/// Parsed pieces of a `/DA` (default appearance) string.
+#[derive(Default)]
+struct DaStyle {
+    size: Option<f32>,
+    color: Option<String>,
+    font_family: Option<String>,
+}
+
+/// Parse a `/DA` string like `/Helv 12 Tf 0 g` or `1 0 0 rg /TiRo 0 Tf`. We only
+/// need the font (name → CSS family), the `Tf` size, and the fill color.
+fn parse_da(da: &str) -> DaStyle {
+    let toks: Vec<&str> = da.split_whitespace().collect();
+    let mut out = DaStyle::default();
+    let num = |t: &str| t.parse::<f32>().ok();
+    for (i, t) in toks.iter().enumerate() {
+        match *t {
+            "Tf" if i >= 2 => {
+                out.font_family = toks[i - 2]
+                    .strip_prefix('/')
+                    .and_then(map_font_family);
+                out.size = num(toks[i - 1]);
+            }
+            "g" if i >= 1 => {
+                if let Some(v) = num(toks[i - 1]) {
+                    out.color = Some(gray_hex(v));
+                }
+            }
+            "rg" if i >= 3 => {
+                if let (Some(r), Some(g), Some(b)) =
+                    (num(toks[i - 3]), num(toks[i - 2]), num(toks[i - 1]))
+                {
+                    out.color = Some(rgb_hex(r, g, b));
+                }
+            }
+            "k" if i >= 4 => {
+                if let (Some(c), Some(m), Some(y), Some(k)) = (
+                    num(toks[i - 4]),
+                    num(toks[i - 3]),
+                    num(toks[i - 2]),
+                    num(toks[i - 1]),
+                ) {
+                    out.color = Some(rgb_hex(
+                        (1.0 - c) * (1.0 - k),
+                        (1.0 - m) * (1.0 - k),
+                        (1.0 - y) * (1.0 - k),
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+fn map_font_family(name: &str) -> Option<String> {
+    let n = name.to_lowercase();
+    if n.contains("helv") || n.contains("arial") {
+        Some("Helvetica, Arial, sans-serif".into())
+    } else if n.contains("tiro") || n.contains("times") {
+        Some("'Times New Roman', Times, serif".into())
+    } else if n.contains("cour") {
+        Some("'Courier New', Courier, monospace".into())
+    } else {
+        None
+    }
+}
+
+fn gray_hex(v: f32) -> String {
+    rgb_hex(v, v, v)
+}
+
+fn rgb_hex(r: f32, g: f32, b: f32) -> String {
+    let c = |x: f32| (x.clamp(0.0, 1.0) * 255.0).round() as u8;
+    format!("#{:02x}{:02x}{:02x}", c(r), c(g), c(b))
+}
+
+/// Field alignment from `/Q` (0 left, 1 center, 2 right); default left.
+fn quadding(dict: &Dictionary) -> String {
+    match dict.get(b"Q").ok().and_then(|o| o.as_i64().ok()) {
+        Some(1) => "center",
+        Some(2) => "right",
+        _ => "left",
+    }
+    .to_string()
+}
+
+/// The effective `/DA` for a field: its own, else the document's AcroForm `/DA`.
+fn field_da(doc: &Document, dict: &Dictionary) -> String {
+    dict.get(b"DA")
+        .ok()
+        .and_then(|o| deref(doc, o).as_str().ok())
+        .map(decode_pdf_string)
+        .or_else(|| {
+            acroform_dict(doc).and_then(|af| {
+                af.get(b"DA")
+                    .ok()
+                    .and_then(|o| af_da_string(doc, o))
+            })
+        })
+        .unwrap_or_default()
+}
+
+fn af_da_string(doc: &Document, o: &Object) -> Option<String> {
+    deref(doc, o).as_str().ok().map(decode_pdf_string)
 }
 
 // ---------------------------------------------------------------------------
@@ -302,6 +418,10 @@ fn collect_field(
                 comb: false,
                 label: String::new(),
                 button_action: ButtonAction::None,
+                align: "left".into(),
+                font_size: None,
+                color: None,
+                font_family: None,
             });
         }
         return;
@@ -334,6 +454,10 @@ fn collect_field(
             comb: false,
             label,
             button_action: action,
+            align: "left".into(),
+            font_size: None,
+            color: None,
+            font_family: None,
         });
         return;
     }
@@ -357,6 +481,15 @@ fn collect_field(
     };
     let comb = field_type == FieldType::Text && ff & FF_COMB != 0 && max_len.is_some();
 
+    // Text styling applies to variable-text fields (text + choice).
+    let styled = is_text || field_type == FieldType::Dropdown;
+    let (align, font_size, color, font_family) = if styled {
+        let da = parse_da(&field_da(doc, dict));
+        (quadding(dict), da.size, da.color, da.font_family)
+    } else {
+        ("left".to_string(), None, None, None)
+    };
+
     out.push(FormField {
         id: fq,
         name: leaf_name,
@@ -371,6 +504,10 @@ fn collect_field(
         comb,
         label: String::new(),
         button_action: ButtonAction::None,
+        align,
+        font_size,
+        color,
+        font_family,
     });
 }
 
@@ -1224,8 +1361,54 @@ mod tests {
             .join("tests/fixtures/forms/acroform_signature.pdf")
     }
 
+    fn styling_fixture() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/forms/acroform_styling.pdf")
+    }
+
     fn field<'a>(fields: &'a [FormField], id: &str) -> &'a FormField {
         fields.iter().find(|f| f.id == id).unwrap_or_else(|| panic!("no field {id}"))
+    }
+
+    #[test]
+    fn parse_da_extracts_size_color_and_font() {
+        let a = parse_da("/Helv 12 Tf 1 0 0 rg");
+        assert_eq!(a.size, Some(12.0));
+        assert_eq!(a.color.as_deref(), Some("#ff0000"));
+        assert_eq!(a.font_family.as_deref(), Some("Helvetica, Arial, sans-serif"));
+
+        let b = parse_da("/F1 0 Tf 0 g"); // auto-size, black
+        assert_eq!(b.size, Some(0.0));
+        assert_eq!(b.color.as_deref(), Some("#000000"));
+
+        let c = parse_da("0 0 0 1 k /Cour 8 Tf"); // CMYK black + courier
+        assert_eq!(c.size, Some(8.0));
+        assert_eq!(c.color.as_deref(), Some("#000000"));
+        assert_eq!(c.font_family.as_deref(), Some("'Courier New', Courier, monospace"));
+    }
+
+    #[test]
+    fn discovers_text_styling_from_da_and_q() {
+        let bytes = std::fs::read(styling_fixture()).expect("read styling fixture");
+        let state = state_with_bytes(bytes, "mem.pdf");
+        let fields = get_form_fields_impl(&state, "doc-1".into(), 1).expect("fields");
+
+        let left = field(&fields, "leftBlack");
+        assert_eq!(left.align, "left");
+        assert_eq!(left.font_size, Some(12.0));
+        assert_eq!(left.color.as_deref(), Some("#000000"));
+
+        let center = field(&fields, "centerRed");
+        assert_eq!(center.align, "center");
+        assert_eq!(center.color.as_deref(), Some("#ff0000"));
+
+        let right = field(&fields, "rightBlue");
+        assert_eq!(right.align, "right");
+        assert_eq!(right.font_size, Some(10.0));
+        assert_eq!(right.color.as_deref(), Some("#0000ff"));
+
+        // Tf 0 → auto-size.
+        assert_eq!(field(&fields, "autoSize").font_size, Some(0.0));
     }
 
     #[test]
