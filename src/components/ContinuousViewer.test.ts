@@ -1,6 +1,40 @@
 import { describe, it, expect } from "vitest";
-import { activeSearchRect, scrollTargetForRect } from "./ContinuousViewer";
+import { activeSearchRect, fitZoom, scrollTargetForRect } from "./ContinuousViewer";
 import type { SearchResult } from "../store/usePdfStore";
+
+describe("fitZoom", () => {
+  // 100x200 page, 1032px-wide container minus 32px padding = 1000px usable.
+  // fit-width = 1000 / 100 * 100 = 1000% → clamped to 400.
+  const dim = { width: 100, height: 200 };
+
+  it("returns null for numeric mode", () => {
+    expect(fitZoom("numeric", dim, 1032, 800, 32)).toBeNull();
+  });
+
+  it("fits width to the container", () => {
+    // container 232 wide → usable 200 → 200/100*100 = 200%
+    expect(fitZoom("fit-width", dim, 232, 800, 32)).toBe(200);
+  });
+
+  it("fit-width-90 is 90% of fit-width", () => {
+    // fit-width = 200% → 90% = 180%
+    expect(fitZoom("fit-width-90", dim, 232, 800, 32)).toBe(180);
+  });
+
+  it("fits page height to the container", () => {
+    // container 432 tall → usable 400 → 400/200*100 = 200%
+    expect(fitZoom("fit-page", dim, 1032, 432, 32)).toBe(200);
+  });
+
+  it("clamps above 400", () => {
+    expect(fitZoom("fit-width", dim, 1032, 800, 32)).toBe(400);
+  });
+
+  it("clamps below 10", () => {
+    // usable width 8 → 8/100*100 = 8% → clamped to 10
+    expect(fitZoom("fit-width", dim, 40, 800, 32)).toBe(10);
+  });
+});
 
 describe("activeSearchRect", () => {
   const results: SearchResult[] = [
