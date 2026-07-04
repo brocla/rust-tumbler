@@ -33,6 +33,12 @@ type FnGetPageWidth = unsafe extern "C" fn(page: *mut c_void) -> f64;
 #[allow(non_camel_case_types)]
 type FnGetPageHeight = unsafe extern "C" fn(page: *mut c_void) -> f64;
 #[allow(non_camel_case_types)]
+type FnClosePage = unsafe extern "C" fn(page: *mut c_void);
+#[allow(non_camel_case_types)]
+type FnCloseDocument = unsafe extern "C" fn(document: *mut c_void);
+// Vector render straight to a GDI DC — used for pages with no form fields, so
+// they print at full printer resolution with selectable text (unchanged path).
+#[allow(non_camel_case_types)]
 type FnRenderPage = unsafe extern "C" fn(
     dc: *mut c_void,
     page: *mut c_void,
@@ -43,10 +49,78 @@ type FnRenderPage = unsafe extern "C" fn(
     rotate: c_int,
     flags: c_int,
 );
+
+// Widget detection: only pages that actually carry form fields need the raster
+// path below.
 #[allow(non_camel_case_types)]
-type FnClosePage = unsafe extern "C" fn(page: *mut c_void);
+type FnGetAnnotCount = unsafe extern "C" fn(page: *mut c_void) -> c_int;
 #[allow(non_camel_case_types)]
-type FnCloseDocument = unsafe extern "C" fn(document: *mut c_void);
+type FnGetAnnot = unsafe extern "C" fn(page: *mut c_void, index: c_int) -> *mut c_void;
+#[allow(non_camel_case_types)]
+type FnGetAnnotSubtype = unsafe extern "C" fn(annot: *mut c_void) -> c_int;
+#[allow(non_camel_case_types)]
+type FnCloseAnnot = unsafe extern "C" fn(annot: *mut c_void);
+const FPDF_ANNOT_WIDGET: c_int = 20;
+
+// Interactive form fields (widgets) are NOT drawn by FPDF_RenderPage — they are
+// owned by the form-fill module. Rendering them requires initializing a
+// form-fill environment and calling FPDF_FFLDraw onto a bitmap. Since FFLDraw
+// only targets a bitmap, pages that contain widgets are rasterized (page + form)
+// and blitted to the printer DC; pages without widgets keep the vector DC path.
+#[allow(non_camel_case_types)]
+type FnInitFormEnv =
+    unsafe extern "C" fn(document: *mut c_void, form_info: *mut FpdfFormFillInfo) -> *mut c_void;
+#[allow(non_camel_case_types)]
+type FnExitFormEnv = unsafe extern "C" fn(form: *mut c_void);
+#[allow(non_camel_case_types)]
+type FnFfldraw = unsafe extern "C" fn(
+    form: *mut c_void,
+    bitmap: *mut c_void,
+    page: *mut c_void,
+    start_x: c_int,
+    start_y: c_int,
+    size_x: c_int,
+    size_y: c_int,
+    rotate: c_int,
+    flags: c_int,
+);
+#[allow(non_camel_case_types)]
+type FnBitmapCreate =
+    unsafe extern "C" fn(width: c_int, height: c_int, alpha: c_int) -> *mut c_void;
+#[allow(non_camel_case_types)]
+type FnBitmapFillRect = unsafe extern "C" fn(
+    bitmap: *mut c_void,
+    left: c_int,
+    top: c_int,
+    width: c_int,
+    height: c_int,
+    color: u32,
+);
+#[allow(non_camel_case_types)]
+type FnRenderPageBitmap = unsafe extern "C" fn(
+    bitmap: *mut c_void,
+    page: *mut c_void,
+    start_x: c_int,
+    start_y: c_int,
+    size_x: c_int,
+    size_y: c_int,
+    rotate: c_int,
+    flags: c_int,
+);
+#[allow(non_camel_case_types)]
+type FnBitmapGetBuffer = unsafe extern "C" fn(bitmap: *mut c_void) -> *mut c_void;
+#[allow(non_camel_case_types)]
+type FnBitmapDestroy = unsafe extern "C" fn(bitmap: *mut c_void);
+
+/// Minimal `FPDF_FORMFILLINFO` — version 1 with all callbacks null, which is
+/// sufficient to *render* interactive form fields (no user interaction). pdfium
+/// keeps the pointer we pass to `InitFormFillEnvironment`, so an instance must
+/// outlive the environment.
+#[repr(C)]
+struct FpdfFormFillInfo {
+    version: c_int,
+    callbacks: [*const c_void; 16],
+}
 
 const FPDF_PRINTING: c_int = 0x800;
 const FPDF_ANNOT: c_int = 0x01;
@@ -208,12 +282,48 @@ fn print_impl(
     let fpdf_render_page: libloading::Symbol<FnRenderPage> =
         unsafe { lib.get(b"FPDF_RenderPage\0") }
             .map_err(|e| format!("Failed to find FPDF_RenderPage: {e}"))?;
+    let fpdf_get_annot_count: libloading::Symbol<FnGetAnnotCount> =
+        unsafe { lib.get(b"FPDFPage_GetAnnotCount\0") }
+            .map_err(|e| format!("Failed to find FPDFPage_GetAnnotCount: {e}"))?;
+    let fpdf_get_annot: libloading::Symbol<FnGetAnnot> =
+        unsafe { lib.get(b"FPDFPage_GetAnnot\0") }
+            .map_err(|e| format!("Failed to find FPDFPage_GetAnnot: {e}"))?;
+    let fpdf_get_annot_subtype: libloading::Symbol<FnGetAnnotSubtype> =
+        unsafe { lib.get(b"FPDFAnnot_GetSubtype\0") }
+            .map_err(|e| format!("Failed to find FPDFAnnot_GetSubtype: {e}"))?;
+    let fpdf_close_annot: libloading::Symbol<FnCloseAnnot> =
+        unsafe { lib.get(b"FPDFPage_CloseAnnot\0") }
+            .map_err(|e| format!("Failed to find FPDFPage_CloseAnnot: {e}"))?;
     let fpdf_close_page: libloading::Symbol<FnClosePage> =
         unsafe { lib.get(b"FPDF_ClosePage\0") }
             .map_err(|e| format!("Failed to find FPDF_ClosePage: {e}"))?;
     let fpdf_close_document: libloading::Symbol<FnCloseDocument> =
         unsafe { lib.get(b"FPDF_CloseDocument\0") }
             .map_err(|e| format!("Failed to find FPDF_CloseDocument: {e}"))?;
+    let fpdf_init_form_env: libloading::Symbol<FnInitFormEnv> =
+        unsafe { lib.get(b"FPDFDOC_InitFormFillEnvironment\0") }
+            .map_err(|e| format!("Failed to find FPDFDOC_InitFormFillEnvironment: {e}"))?;
+    let fpdf_exit_form_env: libloading::Symbol<FnExitFormEnv> =
+        unsafe { lib.get(b"FPDFDOC_ExitFormFillEnvironment\0") }
+            .map_err(|e| format!("Failed to find FPDFDOC_ExitFormFillEnvironment: {e}"))?;
+    let fpdf_ffldraw: libloading::Symbol<FnFfldraw> =
+        unsafe { lib.get(b"FPDF_FFLDraw\0") }
+            .map_err(|e| format!("Failed to find FPDF_FFLDraw: {e}"))?;
+    let fpdf_bitmap_create: libloading::Symbol<FnBitmapCreate> =
+        unsafe { lib.get(b"FPDFBitmap_Create\0") }
+            .map_err(|e| format!("Failed to find FPDFBitmap_Create: {e}"))?;
+    let fpdf_bitmap_fill_rect: libloading::Symbol<FnBitmapFillRect> =
+        unsafe { lib.get(b"FPDFBitmap_FillRect\0") }
+            .map_err(|e| format!("Failed to find FPDFBitmap_FillRect: {e}"))?;
+    let fpdf_render_page_bitmap: libloading::Symbol<FnRenderPageBitmap> =
+        unsafe { lib.get(b"FPDF_RenderPageBitmap\0") }
+            .map_err(|e| format!("Failed to find FPDF_RenderPageBitmap: {e}"))?;
+    let fpdf_bitmap_get_buffer: libloading::Symbol<FnBitmapGetBuffer> =
+        unsafe { lib.get(b"FPDFBitmap_GetBuffer\0") }
+            .map_err(|e| format!("Failed to find FPDFBitmap_GetBuffer: {e}"))?;
+    let fpdf_bitmap_destroy: libloading::Symbol<FnBitmapDestroy> =
+        unsafe { lib.get(b"FPDFBitmap_Destroy\0") }
+            .map_err(|e| format!("Failed to find FPDFBitmap_Destroy: {e}"))?;
 
     // Load the PDF document (pdfium is already initialized by the main thread)
     let pdf_path_cstr = std::ffi::CString::new(pdf_path)
@@ -225,6 +335,31 @@ fn print_impl(
     let _doc_guard = DocumentGuard {
         doc,
         close_fn: *fpdf_close_document,
+    };
+
+    // Initialize the form-fill environment so interactive form fields render.
+    // `form_info` must outlive the environment (pdfium retains the pointer), and
+    // the environment must be torn down before the document — declared after the
+    // doc guard so it drops first.
+    let mut form_info = FpdfFormFillInfo {
+        version: 1,
+        callbacks: [std::ptr::null(); 16],
+    };
+    let form_env = unsafe { fpdf_init_form_env(doc, &mut form_info) };
+    struct FormGuard {
+        form: *mut c_void,
+        exit_fn: FnExitFormEnv,
+    }
+    impl Drop for FormGuard {
+        fn drop(&mut self) {
+            if !self.form.is_null() {
+                unsafe { (self.exit_fn)(self.form) };
+            }
+        }
+    }
+    let _form_guard = FormGuard {
+        form: form_env,
+        exit_fn: *fpdf_exit_form_env,
     };
 
     let page_count = unsafe { fpdf_get_page_count(doc) } as u32;
@@ -369,18 +504,93 @@ fn print_impl(
         let start_x = (print_width - render_width) / 2;
         let start_y = (print_height - render_height) / 2;
 
-        unsafe {
-            fpdf_render_page(
-                hdc.0 as *mut c_void,
-                page,
-                start_x,
-                start_y,
-                render_width,
-                render_height,
-                0,
-                FPDF_PRINTING | FPDF_ANNOT,
-            );
+        // Rasterize only pages that actually contain form-field widgets;
+        // everything else prints via the vector DC path (full printer
+        // resolution, selectable text) exactly as before.
+        let has_widget = unsafe {
+            let n = fpdf_get_annot_count(page);
+            let mut found = false;
+            for i in 0..n {
+                let annot = fpdf_get_annot(page, i);
+                if !annot.is_null() {
+                    let subtype = fpdf_get_annot_subtype(annot);
+                    fpdf_close_annot(annot);
+                    if subtype == FPDF_ANNOT_WIDGET {
+                        found = true;
+                        break;
+                    }
+                }
+            }
+            found
+        };
+
+        if !has_widget {
+            unsafe {
+                fpdf_render_page(
+                    hdc.0 as *mut c_void,
+                    page,
+                    start_x,
+                    start_y,
+                    render_width,
+                    render_height,
+                    0,
+                    FPDF_PRINTING | FPDF_ANNOT,
+                );
+                fpdf_close_page(page);
+            }
+        } else {
+            unsafe {
+            // Rasterize page + interactive form layer, then blit to the printer
+            // DC. FPDF_RenderPage (vector, to the DC) can't draw form widgets, so
+            // we must go through a bitmap + FPDF_FFLDraw. Cap the raster to
+            // ~300 DPI so very high device resolutions don't exhaust memory;
+            // StretchDIBits scales it to the device rectangle.
+            let max_dim = 3400;
+            let rscale = (max_dim as f64 / render_width.max(render_height) as f64).min(1.0);
+            let bw = (((render_width as f64) * rscale) as c_int).max(1);
+            let bh = (((render_height as f64) * rscale) as c_int).max(1);
+
+            let bmp = fpdf_bitmap_create(bw, bh, 1);
+            if !bmp.is_null() {
+                fpdf_bitmap_fill_rect(bmp, 0, 0, bw, bh, 0xFFFF_FFFF); // white
+                fpdf_render_page_bitmap(bmp, page, 0, 0, bw, bh, 0, FPDF_PRINTING | FPDF_ANNOT);
+                if !form_env.is_null() {
+                    fpdf_ffldraw(form_env, bmp, page, 0, 0, bw, bh, 0, FPDF_ANNOT);
+                }
+                let buf = fpdf_bitmap_get_buffer(bmp);
+                // pdfium's buffer is top-down BGRA — a 32bpp BI_RGB DIB reads it
+                // directly (Windows treats the bytes as BGRX), no channel swap.
+                let bmi = BITMAPINFO {
+                    bmiHeader: BITMAPINFOHEADER {
+                        biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                        biWidth: bw,
+                        biHeight: -bh, // negative = top-down
+                        biPlanes: 1,
+                        biBitCount: 32,
+                        biCompression: BI_RGB.0,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                };
+                StretchDIBits(
+                    hdc,
+                    start_x,
+                    start_y,
+                    render_width,
+                    render_height,
+                    0,
+                    0,
+                    bw,
+                    bh,
+                    Some(buf),
+                    &bmi,
+                    DIB_RGB_COLORS,
+                    SRCCOPY,
+                );
+                fpdf_bitmap_destroy(bmp);
+            }
             fpdf_close_page(page);
+            }
         }
 
         if unsafe { EndPage(hdc) } <= 0 {
