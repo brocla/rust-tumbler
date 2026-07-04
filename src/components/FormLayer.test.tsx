@@ -146,6 +146,36 @@ describe("FormLayer", () => {
     expect(input.maxLength).toBe(9);
   });
 
+  it("renders a canvas for a signature field", async () => {
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_form_fields")
+        return [
+          {
+            id: "signature1",
+            name: "signature1",
+            fieldType: "signature",
+            value: "",
+            exportValue: "",
+            rect: { x: 120, y: 220, width: 320, height: 70 },
+            page: 1,
+            options: [],
+            readOnly: false,
+            maxLen: null,
+            comb: false,
+            label: "",
+            buttonAction: "none",
+          },
+        ];
+      return undefined;
+    });
+    const { container } = render(
+      <FormLayer docId="doc-1" pageNumber={1} zoom={100} />,
+    );
+    await waitFor(() =>
+      expect(container.querySelector(".signature-canvas")).not.toBeNull(),
+    );
+  });
+
   it("renders nothing when the page has no fields", async () => {
     mockInvoke.mockImplementation(async () => []);
     const { container } = render(

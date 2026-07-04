@@ -11,7 +11,7 @@
 use crate::commands::text::TextRect;
 use crate::error::AppError;
 use crate::state::{lock_mutex, AppState};
-use lopdf::{Dictionary, Document, Object, ObjectId, StringFormat};
+use lopdf::{dictionary, Dictionary, Document, Object, ObjectId, StringFormat};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tauri::{Emitter, State};
@@ -32,6 +32,7 @@ pub enum FieldType {
     Radio,
     Dropdown,
     Button,
+    Signature,
     Unknown,
 }
 
@@ -145,6 +146,26 @@ pub fn reset_form_via_button(
 ) -> Result<(), String> {
     let scope = reset_scope_for_button(&state, &doc_id, &field_id).map_err(String::from)?;
     reset_scope_impl(&state, doc_id.clone(), scope).map_err(String::from)?;
+    let _ = app.emit(
+        "document-dirty-changed",
+        crate::commands::save::DirtyChangedPayload { doc_id, dirty: true },
+    );
+    Ok(())
+}
+
+/// Set a drawn signature into a `/Sig` field as a vector appearance stream.
+/// `strokes` are polylines of field-local normalized points (0..1, top-left
+/// origin, matching the canvas). Empty `strokes` clears the signature.
+#[tauri::command]
+pub fn set_signature_strokes(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    doc_id: String,
+    field_id: String,
+    strokes: Vec<Vec<[f32; 2]>>,
+) -> Result<(), String> {
+    set_signature_strokes_impl(&state, doc_id.clone(), field_id, strokes)
+        .map_err(String::from)?;
     let _ = app.emit(
         "document-dirty-changed",
         crate::commands::save::DirtyChangedPayload { doc_id, dirty: true },
@@ -434,6 +455,8 @@ fn classify(
             let export = ap_on_states(doc, dict).into_iter().next().unwrap_or_else(|| "Yes".into());
             (FieldType::Checkbox, btn_value(doc, dict), export, Vec::new())
         }
+        // A signature field is a draw target; it has no text/choice value.
+        Some(b"Sig") => (FieldType::Signature, String::new(), String::new(), Vec::new()),
         _ => (FieldType::Unknown, String::new(), String::new(), Vec::new()),
     }
 }
@@ -473,6 +496,102 @@ fn set_form_field_value_impl(
 
     apply_value(&mut doc, target, &value)?;
     finalize_form_edit(doc, state, &doc_id)
+}
+
+fn set_signature_strokes_impl(
+    state: &AppState,
+    doc_id: String,
+    field_id: String,
+    strokes: Vec<Vec<[f32; 2]>>,
+) -> Result<(), AppError> {
+    let buffer = {
+        let entry = state.get_document(&doc_id)?;
+        let entry = lock_mutex(&entry)?;
+        entry.buffer.clone()
+    };
+    let mut doc = Document::load_mem(&buffer)
+        .map_err(|e| AppError::lopdf("Failed to parse PDF for signature", e))?;
+
+    let target = top_fields(&doc)
+        .into_iter()
+        .find_map(|id| find_field_by_fq(&doc, id, "", &field_id))
+        .ok_or_else(|| AppError::Other(format!("Signature field not found: {field_id}")))?;
+
+    // Field size in points, from its /Rect, is the appearance BBox.
+    let rect: Vec<f32> = doc
+        .get_dictionary(target)
+        .ok()
+        .and_then(|d| d.get(b"Rect").ok().and_then(|o| deref(&doc, o).as_array().ok()))
+        .map(|a| a.iter().map(as_f32).collect())
+        .unwrap_or_default();
+    if rect.len() != 4 {
+        return Err(AppError::Other("Signature field has no /Rect".into()));
+    }
+    let (w, h) = ((rect[2] - rect[0]).abs(), (rect[3] - rect[1]).abs());
+
+    if strokes.is_empty() {
+        // Clearing: drop the appearance so the field reverts to its pristine
+        // (unsigned) auto-rendered box.
+        if let Ok(dict) = doc.get_dictionary_mut(target) {
+            dict.remove(b"AP");
+        }
+    } else {
+        let content = signature_appearance_stream(&strokes, w, h);
+        let xobject = lopdf::Stream::new(
+            dictionary! {
+                "Type" => "XObject",
+                "Subtype" => "Form",
+                "FormType" => 1,
+                "BBox" => vec![0.into(), 0.into(), Object::Real(w), Object::Real(h)],
+                "Matrix" => vec![1.into(), 0.into(), 0.into(), 1.into(), 0.into(), 0.into()],
+                "Resources" => dictionary! {},
+            },
+            content.into_bytes(),
+        );
+        let xobject_id = doc.add_object(xobject);
+        // Point the widget's normal appearance at our stream.
+        if let Ok(dict) = doc.get_dictionary_mut(target) {
+            dict.set("AP", dictionary! { "N" => Object::Reference(xobject_id) });
+        }
+    }
+
+    // Must NOT set NeedAppearances — that would make pdfium regenerate (and
+    // discard) the appearance we just authored.
+    commit_buffer(doc, state, &doc_id)
+}
+
+/// Build the content stream for a signature appearance: black round-capped
+/// polylines. Points are field-local normalized (0..1, top-left origin); the
+/// appearance space is bottom-left origin, so y is flipped. Empty `strokes`
+/// yields a blank stream (clears the signature).
+fn signature_appearance_stream(strokes: &[Vec<[f32; 2]>], w: f32, h: f32) -> String {
+    // Redraw the box border (setting /AP replaces the widget's auto border), then
+    // the ink.
+    let mut s = format!(
+        "0.5 w 0 G\n0.50 0.50 {:.2} {:.2} re S\n1.5 w 1 J 1 j\n",
+        (w - 1.0).max(0.0),
+        (h - 1.0).max(0.0),
+    );
+    for stroke in strokes {
+        for (i, p) in stroke.iter().enumerate() {
+            let x = p[0] * w;
+            let y = (1.0 - p[1]) * h; // flip canvas top-left → PDF bottom-left
+            if i == 0 {
+                // A single-point stroke becomes a zero-length line: with a round
+                // cap that renders as a dot (a tap/period).
+                s.push_str(&format!("{x:.2} {y:.2} m\n"));
+                if stroke.len() == 1 {
+                    s.push_str(&format!("{x:.2} {y:.2} l\n"));
+                }
+            } else {
+                s.push_str(&format!("{x:.2} {y:.2} l\n"));
+            }
+        }
+        if !stroke.is_empty() {
+            s.push_str("S\n");
+        }
+    }
+    s
 }
 
 /// Which fields a reset touches.
@@ -597,7 +716,14 @@ fn reset_field(doc: &mut Document, field_id: ObjectId) {
         .map(|a| a.iter().filter_map(|k| k.as_reference().ok()).collect())
         .unwrap_or_default();
 
-    if ft.as_deref() == Some(b"Btn") {
+    if ft.as_deref() == Some(b"Sig") {
+        // A drawn signature lives in the widget's /AP, not /V — clear it by
+        // dropping the appearance (reverting to the unsigned box).
+        if let Ok(d) = doc.get_dictionary_mut(field_id) {
+            d.remove(b"AP");
+            d.remove(b"V");
+        }
+    } else if ft.as_deref() == Some(b"Btn") {
         let on = match &dv {
             Some(Object::Name(n)) => String::from_utf8_lossy(n).into_owned(),
             _ => "Off".to_string(),
@@ -638,6 +764,13 @@ fn reset_field(doc: &mut Document, field_id: ObjectId) {
 /// now-stale `/Prev` cross-reference chain, serialize, and swap the buffer.
 fn finalize_form_edit(mut doc: Document, state: &AppState, doc_id: &str) -> Result<(), AppError> {
     set_need_appearances(&mut doc);
+    commit_buffer(doc, state, doc_id)
+}
+
+/// Serialize and swap the buffer without touching `NeedAppearances`. Used when
+/// we've authored an explicit appearance (a drawn signature) that must *not* be
+/// regenerated — setting `NeedAppearances` would make pdfium discard our `/AP`.
+fn commit_buffer(mut doc: Document, state: &AppState, doc_id: &str) -> Result<(), AppError> {
     strip_xfa(&mut doc);
     // See set_form_field_value_impl: `save_to` invalidates the trailer's /Prev
     // into the original file, which lopdf then rejects on the next load_mem.
@@ -1086,8 +1219,110 @@ mod tests {
             .join("tests/fixtures/forms/acroform_reset.pdf")
     }
 
+    fn signature_fixture() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/forms/acroform_signature.pdf")
+    }
+
     fn field<'a>(fields: &'a [FormField], id: &str) -> &'a FormField {
         fields.iter().find(|f| f.id == id).unwrap_or_else(|| panic!("no field {id}"))
+    }
+
+    #[test]
+    fn discovers_signature_field() {
+        let bytes = std::fs::read(signature_fixture()).expect("read sig fixture");
+        let state = state_with_bytes(bytes, "mem.pdf");
+        let fields = get_form_fields_impl(&state, "doc-1".into(), 1).expect("fields");
+        let sig = field(&fields, "signature1");
+        assert_eq!(sig.field_type, FieldType::Signature);
+    }
+
+    #[test]
+    fn set_signature_strokes_writes_appearance_dirty_and_disk_untouched() {
+        let _guard = crate::test_pdfium_guard();
+        let bytes = std::fs::read(signature_fixture()).expect("read sig fixture");
+        let tmp = std::env::temp_dir().join("tumbler_sig_test.pdf");
+        std::fs::write(&tmp, &bytes).expect("write tmp");
+        let path = tmp.to_string_lossy().into_owned();
+        let state = state_with_bytes(bytes, &path);
+        let disk_before = std::fs::read(&tmp).expect("read disk");
+
+        // A diagonal stroke plus a dot.
+        let strokes = vec![
+            vec![[0.1, 0.8], [0.5, 0.2], [0.9, 0.6]],
+            vec![[0.5, 0.5]],
+        ];
+        set_signature_strokes_impl(&state, "doc-1".into(), "signature1".into(), strokes)
+            .expect("set signature");
+
+        // The widget now has an /AP /N appearance stream, and NeedAppearances was
+        // NOT set (which would discard it).
+        let entry = state.get_document("doc-1").unwrap();
+        let entry = lock_mutex(&entry).unwrap();
+        assert!(entry.dirty, "signature edit must mark the doc dirty");
+        let edited = Document::load_mem(&entry.buffer).unwrap();
+        let sig_id = top_fields(&edited)
+            .into_iter()
+            .find_map(|id| find_field_by_fq(&edited, id, "", "signature1"))
+            .expect("signature field");
+        let widget = edited.get_dictionary(sig_id).unwrap();
+        let ap = widget.get(b"AP").and_then(|o| o.as_dict()).expect("/AP");
+        let n = ap.get(b"N").and_then(|o| o.as_reference()).expect("/AP /N ref");
+        assert!(edited.get_object(n).and_then(|o| o.as_stream()).is_ok(), "N is a stream");
+        let af = acroform_dict(&edited).unwrap();
+        assert!(
+            af.get(b"NeedAppearances").is_err(),
+            "NeedAppearances must not be set for an authored signature appearance"
+        );
+        drop(entry);
+
+        assert_eq!(
+            std::fs::read(&tmp).expect("read disk"),
+            disk_before,
+            "signature edit must not touch the file until an explicit save"
+        );
+        std::fs::remove_file(&tmp).ok();
+    }
+
+    #[test]
+    fn clear_form_removes_a_signature_appearance() {
+        let _guard = crate::test_pdfium_guard();
+        let bytes = std::fs::read(signature_fixture()).expect("read sig fixture");
+        let state = state_with_bytes(bytes, "mem.pdf");
+
+        // Sign, then clear the whole form.
+        set_signature_strokes_impl(
+            &state,
+            "doc-1".into(),
+            "signature1".into(),
+            vec![vec![[0.1, 0.5], [0.9, 0.5]]],
+        )
+        .expect("sign");
+        reset_scope_impl(&state, "doc-1".into(), ResetScope::All).expect("clear");
+
+        let entry = state.get_document("doc-1").unwrap();
+        let entry = lock_mutex(&entry).unwrap();
+        let doc = Document::load_mem(&entry.buffer).unwrap();
+        let sig_id = top_fields(&doc)
+            .into_iter()
+            .find_map(|id| find_field_by_fq(&doc, id, "", "signature1"))
+            .expect("signature field");
+        assert!(
+            doc.get_dictionary(sig_id).unwrap().get(b"AP").is_err(),
+            "clearing the form must drop the signature's /AP"
+        );
+    }
+
+    #[test]
+    fn signature_appearance_stream_maps_and_flips_coordinates() {
+        // One diagonal stroke, 100x40 field. Top-left (0,0) → PDF (0,40);
+        // bottom-right (1,1) → (100,0).
+        let s = signature_appearance_stream(&[vec![[0.0, 0.0], [1.0, 1.0]]], 100.0, 40.0);
+        assert!(s.contains("0.00 40.00 m"), "start flips to top: {s}");
+        assert!(s.contains("100.00 0.00 l"), "end flips to bottom: {s}");
+        assert!(s.trim_end().ends_with('S'), "path is stroked: {s}");
+        // Empty strokes → blank (just the graphics-state preamble, no paths).
+        assert!(!signature_appearance_stream(&[], 100.0, 40.0).contains('m'));
     }
 
     #[test]
