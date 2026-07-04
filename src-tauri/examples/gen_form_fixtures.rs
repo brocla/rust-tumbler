@@ -394,21 +394,24 @@ fn build_signature_fixture() -> Document {
     });
 
     let page_id = doc.new_object_id();
-    let content = b"BT /F1 14 Tf 50 740 Td (Tumbler signature-field test fixture) Tj ET\n\
-                    BT /F1 12 Tf 50 545 Td (Signature:) Tj ET"
+    let content = b"\
+        BT /F1 14 Tf 50 740 Td (Tumbler signature-field test fixture) Tj ET\n\
+        BT /F1 10 Tf 120 578 Td (Draw your signature in the box below - mouse, pen, touch, or trackpad:) Tj ET"
         .to_vec();
     let content_id = doc.add_object(Stream::new(dictionary! {}, content));
 
     // An empty signature field: /FT /Sig, a widget with a /Rect, and no /V
-    // (i.e. not yet signed).
+    // (i.e. not yet signed). A visible border marks the draw area.
     let sig_id = doc.add_object(dictionary! {
         "Type" => "Annot",
         "Subtype" => "Widget",
         "FT" => "Sig",
         "T" => text("signature1"),
-        "Rect" => vec![120.into(), 535.into(), 320.into(), 565.into()],
+        "Rect" => vec![120.into(), 500.into(), 440.into(), 570.into()],
         "P" => page_id,
         "F" => 4,
+        "MK" => dictionary! { "BC" => vec![0.into()] },
+        "BS" => dictionary! { "W" => 1, "S" => "S" },
     });
 
     doc.set_object(

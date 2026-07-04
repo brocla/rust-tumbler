@@ -509,6 +509,57 @@ body {
   white-space: nowrap;
 }
 
+/* Drawn-signature field: a canvas overlay on a /Sig widget. */
+.signature-field {
+  overflow: visible;
+}
+
+.signature-canvas {
+  display: block;
+  cursor: crosshair;
+  background: transparent; /* at rest: pdfium's committed appearance shows through */
+  /* Don't let touch drawing scroll the page (unified pointer input). */
+  touch-action: none;
+}
+
+/* While drawing: opaque white so the ink is clear and covers pdfium's version. */
+.signature-canvas.active {
+  background: #fff;
+  outline: 1px solid var(--color-accent, #4a90d9);
+}
+
+.signature-hint {
+  position: absolute;
+  left: 6px;
+  bottom: 4px;
+  color: var(--color-text-muted, #9e9e9e);
+  font-size: 0.8em;
+  pointer-events: none;
+  user-select: none;
+}
+
+/* Hover-revealed "start over" — no persistent Clear button. */
+.signature-reset {
+  position: absolute;
+  top: -10px;
+  right: -10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: 1px solid var(--color-border, #d1d1d1);
+  border-radius: 50%;
+  background: var(--color-bg, #fff);
+  color: var(--color-text, #1a1a1a);
+  box-shadow: var(--shadow-sm, 0 1px 2px rgba(0, 0, 0, 0.1));
+  cursor: pointer;
+}
+
+.signature-reset:hover {
+  color: var(--color-accent, #4a90d9);
+}
+
 /* Strip the native control (Chromium draws checkboxes/radios with a dark body,
    especially at form-widget sizes) so our own pale-yellow fill — matching the
    text fields — shows through. The checked state is drawn as an inset accent

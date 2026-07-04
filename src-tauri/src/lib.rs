@@ -60,6 +60,7 @@ pub fn run() {
             commands::forms::document_has_form,
             commands::forms::clear_form,
             commands::forms::reset_form_via_button,
+            commands::forms::set_signature_strokes,
             commands::conformance::get_conformance,
             commands::signature::get_signature_info,
             commands::pages::delete_pages,

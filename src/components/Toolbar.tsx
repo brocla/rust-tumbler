@@ -5,6 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { usePdfStore } from "../store/usePdfStore";
 import type { DisplayMode } from "../store/usePdfStore";
 import { ZOOM_PRESETS } from "../utils/zoomConstants";
+import { evictPages } from "../utils/renderCache";
 import { confirmBreakingEdit } from "../utils/confirmBreakingEdit";
 import { saveTab, saveTabAs } from "../utils/saveDocument";
 import { isSigned, SIGNATURE_EDIT_WARNING } from "../utils/signature";
@@ -71,6 +72,10 @@ export function Toolbar({ onOpenFile, onPrint }: ToolbarProps) {
     try {
       await invoke("clear_form", { docId: activeTab.docId });
       bumpFormEpoch(activeTab.docId);
+      // Repaint the pages so pdfium's render drops appearances shown on the
+      // canvas (comb values, drawn signatures) rather than via HTML overlays.
+      evictPages(activeTab.docId);
+      updateTab(activeTab.id, { contentEpoch: activeTab.contentEpoch + 1 });
     } catch (err) {
       await message(`Failed to clear form: ${err}`, {
         title: "Clear form",

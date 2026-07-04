@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { usePdfStore } from "../store/usePdfStore";
-import { evictPageCache } from "../utils/renderCache";
+import { evictPageCache, evictPages } from "../utils/renderCache";
+import { SignatureField } from "./SignatureField";
 
 type FieldType =
   | "text"
@@ -10,6 +11,7 @@ type FieldType =
   | "radio"
   | "dropdown"
   | "button"
+  | "signature"
   | "unknown";
 
 type ButtonAction = "none" | "reset_form" | "unsupported";
@@ -114,6 +116,10 @@ export function FormLayer({ docId, pageNumber, zoom }: FormLayerProps) {
       try {
         await invoke("reset_form_via_button", { docId, fieldId: field.id });
         bumpFormEpoch(docId);
+        // Repaint so pdfium-drawn appearances (comb, signatures) clear too.
+        evictPages(docId);
+        const tab = usePdfStore.getState().tabs.find((t) => t.docId === docId);
+        if (tab) updateTab(tab.id, { contentEpoch: tab.contentEpoch + 1 });
       } catch (err) {
         console.error(`Failed to reset form via ${field.id}:`, err);
       }
@@ -127,6 +133,19 @@ export function FormLayer({ docId, pageNumber, zoom }: FormLayerProps) {
   return (
     <div className="form-layer">
       {fields.map((field, i) => {
+        if (field.fieldType === "signature") {
+          return (
+            <SignatureField
+              key={i}
+              docId={docId}
+              pageNumber={pageNumber}
+              fieldId={field.id}
+              rect={field.rect}
+              zoom={zoom}
+            />
+          );
+        }
+
         const style = {
           position: "absolute" as const,
           left: field.rect.x * scale,
