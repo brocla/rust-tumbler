@@ -36,11 +36,37 @@ type FnGetPageHeight = unsafe extern "C" fn(page: *mut c_void) -> f64;
 type FnClosePage = unsafe extern "C" fn(page: *mut c_void);
 #[allow(non_camel_case_types)]
 type FnCloseDocument = unsafe extern "C" fn(document: *mut c_void);
+// Vector render straight to a GDI DC — used for pages with no form fields, so
+// they print at full printer resolution with selectable text (unchanged path).
+#[allow(non_camel_case_types)]
+type FnRenderPage = unsafe extern "C" fn(
+    dc: *mut c_void,
+    page: *mut c_void,
+    start_x: c_int,
+    start_y: c_int,
+    size_x: c_int,
+    size_y: c_int,
+    rotate: c_int,
+    flags: c_int,
+);
+
+// Widget detection: only pages that actually carry form fields need the raster
+// path below.
+#[allow(non_camel_case_types)]
+type FnGetAnnotCount = unsafe extern "C" fn(page: *mut c_void) -> c_int;
+#[allow(non_camel_case_types)]
+type FnGetAnnot = unsafe extern "C" fn(page: *mut c_void, index: c_int) -> *mut c_void;
+#[allow(non_camel_case_types)]
+type FnGetAnnotSubtype = unsafe extern "C" fn(annot: *mut c_void) -> c_int;
+#[allow(non_camel_case_types)]
+type FnCloseAnnot = unsafe extern "C" fn(annot: *mut c_void);
+const FPDF_ANNOT_WIDGET: c_int = 20;
 
 // Interactive form fields (widgets) are NOT drawn by FPDF_RenderPage — they are
 // owned by the form-fill module. Rendering them requires initializing a
-// form-fill environment and calling FPDF_FFLDraw onto a bitmap, so the print
-// path rasterizes each page (page + form) and blits it to the printer DC.
+// form-fill environment and calling FPDF_FFLDraw onto a bitmap. Since FFLDraw
+// only targets a bitmap, pages that contain widgets are rasterized (page + form)
+// and blitted to the printer DC; pages without widgets keep the vector DC path.
 #[allow(non_camel_case_types)]
 type FnInitFormEnv =
     unsafe extern "C" fn(document: *mut c_void, form_info: *mut FpdfFormFillInfo) -> *mut c_void;
@@ -253,6 +279,21 @@ fn print_impl(
     let fpdf_get_page_height: libloading::Symbol<FnGetPageHeight> =
         unsafe { lib.get(b"FPDF_GetPageHeight\0") }
             .map_err(|e| format!("Failed to find FPDF_GetPageHeight: {e}"))?;
+    let fpdf_render_page: libloading::Symbol<FnRenderPage> =
+        unsafe { lib.get(b"FPDF_RenderPage\0") }
+            .map_err(|e| format!("Failed to find FPDF_RenderPage: {e}"))?;
+    let fpdf_get_annot_count: libloading::Symbol<FnGetAnnotCount> =
+        unsafe { lib.get(b"FPDFPage_GetAnnotCount\0") }
+            .map_err(|e| format!("Failed to find FPDFPage_GetAnnotCount: {e}"))?;
+    let fpdf_get_annot: libloading::Symbol<FnGetAnnot> =
+        unsafe { lib.get(b"FPDFPage_GetAnnot\0") }
+            .map_err(|e| format!("Failed to find FPDFPage_GetAnnot: {e}"))?;
+    let fpdf_get_annot_subtype: libloading::Symbol<FnGetAnnotSubtype> =
+        unsafe { lib.get(b"FPDFAnnot_GetSubtype\0") }
+            .map_err(|e| format!("Failed to find FPDFAnnot_GetSubtype: {e}"))?;
+    let fpdf_close_annot: libloading::Symbol<FnCloseAnnot> =
+        unsafe { lib.get(b"FPDFPage_CloseAnnot\0") }
+            .map_err(|e| format!("Failed to find FPDFPage_CloseAnnot: {e}"))?;
     let fpdf_close_page: libloading::Symbol<FnClosePage> =
         unsafe { lib.get(b"FPDF_ClosePage\0") }
             .map_err(|e| format!("Failed to find FPDF_ClosePage: {e}"))?;
@@ -463,7 +504,42 @@ fn print_impl(
         let start_x = (print_width - render_width) / 2;
         let start_y = (print_height - render_height) / 2;
 
-        unsafe {
+        // Rasterize only pages that actually contain form-field widgets;
+        // everything else prints via the vector DC path (full printer
+        // resolution, selectable text) exactly as before.
+        let has_widget = unsafe {
+            let n = fpdf_get_annot_count(page);
+            let mut found = false;
+            for i in 0..n {
+                let annot = fpdf_get_annot(page, i);
+                if !annot.is_null() {
+                    let subtype = fpdf_get_annot_subtype(annot);
+                    fpdf_close_annot(annot);
+                    if subtype == FPDF_ANNOT_WIDGET {
+                        found = true;
+                        break;
+                    }
+                }
+            }
+            found
+        };
+
+        if !has_widget {
+            unsafe {
+                fpdf_render_page(
+                    hdc.0 as *mut c_void,
+                    page,
+                    start_x,
+                    start_y,
+                    render_width,
+                    render_height,
+                    0,
+                    FPDF_PRINTING | FPDF_ANNOT,
+                );
+                fpdf_close_page(page);
+            }
+        } else {
+            unsafe {
             // Rasterize page + interactive form layer, then blit to the printer
             // DC. FPDF_RenderPage (vector, to the DC) can't draw form widgets, so
             // we must go through a bitmap + FPDF_FFLDraw. Cap the raster to
@@ -514,6 +590,7 @@ fn print_impl(
                 fpdf_bitmap_destroy(bmp);
             }
             fpdf_close_page(page);
+            }
         }
 
         if unsafe { EndPage(hdc) } <= 0 {
