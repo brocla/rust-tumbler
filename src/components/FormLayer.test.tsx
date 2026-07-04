@@ -176,6 +176,41 @@ describe("FormLayer", () => {
     );
   });
 
+  it("applies /DA + /Q styling to a text field", async () => {
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_form_fields")
+        return [
+          {
+            id: "amount",
+            name: "amount",
+            fieldType: "text",
+            value: "42",
+            exportValue: "",
+            rect: { x: 50, y: 50, width: 200, height: 20 },
+            page: 1,
+            options: [],
+            readOnly: false,
+            maxLen: null,
+            comb: false,
+            label: "",
+            buttonAction: "none",
+            align: "right",
+            fontSize: 10,
+            color: "#0000ff",
+            fontFamily: "Helvetica, Arial, sans-serif",
+          },
+        ];
+      return undefined;
+    });
+    await act(async () => {
+      render(<FormLayer docId="doc-1" pageNumber={1} zoom={100} />);
+    });
+    const input = (await screen.findByRole("textbox")) as HTMLInputElement;
+    expect(input.style.textAlign).toBe("right");
+    expect(input.style.color).toBe("rgb(0, 0, 255)"); // #0000ff
+    expect(input.style.fontSize).toBe("10px"); // 10pt * scale(1)
+  });
+
   it("renders nothing when the page has no fields", async () => {
     mockInvoke.mockImplementation(async () => []);
     const { container } = render(
