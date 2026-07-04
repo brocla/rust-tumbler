@@ -1,7 +1,28 @@
 import { useEffect, useRef, useCallback, useMemo } from "react";
 import { usePdfStore } from "../store/usePdfStore";
 import { PageSlot } from "./PageSlot";
-import type { SearchResult } from "../store/usePdfStore";
+import type { PageDimension, SearchResult, ZoomMode } from "../store/usePdfStore";
+
+/**
+ * Zoom percentage for a fit mode, clamped to the [10, 400] range. "fit-width"
+ * fills the available width; "fit-page" fits the page height; "fit-width-90"
+ * is the one-shot open default (issue #38) — 90% of fit-width. Returns null for
+ * "numeric" (no fit to compute).
+ */
+export function fitZoom(
+  zoomMode: ZoomMode,
+  dim: PageDimension,
+  clientWidth: number,
+  clientHeight: number,
+  padding: number,
+): number | null {
+  if (zoomMode === "numeric") return null;
+  const clamp = (z: number) => Math.max(10, Math.min(400, Math.round(z)));
+  const fitW = ((clientWidth - padding) / dim.width) * 100;
+  if (zoomMode === "fit-width") return clamp(fitW);
+  if (zoomMode === "fit-width-90") return clamp(fitW * 0.9);
+  return clamp(((clientHeight - padding) / dim.height) * 100);
+}
 
 /** Returns the {page, rect} for a given global result index, or null. */
 export function activeSearchRect(
@@ -136,12 +157,11 @@ export function ContinuousViewer() {
     const recalc = () => {
       const dim = pageDimensions[Math.min(currentPage - 1, pageDimensions.length - 1)];
       if (!dim) return;
-      const fitW = ((container.clientWidth - PADDING) / dim.width) * 100;
-      const newZoom =
-        zoomMode === "fit-width"
-          ? fitW
-          : ((container.clientHeight - PADDING) / dim.height) * 100;
-      updateTab(tabId, { zoom: Math.max(10, Math.min(400, Math.round(newZoom))) });
+      const zoom = fitZoom(zoomMode, dim, container.clientWidth, container.clientHeight, PADDING);
+      if (zoom === null) return;
+      // "fit-width-90" is a one-shot open default: apply it once, then hand the
+      // tab back to numeric so it no longer refits on resize (issue #38).
+      updateTab(tabId, zoomMode === "fit-width-90" ? { zoom, zoomMode: "numeric" } : { zoom });
     };
 
     recalc();

@@ -81,8 +81,12 @@ function App() {
         pageDimensions: info.pageDimensions,
         currentPage: 1,
         scrollTop: 0,
+        // Open at 90% of fit-width (issue #38). "fit-width-90" is a one-shot:
+        // the viewer computes the real zoom once the container size is known
+        // and then switches this tab to "numeric". 140 is only a placeholder
+        // for the first paint before that runs.
         zoom: 140,
-        zoomMode: "numeric",
+        zoomMode: "fit-width-90",
         displayMode: "normal",
         searchQuery: "",
         searchResults: [],

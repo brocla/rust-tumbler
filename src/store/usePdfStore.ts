@@ -6,7 +6,10 @@ export interface PageDimension {
   height: number;
 }
 
-export type ZoomMode = "numeric" | "fit-width" | "fit-page";
+// "fit-width-90" is the one-shot zoom used when a document first opens
+// (issue #38): the viewer fits the page to 90% of the container width, then
+// reverts the tab to "numeric" so later manual zooms behave normally.
+export type ZoomMode = "numeric" | "fit-width" | "fit-page" | "fit-width-90";
 export type DisplayMode = "normal" | "invert" | "sepia";
 
 export interface TabState {
