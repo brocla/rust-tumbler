@@ -167,6 +167,20 @@ body {
   background: var(--color-bg-tertiary);
 }
 
+/* View-only lock badge for password-protected PDFs (issue #12). Shares the
+   pill shape of the signature badge; neutral colouring since it's an
+   informational state, not a warning. */
+.encrypted-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  background: var(--color-bg-tertiary);
+}
+
 /* App version — always rightmost, in the theme accent color. */
 .status-version {
   color: var(--color-accent);
@@ -719,6 +733,17 @@ input[type="radio"].form-check:checked {
   color: var(--color-accent);
 }
 
+/* Disabled for a view-only (encrypted) PDF — greyed, no hover (issue #12). */
+.rail-button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.rail-button:disabled:hover {
+  background: transparent;
+  color: var(--color-text-secondary);
+}
+
 /* Sidebar */
 .sidebar {
   flex-shrink: 0;
@@ -733,6 +758,16 @@ input[type="radio"].form-check:checked {
   flex: 1;
   overflow-y: auto;
   overflow-x: hidden;
+}
+
+/* Shown in place of an edit panel when the active document is a view-only
+   (encrypted) PDF (issue #12). */
+.sidebar-encrypted-note {
+  margin: 0;
+  padding: 16px;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+  line-height: 1.5;
 }
 
 .sidebar-resize-handle {
@@ -1515,4 +1550,40 @@ input[type="radio"].form-check:checked {
   width: auto;
   flex: 1;
   white-space: nowrap;
+}
+
+/* Password prompt for encrypted PDFs (issue #12). */
+.password-dialog {
+  max-width: 380px;
+}
+
+.password-dialog input[type="password"] {
+  margin-top: 16px;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  background: var(--color-bg-secondary);
+  color: var(--color-text);
+  font-family: var(--font-family);
+  font-size: var(--font-size-base);
+}
+
+.password-dialog-error {
+  margin-top: 12px !important;
+  color: var(--color-warning);
+  font-size: var(--font-size-sm);
+}
+
+.password-dialog-buttons {
+  display: flex;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.password-dialog .password-dialog-buttons button {
+  margin-top: 0;
+  width: auto;
+  flex: 1;
 }

@@ -40,6 +40,24 @@ describe("StatusBar", () => {
     usePdfStore.setState({ tabs: [], activeTabId: null });
   });
 
+  it("shows the view-only lock badge for an encrypted active tab (issue #12)", () => {
+    usePdfStore.setState({
+      tabs: [makeTab({ encrypted: true })],
+      activeTabId: "tab-1",
+    });
+    render(<StatusBar />);
+    expect(screen.getByText("Encrypted — view only")).toBeTruthy();
+  });
+
+  it("shows no lock badge for an unencrypted active tab", () => {
+    usePdfStore.setState({
+      tabs: [makeTab({ encrypted: false })],
+      activeTabId: "tab-1",
+    });
+    render(<StatusBar />);
+    expect(screen.queryByText("Encrypted — view only")).toBeNull();
+  });
+
   it("shows 'Verified Signed Document' for a verified active tab", () => {
     usePdfStore.setState({
       tabs: [makeTab({ signatureStatus: "verified" })],

@@ -9,8 +9,16 @@ import { OptimizePanel } from "./OptimizePanel";
 const MIN_WIDTH = 150;
 const MAX_WIDTH = 500;
 
+// Sidebar tools that read/write the document via lopdf and so can't operate on
+// a still-encrypted (view-only) buffer. (issue #12)
+const ENCRYPTED_DISABLED_TOOLS = new Set(["metadata", "pages", "optimize"]);
+
 export function Sidebar() {
   const activeTool = usePdfStore((s) => s.activeSidebarTool);
+  const encrypted = usePdfStore((s) => {
+    const t = s.tabs.find((tab) => tab.id === s.activeTabId);
+    return !!t?.encrypted;
+  });
   const sidebarWidth = usePdfStore((s) => s.sidebarWidth);
   const setSidebarWidth = usePdfStore((s) => s.setSidebarWidth);
   const dragRef = useRef<{ startX: number; startWidth: number } | null>(null);
@@ -66,14 +74,28 @@ export function Sidebar() {
 
   if (!activeTool) return null;
 
+  // The tool can stay selected across a tab switch (it's global, not per-tab),
+  // so an encrypted tab may inherit an edit tool from a previous document.
+  // Show a note instead of a panel that would read the encrypted buffer.
+  const toolDisabled = encrypted && ENCRYPTED_DISABLED_TOOLS.has(activeTool);
+
   return (
     <div className="sidebar" style={{ width: sidebarWidth }}>
       <div className="sidebar-content">
-        {activeTool === "thumbnails" && <ThumbnailPanel />}
-        {activeTool === "search" && <SearchPanel />}
-        {activeTool === "metadata" && <MetadataPanel />}
-        {activeTool === "pages" && <PagesPanel />}
-        {activeTool === "optimize" && <OptimizePanel />}
+        {toolDisabled ? (
+          <p className="sidebar-encrypted-note">
+            This tool isn't available for password-protected PDFs. The document
+            opened in view-only mode.
+          </p>
+        ) : (
+          <>
+            {activeTool === "thumbnails" && <ThumbnailPanel />}
+            {activeTool === "search" && <SearchPanel />}
+            {activeTool === "metadata" && <MetadataPanel />}
+            {activeTool === "pages" && <PagesPanel />}
+            {activeTool === "optimize" && <OptimizePanel />}
+          </>
+        )}
       </div>
       <div className="sidebar-resize-handle" onMouseDown={handleMouseDown} />
     </div>

@@ -1,19 +1,20 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { Lock } from "lucide-react";
 import { usePdfStore } from "../store/usePdfStore";
 import { signatureBadge } from "../utils/signature";
 
 /**
  * Thin bottom border strip, right-justified. Shows (right to left): the app
  * version number (always, in the theme accent color), then the digital-signature
- * badge for the **active tab only** (issue #17) when present. The version stays
- * rightmost; the signing statement sits to its left.
+ * badge and, for a password-protected document (issue #12), a view-only lock
+ * badge — both for the **active tab only** (issue #17). The version stays
+ * rightmost.
  */
 export function StatusBar() {
-  const status = usePdfStore((s) => {
-    const tab = s.tabs.find((t) => t.id === s.activeTabId);
-    return tab?.signatureStatus;
-  });
+  const tab = usePdfStore((s) => s.tabs.find((t) => t.id === s.activeTabId));
+  const status = tab?.signatureStatus;
+  const encrypted = !!tab?.encrypted;
 
   const badge = signatureBadge(status);
 
@@ -26,6 +27,12 @@ export function StatusBar() {
 
   return (
     <div className="app-status-bar">
+      {encrypted && (
+        <span className="encrypted-badge" title="Password-protected — view only">
+          <Lock size={12} />
+          Encrypted — view only
+        </span>
+      )}
       {badge && (
         <span className={`signature-badge signature-badge-${badge.kind}`}>
           {badge.text}

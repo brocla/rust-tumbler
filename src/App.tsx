@@ -10,6 +10,7 @@ import { Sidebar } from "./components/Sidebar";
 import { ViewerArea } from "./components/ViewerArea";
 import { StatusBar } from "./components/StatusBar";
 import { UnsavedChangesDialog } from "./components/UnsavedChangesDialog";
+import { PasswordPrompt } from "./components/PasswordPrompt";
 import { Notice } from "./components/Notice";
 import { saveTab, saveTabAs, confirmCloseDirtyTab } from "./utils/saveDocument";
 import { usePdfStore, suppressedReloadDocs } from "./store/usePdfStore";
@@ -23,7 +24,14 @@ interface DocInfo {
   docId: string;
   pageCount: number;
   pageDimensions: PageDimension[];
+  // True when the file was user-password-protected and was unlocked (issue #12).
+  encrypted: boolean;
 }
+
+// Shown once per session, the first time an encrypted PDF is opened, so the
+// view-only restrictions aren't a mystery. Module-level so it persists across
+// opens without being tab/store state. (issue #12)
+let encryptedNoticeShown = false;
 
 interface AccentColors {
   accent: string;
@@ -70,12 +78,34 @@ function App() {
         return;
       }
 
-      const info = await invoke<DocInfo>("open_document", { path: canonical });
+      const fileName = canonical.split(/[\\/]/).pop() ?? "Untitled";
+
+      // Retry loop for user-password-protected PDFs (issue #12): the first
+      // attempt sends no password; if the backend reports the file needs one
+      // (PASSWORD_REQUIRED) or that a guess was rejected (WRONG_PASSWORD), we
+      // prompt and retry. A non-password error rethrows to the outer catch;
+      // cancelling the prompt opens nothing and shows no error dialog.
+      let info: DocInfo;
+      let password: string | undefined;
+      for (;;) {
+        try {
+          info = await invoke<DocInfo>("open_document", { path: canonical, password });
+          break;
+        } catch (err) {
+          const msg = String(err);
+          const wrongPw = msg.includes("WRONG_PASSWORD");
+          if (!wrongPw && !msg.includes("PASSWORD_REQUIRED")) throw err;
+          const entered = await usePdfStore.getState().askPassword(fileName, wrongPw);
+          if (entered === null) return; // user cancelled
+          password = entered;
+        }
+      }
+
       const tabId = crypto.randomUUID();
       addTab({
         id: tabId,
         docId: info.docId,
-        fileName: canonical.split(/[\\/]/).pop() ?? "Untitled",
+        fileName,
         filePath: canonical,
         pageCount: info.pageCount,
         pageDimensions: info.pageDimensions,
@@ -98,8 +128,22 @@ function App() {
         contentEpoch: 0,
         sidebarScrollPage: 1,
         ocrEpoch: 0,
+        encrypted: info.encrypted,
       });
       refreshSignatureStatus(info.docId, tabId);
+
+      // First encrypted open of the session: explain view-only mode so the
+      // greyed-out edit controls aren't a surprise. (issue #12)
+      if (info.encrypted && !encryptedNoticeShown) {
+        encryptedNoticeShown = true;
+        await message(
+          "This PDF is password-protected and opened in view-only mode. " +
+            "You can read, search, copy, export, and print it, but editing " +
+            "features (metadata, page operations, forms, and compression) and " +
+            "saving changes aren't available for encrypted PDFs.",
+          { title: "View-Only (Encrypted PDF)", kind: "info" },
+        );
+      }
     } catch (err) {
       await message(String(err), { title: "Failed to Open PDF", kind: "error" });
     }
@@ -392,6 +436,7 @@ function App() {
       </div>
       <StatusBar />
       <UnsavedChangesDialog />
+      <PasswordPrompt />
       <Notice />
       {printProgress && (
         <div className="print-progress-overlay">
