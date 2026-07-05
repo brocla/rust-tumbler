@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo test *)",
+      "PowerShell(cargo test *)",
+      "Bash(cargo build *)",
+      "PowerShell(cargo build *)",
+      "Bash(cargo check *)",
+      "PowerShell(cargo check *)",
+      "Bash(npm test)",
+      "Bash(npm test *)",
+      "PowerShell(npm test)",
+      "PowerShell(npm test *)",
+      "Bash(npx tsc *)",
+      "PowerShell(npx tsc *)",
+      "Bash(npx vitest *)",
+      "PowerShell(npx vitest *)"
+    ]
+  }
+}
