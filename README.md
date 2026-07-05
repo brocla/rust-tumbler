@@ -11,6 +11,7 @@ Built with Tauri v2
 (Rust backend, React/TypeScript frontend) and pdfium. 
 
 [![CI](https://github.com/brocla/rust-tumbler/actions/workflows/ci.yml/badge.svg)](https://github.com/brocla/rust-tumbler/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/brocla/rust-tumbler?sort=semver)](https://github.com/brocla/rust-tumbler/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 ![Rust Edition](https://img.shields.io/badge/Rust-Edition%202021-orange)
 <!-- [![dependency status](https://deps.rs/repo/github/brocla/rust-tumbler/status.svg?path=src-tauri)](https://deps.rs/repo/github/brocla/rust-tumbler?path=src-tauri) -->

@@ -1,0 +1,59 @@
+name: Release
+
+# Build the Windows installers and publish a GitHub Release whenever a
+# version tag (e.g. v2.9.0) is pushed.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish installers
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Download pdfium.dll
+        # The real pdfium runtime is not checked into the repo. Fetch the
+        # win-x64 build so the installers ship a working PDF engine.
+        working-directory: src-tauri
+        run: |
+          New-Item -ItemType Directory -Force -Path resources | Out-Null
+          $url = "https://github.com/bblanchon/pdfium-binaries/releases/latest/download/pdfium-win-x64.tgz"
+          Invoke-WebRequest -Uri $url -OutFile pdfium.tgz
+          tar -xzf pdfium.tgz bin/pdfium.dll
+          Copy-Item bin/pdfium.dll resources/pdfium.dll -Force
+
+      - name: Build and publish release
+        # tauri-action runs `tauri build`, which triggers the
+        # beforeBuildCommand in tauri.conf.json — that builds the
+        # tumbler-thumbnailer DLL, copies it into resources/, and runs
+        # `npm run build` — then uploads the NSIS + MSI installers to a
+        # Release for the pushed tag.
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: ${{ github.ref_name }}
+          releaseBody: "See the assets below to download and install Tumbler."
+          releaseDraft: false
+          prerelease: false
