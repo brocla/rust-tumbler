@@ -390,3 +390,37 @@ describe("Toolbar add text layer", () => {
     expect(invoke).not.toHaveBeenCalledWith("get_signature_info", expect.anything());
   });
 });
+
+describe("Toolbar view-only gating for encrypted PDFs (issue #12)", () => {
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset();
+    // document_has_form is polled on mount; keep it quiet.
+    vi.mocked(invoke).mockResolvedValue(false);
+  });
+
+  function renderEncrypted() {
+    usePdfStore.setState({
+      tabs: [makeTab({ encrypted: true, isDirty: true })],
+      activeTabId: "tab-1",
+      ocrProgress: null,
+    });
+    return render(<Toolbar onOpenFile={vi.fn()} onPrint={vi.fn()} />);
+  }
+
+  it("disables Save, Save As, and Add Text Layer on an encrypted document", () => {
+    renderEncrypted();
+    // Save As and Add Text Layer both carry the explanatory tooltip.
+    const disabled = screen.getAllByTitle(/Not available for password-protected PDFs/);
+    expect(disabled).toHaveLength(2);
+    for (const btn of disabled) expect(btn).toBeDisabled();
+    // Save stays disabled even though the tab is marked dirty.
+    expect(screen.getByTitle("Save (Ctrl+S)")).toBeDisabled();
+  });
+
+  it("keeps view features (Export, Print, Make Searchable) available", () => {
+    renderEncrypted();
+    expect(screen.getByTitle("Export Text...")).toBeEnabled();
+    expect(screen.getByTitle("Print (Ctrl+P)")).toBeEnabled();
+    expect(screen.getByTitle("OCR - Make Text Searchable")).toBeEnabled();
+  });
+});

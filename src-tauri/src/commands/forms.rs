@@ -1345,6 +1345,8 @@ mod tests {
                     file_path: path.into(),
                     buffer: bytes,
                     dirty: false,
+                    password: None,
+                    encrypted: false,
                 },
             )
             .expect("insert");

@@ -52,6 +52,11 @@ export interface TabState {
   // edit-invalidation guards. Populated on open and refreshed after edits;
   // undefined until the first verification completes. (issue #17)
   signatureStatus?: SignatureStatus;
+  // True when the document was opened from a user-password-protected file.
+  // Its bytes stay encrypted, so all editing/lopdf features are disabled and
+  // the UI shows a view-only lock badge. Optional so existing tab construction
+  // sites don't need updating. (issue #12)
+  encrypted?: boolean;
 }
 
 /**
@@ -81,6 +86,18 @@ export interface UnsavedPrompt {
   resolve: (choice: UnsavedChoice) => void;
 }
 
+/**
+ * A pending password prompt for opening a user-password-protected PDF
+ * (issue #12). `retry` is true when a previously entered password was rejected,
+ * so the dialog can show a "wrong password, try again" state. `resolve` is
+ * called with the entered password, or `null` if the user cancels.
+ */
+export interface PasswordPrompt {
+  fileName: string;
+  retry: boolean;
+  resolve: (password: string | null) => void;
+}
+
 export interface CompressProgress {
   step: string;
   stepIndex: number;
@@ -108,6 +125,9 @@ interface PdfStore {
   compressProgress: CompressProgress | null;
   // Non-null while an unsaved-changes prompt is showing (close guards await it).
   unsavedPrompt: UnsavedPrompt | null;
+  // Non-null while a password prompt is showing for an encrypted PDF being
+  // opened (the open flow awaits it). (issue #12)
+  passwordPrompt: PasswordPrompt | null;
   // A transient status message shown as a dismissible toast (e.g. clicking a
   // form button whose scripted action Tumbler can't run). Null when none.
   notice: string | null;
@@ -116,6 +136,8 @@ interface PdfStore {
   setActiveTab: (id: string) => void;
   askUnsaved: (fileName: string) => Promise<UnsavedChoice>;
   resolveUnsaved: (choice: UnsavedChoice) => void;
+  askPassword: (fileName: string, retry: boolean) => Promise<string | null>;
+  resolvePassword: (password: string | null) => void;
   setSidebarTool: (tool: PdfStore["activeSidebarTool"]) => void;
   setSidebarWidth: (width: number) => void;
   setOcrProgress: (progress: { page: number; total: number } | null) => void;
@@ -145,6 +167,7 @@ export const usePdfStore = create<PdfStore>((set, get) => ({
   ocrProgress: null,
   compressProgress: null,
   unsavedPrompt: null,
+  passwordPrompt: null,
   notice: null,
 
   setActiveTab: (id) => set({ activeTabId: id }),
@@ -165,6 +188,14 @@ export const usePdfStore = create<PdfStore>((set, get) => ({
   resolveUnsaved: (choice) => {
     get().unsavedPrompt?.resolve(choice);
     set({ unsavedPrompt: null });
+  },
+
+  askPassword: (fileName, retry) =>
+    new Promise((resolve) => set({ passwordPrompt: { fileName, retry, resolve } })),
+
+  resolvePassword: (password) => {
+    get().passwordPrompt?.resolve(password);
+    set({ passwordPrompt: null });
   },
 
   setOcrProgress: (progress) => set({ ocrProgress: progress }),

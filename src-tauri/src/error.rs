@@ -23,8 +23,31 @@ pub enum AppError {
     #[error("{message}: {cause}")]
     Lopdf { message: String, cause: lopdf::Error },
 
+    /// A user-password-protected PDF was opened with no (or a blank) password.
+    /// Displays as the stable sentinel `PASSWORD_REQUIRED` so the frontend can
+    /// match on it and prompt for the password (issue #12).
+    #[error("PASSWORD_REQUIRED")]
+    PasswordRequired,
+
+    /// A password was supplied but pdfium rejected it. Displays as the stable
+    /// sentinel `WRONG_PASSWORD` so the frontend can re-prompt with a "try
+    /// again" indication (issue #12).
+    #[error("WRONG_PASSWORD")]
+    WrongPassword,
+
     #[error("{0}")]
     Other(String),
+}
+
+/// True when a pdfium error is specifically "this document needs a password".
+/// `PasswordError` is the only pdfium error mapped from `FPDF_ERR_PASSWORD`, so
+/// it cleanly distinguishes an encrypted file from a corrupt/unsupported one.
+pub fn is_password_error(e: &PdfiumError) -> bool {
+    use pdfium_render::prelude::PdfiumInternalError;
+    matches!(
+        e,
+        PdfiumError::PdfiumLibraryInternalError(PdfiumInternalError::PasswordError)
+    )
 }
 
 impl From<String> for AppError {

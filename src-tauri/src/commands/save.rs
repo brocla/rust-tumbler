@@ -119,7 +119,7 @@ mod tests {
     fn open_fixture_copy(state: &AppState, doc_id: &str, name: &str) -> String {
         let path = tmp_path(name);
         std::fs::copy(crate::fixture_path(), &path).expect("copy fixture");
-        let entry = DocEntry::load(state.pdfium, &path).expect("load");
+        let entry = DocEntry::load(state.pdfium, &path, None).expect("load");
         state.insert_document(doc_id.to_string(), entry).expect("insert");
         path
     }

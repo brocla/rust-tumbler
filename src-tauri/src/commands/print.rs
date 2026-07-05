@@ -145,17 +145,21 @@ async fn print_document_impl(
     // thread, so a dirty document (unsaved buffer edits, issue #31) is handed
     // off via a temp file holding the buffer; a clean document prints straight
     // from its file. The temp file is removed after the print thread finishes.
-    let (file_path, temp_handoff) = {
+    // A password-protected document's bytes stay encrypted (issue #12), so the
+    // STA thread's pdfium load needs the same password to open them — whether it
+    // reads the original file or the temp buffer copy.
+    let (file_path, temp_handoff, password) = {
         let entry = state.get_document(&doc_id)?;
         let entry = lock_mutex(&entry)?;
+        let password = entry.password.clone();
         if entry.dirty {
             let tmp = std::env::temp_dir()
                 .join(format!("tumbler-print-{}.pdf", uuid::Uuid::new_v4()));
             std::fs::write(&tmp, &entry.buffer)
                 .map_err(|e| AppError::io("Failed to write print copy", e))?;
-            (tmp.to_string_lossy().into_owned(), Some(tmp))
+            (tmp.to_string_lossy().into_owned(), Some(tmp), password)
         } else {
-            (entry.file_path.clone(), None)
+            (entry.file_path.clone(), None, password)
         }
     };
 
@@ -170,7 +174,8 @@ async fn print_document_impl(
     let (tx, rx) = std::sync::mpsc::channel();
 
     std::thread::spawn(move || {
-        let result = print_on_sta_thread(hwnd_raw, &pdfium_path, &file_path, &window, cancel);
+        let result =
+            print_on_sta_thread(hwnd_raw, &pdfium_path, &file_path, password.as_deref(), &window, cancel);
         tx.send(result).ok();
     });
 
@@ -188,6 +193,7 @@ fn print_on_sta_thread(
     hwnd_raw: isize,
     pdfium_path: &str,
     pdf_path: &str,
+    password: Option<&str>,
     window: &tauri::WebviewWindow,
     cancel: Arc<AtomicBool>,
 ) -> Result<PrintResult, AppError> {
@@ -202,7 +208,7 @@ fn print_on_sta_thread(
         )));
     }
 
-    let result = print_impl(hwnd_raw, pdfium_path, pdf_path, window, cancel);
+    let result = print_impl(hwnd_raw, pdfium_path, pdf_path, password, window, cancel);
 
     unsafe { CoUninitialize() };
     result
@@ -212,6 +218,7 @@ fn print_impl(
     hwnd_raw: isize,
     pdfium_path: &str,
     pdf_path: &str,
+    password: Option<&str>,
     window: &tauri::WebviewWindow,
     cancel: Arc<AtomicBool>,
 ) -> Result<PrintResult, AppError> {
@@ -325,10 +332,19 @@ fn print_impl(
         unsafe { lib.get(b"FPDFBitmap_Destroy\0") }
             .map_err(|e| format!("Failed to find FPDFBitmap_Destroy: {e}"))?;
 
-    // Load the PDF document (pdfium is already initialized by the main thread)
+    // Load the PDF document (pdfium is already initialized by the main thread).
+    // For an encrypted document (issue #12) the bytes are still locked, so pass
+    // the stored password; otherwise pass NULL.
     let pdf_path_cstr = std::ffi::CString::new(pdf_path)
         .map_err(|_| "Invalid PDF path".to_string())?;
-    let doc = unsafe { fpdf_load_document(pdf_path_cstr.as_ptr() as *const u8, std::ptr::null()) };
+    let password_cstr = password
+        .map(std::ffi::CString::new)
+        .transpose()
+        .map_err(|_| "Invalid password".to_string())?;
+    let password_ptr = password_cstr
+        .as_ref()
+        .map_or(std::ptr::null(), |c| c.as_ptr() as *const u8);
+    let doc = unsafe { fpdf_load_document(pdf_path_cstr.as_ptr() as *const u8, password_ptr) };
     if doc.is_null() {
         return Err(AppError::Other("Failed to load PDF for printing".to_string()));
     }

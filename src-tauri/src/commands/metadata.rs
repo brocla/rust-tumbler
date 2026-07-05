@@ -249,6 +249,8 @@ mod tests {
                     file_path: file_path.clone(),
                     buffer: std::fs::read(&file_path).expect("read pdf"),
                     dirty: false,
+                    password: None,
+                    encrypted: false,
                 },
             )
             .expect("insert");

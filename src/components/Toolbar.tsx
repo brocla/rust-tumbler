@@ -28,6 +28,11 @@ interface ToolbarProps {
   onPrint: () => void;
 }
 
+// Tooltip on controls disabled because the active document is a
+// password-protected (encrypted) PDF, which is view-only (issue #12).
+const ENCRYPTED_DISABLED_TITLE =
+  "Not available for password-protected PDFs (view-only)";
+
 const DISPLAY_MODE_ORDER: DisplayMode[] = ["normal", "invert", "sepia"];
 
 const DISPLAY_MODE_INFO: Record<DisplayMode, { label: string; icon: typeof Sun }> = {
@@ -43,6 +48,10 @@ export function Toolbar({ onOpenFile, onPrint }: ToolbarProps) {
   const updateTab = usePdfStore((s) => s.updateTab);
   const setOcrProgress = usePdfStore((s) => s.setOcrProgress);
   const bumpFormEpoch = usePdfStore((s) => s.bumpFormEpoch);
+
+  // Password-protected PDFs open view-only: their bytes stay encrypted, so
+  // every buffer-editing feature is disabled (issue #12).
+  const encrypted = !!activeTab?.encrypted;
 
   // Whether the active document has any AcroForm fields — gates the Clear-form
   // button. Re-checked when the active document changes.
@@ -341,7 +350,7 @@ export function Toolbar({ onOpenFile, onPrint }: ToolbarProps) {
             <button
               className="toolbar-button"
               onClick={() => void saveTab(activeTab)}
-              disabled={!activeTab.isDirty}
+              disabled={!activeTab.isDirty || encrypted}
               title="Save (Ctrl+S)"
             >
               <Save size={18} />
@@ -349,11 +358,12 @@ export function Toolbar({ onOpenFile, onPrint }: ToolbarProps) {
             <button
               className="toolbar-button"
               onClick={() => void saveTabAs(activeTab)}
-              title="Save As... (Ctrl+Shift+S)"
+              disabled={encrypted}
+              title={encrypted ? ENCRYPTED_DISABLED_TITLE : "Save As... (Ctrl+Shift+S)"}
             >
               <SaveAll size={18} />
             </button>
-            {hasForm && (
+            {hasForm && !encrypted && (
               <button
                 className="toolbar-button"
                 onClick={handleClearForm}
@@ -463,7 +473,12 @@ export function Toolbar({ onOpenFile, onPrint }: ToolbarProps) {
           <button
             className="toolbar-button"
             onClick={handleAddTextLayer}
-            title="Add Text Layer (make searchable in any reader)"
+            disabled={encrypted}
+            title={
+              encrypted
+                ? ENCRYPTED_DISABLED_TITLE
+                : "Add Text Layer (make searchable in any reader)"
+            }
           >
             <FileSearch size={18} />
           </button>

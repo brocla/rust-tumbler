@@ -178,3 +178,15 @@ pub(crate) fn test_pdfium() -> &'static Pdfium {
 pub(crate) fn fixture_path() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample.pdf")
 }
+
+/// Path to a user-password-protected copy of `sample.pdf` (AESv3/256-bit).
+/// The user password is [`ENCRYPTED_FIXTURE_PASSWORD`]. Used by the
+/// encrypted-open tests (issue #12).
+#[cfg(test)]
+pub(crate) fn encrypted_fixture_path() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample-encrypted.pdf")
+}
+
+/// The user password baked into [`encrypted_fixture_path`].
+#[cfg(test)]
+pub(crate) const ENCRYPTED_FIXTURE_PASSWORD: &str = "open-sesame";
