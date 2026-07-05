@@ -456,6 +456,8 @@ mod tests {
                     file_path: path.to_string(),
                     buffer,
                     dirty: false,
+                    password: None,
+                    encrypted: false,
                 },
             )
             .expect("insert document");

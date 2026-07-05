@@ -13,26 +13,64 @@ pub struct DocEntry {
     /// The authoritative current bytes of the document, including any
     /// not-yet-saved edits. Differs from the file on disk exactly when
     /// `dirty` is true. (issue #31)
+    ///
+    /// For a password-protected document these bytes stay **encrypted** — we
+    /// never decrypt the buffer (the pinned lopdf can't decrypt AES, and
+    /// pdfium can't export plaintext). Only pdfium's live `document` view,
+    /// opened with `password`, can read it. Consequently every lopdf-based
+    /// feature (metadata, page ops, compression, forms, text layer) is
+    /// disabled in the UI for encrypted docs. (issue #12)
     pub buffer: Vec<u8>,
     /// True once an in-memory edit has been applied and not yet saved.
     pub dirty: bool,
+    /// The user password that unlocked this document, kept in memory only
+    /// (never written to disk) so operations that reopen the bytes — currently
+    /// Print, whose GDI path loads from a temp file — can supply it. `None`
+    /// for unencrypted documents. (issue #12)
+    pub password: Option<String>,
+    /// True when the source file was user-password-protected. Mirrored to the
+    /// frontend so the UI can switch to view-only mode (issue #12).
+    pub encrypted: bool,
 }
 
 impl DocEntry {
     /// Loads a document from `path`: the file bytes become `buffer` and the
     /// pdfium view is built from those bytes (not from the file), so render
     /// state and buffer can never diverge.
-    pub fn load(pdfium: &'static Pdfium, path: &str) -> Result<Self, AppError> {
+    ///
+    /// `password` is supplied on a retry after a first attempt reported
+    /// [`AppError::PasswordRequired`]. A password-protected file loaded without
+    /// one yields `PasswordRequired`; loaded with a rejected one yields
+    /// [`AppError::WrongPassword`]. (issue #12)
+    pub fn load(
+        pdfium: &'static Pdfium,
+        path: &str,
+        password: Option<&str>,
+    ) -> Result<Self, AppError> {
         let buffer =
             std::fs::read(path).map_err(|e| AppError::io("Failed to read PDF file", e))?;
         let document = pdfium
-            .load_pdf_from_byte_vec(buffer.clone(), None)
-            .map_err(|e| AppError::pdfium("Failed to load PDF", e))?;
+            .load_pdf_from_byte_vec(buffer.clone(), password)
+            .map_err(|e| {
+                if crate::error::is_password_error(&e) {
+                    // Distinguish "no password given yet" from "you guessed wrong",
+                    // so the frontend can prompt vs. re-prompt-with-error.
+                    if password.is_some() {
+                        AppError::WrongPassword
+                    } else {
+                        AppError::PasswordRequired
+                    }
+                } else {
+                    AppError::pdfium("Failed to load PDF", e)
+                }
+            })?;
         Ok(Self {
             document,
             file_path: path.to_string(),
             buffer,
             dirty: false,
+            password: password.map(str::to_string),
+            encrypted: password.is_some(),
         })
     }
 }
@@ -292,7 +330,7 @@ mod tests {
         assert!(matches!(state.get_document("missing"), Err(AppError::NotFound(_))));
 
         let file_path = src.to_string_lossy().into_owned();
-        let entry = DocEntry::load(pdfium, &file_path).expect("load pdf");
+        let entry = DocEntry::load(pdfium, &file_path, None).expect("load pdf");
         state.insert_document("doc1".to_string(), entry).expect("insert");
 
         let entry = state.get_document("doc1").expect("get");
@@ -302,13 +340,43 @@ mod tests {
         assert!(matches!(state.get_document("doc1"), Err(AppError::NotFound(_))));
     }
 
+    /// The view-only design (issue #12) rests on two pdfium facts: an encrypted
+    /// file is rejected with `PasswordError` when no password is given (so we
+    /// can prompt), and opens normally when the correct password is supplied
+    /// (so the view works without decrypting the buffer). The buffer is left
+    /// encrypted on disk/in memory — we never convert it to plaintext.
+    #[test]
+    fn encrypted_fixture_rejects_missing_password_and_opens_with_correct_one() {
+        let _guard = crate::test_pdfium_guard();
+        let pdfium = crate::test_pdfium();
+        let encrypted = std::fs::read(crate::encrypted_fixture_path()).expect("read fixture");
+
+        // No password → pdfium password error.
+        let err = pdfium
+            .load_pdf_from_byte_vec(encrypted.clone(), None)
+            .expect_err("encrypted file must reject a missing password");
+        assert!(
+            matches!(
+                err,
+                PdfiumError::PdfiumLibraryInternalError(PdfiumInternalError::PasswordError)
+            ),
+            "expected PasswordError, got {err:?}",
+        );
+
+        // Correct password → opens and renders, buffer untouched.
+        let doc = pdfium
+            .load_pdf_from_byte_vec(encrypted, Some(crate::ENCRYPTED_FIXTURE_PASSWORD))
+            .expect("correct password must open the document");
+        assert_eq!(doc.pages().len(), 1);
+    }
+
     /// `DocEntry::load` seeds the buffer with the file's bytes and starts clean.
     #[test]
     fn doc_entry_load_seeds_buffer_from_file_and_is_clean() {
         let src = crate::fixture_path();
         let pdfium = crate::test_pdfium();
 
-        let entry = DocEntry::load(pdfium, &src.to_string_lossy()).expect("load");
+        let entry = DocEntry::load(pdfium, &src.to_string_lossy(), None).expect("load");
 
         assert_eq!(entry.buffer, std::fs::read(&src).expect("read fixture"));
         assert!(!entry.dirty);
@@ -325,7 +393,7 @@ mod tests {
         let state = AppState::new(pdfium, None);
 
         let file_path = src.to_string_lossy().into_owned();
-        let entry = DocEntry::load(pdfium, &file_path).expect("load");
+        let entry = DocEntry::load(pdfium, &file_path, None).expect("load");
         state.insert_document("doc1".to_string(), entry).expect("insert");
 
         // A distinguishable two-page document as the "edited" bytes.
@@ -366,7 +434,7 @@ mod tests {
         let file_path = src.to_string_lossy().into_owned();
 
         for doc_id in ["doc-a", "doc-b"] {
-            let entry = DocEntry::load(pdfium, &file_path).expect("load pdf");
+            let entry = DocEntry::load(pdfium, &file_path, None).expect("load pdf");
             state.insert_document(doc_id.to_string(), entry).expect("insert");
         }
 

@@ -49,7 +49,7 @@ mod tests {
     fn open_fixture(state: &AppState, doc_id: &str) {
         let pdfium = crate::test_pdfium();
         let src = crate::fixture_path();
-        let entry = DocEntry::load(pdfium, &src.to_string_lossy()).expect("load pdf");
+        let entry = DocEntry::load(pdfium, &src.to_string_lossy(), None).expect("load pdf");
         state.insert_document(doc_id.to_string(), entry).expect("insert");
     }
 

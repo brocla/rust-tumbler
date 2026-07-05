@@ -3,27 +3,44 @@ use crate::state::{AppState, DocEntry};
 use serde::Serialize;
 use tauri::State;
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct PageDimension {
     pub width: f32,
     pub height: f32,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct DocInfo {
     pub doc_id: String,
     pub page_count: u32,
     pub page_dimensions: Vec<PageDimension>,
+    /// True when the file was user-password-protected and was unlocked with the
+    /// supplied password. The frontend switches to view-only mode for these
+    /// (editing an encrypted PDF isn't supported — issue #12).
+    pub encrypted: bool,
 }
 
+/// `password` is `None`/absent on the first attempt. If the file is
+/// password-protected this returns `Err("PASSWORD_REQUIRED")`; the frontend
+/// then prompts and retries with the password. A rejected password returns
+/// `Err("WRONG_PASSWORD")`. (issue #12)
 #[tauri::command]
-pub fn open_document(state: State<'_, AppState>, path: String) -> Result<DocInfo, String> {
-    open_document_impl(&state, path).map_err(String::from)
+pub fn open_document(
+    state: State<'_, AppState>,
+    path: String,
+    password: Option<String>,
+) -> Result<DocInfo, String> {
+    open_document_impl(&state, path, password).map_err(String::from)
 }
 
-fn open_document_impl(state: &AppState, path: String) -> Result<DocInfo, AppError> {
-    let entry = DocEntry::load(state.pdfium, &path)?;
+fn open_document_impl(
+    state: &AppState,
+    path: String,
+    password: Option<String>,
+) -> Result<DocInfo, AppError> {
+    let entry = DocEntry::load(state.pdfium, &path, password.as_deref())?;
+    let encrypted = entry.encrypted;
 
     let page_count = entry.document.pages().len() as u32;
     let mut page_dimensions = Vec::with_capacity(page_count as usize);
@@ -47,6 +64,7 @@ fn open_document_impl(state: &AppState, path: String) -> Result<DocInfo, AppErro
         doc_id,
         page_count,
         page_dimensions,
+        encrypted,
     })
 }
 
@@ -84,7 +102,7 @@ mod tests {
         let state = AppState::new(pdfium, None);
         let src = crate::fixture_path();
 
-        let info = open_document_impl(&state, src.to_string_lossy().into_owned()).expect("open");
+        let info = open_document_impl(&state, src.to_string_lossy().into_owned(), None).expect("open");
 
         assert_eq!(info.page_count, 1);
         assert_eq!(info.page_dimensions.len(), 1);
@@ -128,13 +146,58 @@ mod tests {
         assert!(canonicalize_path_impl(&missing.to_string_lossy()).is_err());
     }
 
+    /// Opening the encrypted fixture with no password must report
+    /// `PasswordRequired` (the sentinel the frontend prompts on), a wrong
+    /// password must report `WrongPassword`, and the correct password must
+    /// open it with `encrypted == true`. (issue #12)
+    #[test]
+    fn open_document_password_flow_for_encrypted_fixture() {
+        let _guard = crate::test_pdfium_guard();
+        let pdfium = crate::test_pdfium();
+        let state = AppState::new(pdfium, None);
+        let path = crate::encrypted_fixture_path().to_string_lossy().into_owned();
+
+        // First attempt, no password → PasswordRequired.
+        match open_document_impl(&state, path.clone(), None) {
+            Err(AppError::PasswordRequired) => {}
+            other => panic!("expected PasswordRequired, got {other:?}"),
+        }
+
+        // Wrong password → WrongPassword.
+        match open_document_impl(&state, path.clone(), Some("nope".to_string())) {
+            Err(AppError::WrongPassword) => {}
+            other => panic!("expected WrongPassword, got {other:?}"),
+        }
+
+        // Correct password → opens, flagged encrypted.
+        let info = open_document_impl(
+            &state,
+            path,
+            Some(crate::ENCRYPTED_FIXTURE_PASSWORD.to_string()),
+        )
+        .expect("correct password should open");
+        assert!(info.encrypted, "encrypted fixture must report encrypted = true");
+        assert_eq!(info.page_count, 1);
+    }
+
+    /// An unencrypted document reports `encrypted == false`.
+    #[test]
+    fn open_document_unencrypted_is_not_flagged_encrypted() {
+        let pdfium = crate::test_pdfium();
+        let state = AppState::new(pdfium, None);
+        let src = crate::fixture_path().to_string_lossy().into_owned();
+
+        let info = open_document_impl(&state, src, None).expect("open");
+        assert!(!info.encrypted);
+    }
+
     #[test]
     fn open_document_for_missing_file_is_error() {
         let pdfium = crate::test_pdfium();
         let state = AppState::new(pdfium, None);
 
         let missing = std::env::temp_dir().join("tumbler_does_not_exist.pdf");
-        match open_document_impl(&state, missing.to_string_lossy().into_owned()) {
+        match open_document_impl(&state, missing.to_string_lossy().into_owned(), None) {
             Err(AppError::Io { .. }) => {}
             Err(other) => panic!("expected AppError::Io, got {other:?}"),
             Ok(_) => panic!("expected an error for a missing file"),
