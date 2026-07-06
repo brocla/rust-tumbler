@@ -164,8 +164,8 @@ fn is_image_xobject(obj: &Object) -> bool {
     obj.as_stream()
         .ok()
         .and_then(|s| s.dict.get(b"Subtype").ok())
-        .and_then(|o| o.as_name_str().ok())
-        == Some("Image")
+        .and_then(|o| o.as_name().ok())
+        == Some(b"Image".as_slice())
 }
 
 /// Add every image-XObject name → id entry from one resources dictionary,
@@ -295,7 +295,7 @@ fn is_indexed(dict: &Dictionary, doc: &Document) -> bool {
     };
     match cs {
         Object::Array(arr) => {
-            matches!(arr.first().and_then(|o| o.as_name_str().ok()), Some("Indexed") | Some("I"))
+            matches!(arr.first().and_then(|o| o.as_name().ok()), Some(n) if n == b"Indexed" || n == b"I")
         }
         Object::Name(n) => n == b"Indexed" || n == b"I",
         _ => false,
@@ -396,7 +396,7 @@ fn plan_one(
     let new_h = ((height as f32 * scale).round() as u32).max(1);
 
     let filters = stream.filters().unwrap_or_default();
-    let filter = if filters.len() == 1 { filters[0].as_str() } else { "" };
+    let filter = if filters.len() == 1 { std::str::from_utf8(filters[0]).unwrap_or("") } else { "" };
 
     let (img, gray) = match filter {
         "DCTDecode" => match image::load_from_memory(&stream.content) {
@@ -1001,8 +1001,8 @@ mod tests {
         assert_eq!(skipped[0].reason, "jpx");
         assert_eq!(skipped[0].count, 1);
         // Untouched: the filter is still JPXDecode.
-        let f = image_dict(&doc, img_id).get(b"Filter").unwrap().as_name_str().unwrap();
-        assert_eq!(f, "JPXDecode");
+        let f = image_dict(&doc, img_id).get(b"Filter").unwrap().as_name().unwrap();
+        assert_eq!(f, b"JPXDecode");
     }
 
     /// A 1-bit (bilevel) image is skipped — re-encoding line art as JPEG would
