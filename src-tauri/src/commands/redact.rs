@@ -421,9 +421,11 @@ pub(crate) fn verify_redactions(
         let (bw, bh) = (bitmap.width() as u32, bitmap.height() as u32);
 
         for &i in indices {
-            // A little context margin helps OCR latch onto stray glyphs.
+            // Crop exactly the burned pixels (region + burn pad). A wider
+            // margin would include legitimate adjacent text, whose glyph
+            // fragments could OCR as a false leak.
             let Some((x0, y0, x1, y1)) =
-                region_to_pixels(&regions[i].rect, 4.0, bw, bh, page_w, page_h)
+                region_to_pixels(&regions[i].rect, BURN_PAD_PTS, bw, bh, page_w, page_h)
             else {
                 continue;
             };
@@ -584,6 +586,10 @@ pub(crate) fn apply_redactions_impl(
             temp_cache,
             cancel.clone(),
             Some(&flattened_pages),
+            // Per-word runs: a line-grouped run would be stretched across the
+            // burned gap of a mid-line redaction, putting invisible glyphs
+            // inside the region and failing verification.
+            true,
         ) {
             Ok((result, edited)) => {
                 if result.cancelled {
@@ -1166,6 +1172,88 @@ mod tests {
         assert_eq!(px(50, 50), (0, 0, 0, 255), "region center must be black");
         assert_eq!(px(10, 10), (255, 255, 255, 255), "outside must be untouched");
         assert_eq!(px(90, 90), (255, 255, 255, 255), "outside must be untouched");
+    }
+
+    /// OCR engine simulating Windows OCR on a flattened page where a word in
+    /// the *middle* of a line was burned: it "recognizes" the surviving words
+    /// on either side of the gap (and nothing in small crops, like the black
+    /// region crops the verification OCR check sends). Rects are bitmap pixel
+    /// space, derived from the render scale, as the real engine reports them.
+    struct RemainingWordsOcr;
+    impl OcrEngine for RemainingWordsOcr {
+        fn recognize(&self, _rgba: &[u8], w: u32, _h: u32) -> Result<Vec<OcrWord>, AppError> {
+            // A region crop (small) contains only burned pixels — no words.
+            if w < 500 {
+                return Ok(Vec::new());
+            }
+            // Full-page render of the 200pt page: scale = px per pt.
+            // "ab SECRET cd" at 24pt from x=20: "ab" spans ~20..47 and "cd"
+            // ~157..182 — both clear of the burned "SECRET" box (~53..151).
+            let s = w as f32 / 200.0;
+            let word = |text: &str, x_pt: f32, w_pt: f32| OcrWord {
+                text: text.to_string(),
+                // Pixel space, origin top-left; box spans y 145..157 pt.
+                rect: TextRect {
+                    x: x_pt * s,
+                    y: (200.0 - 157.0) * s,
+                    width: w_pt * s,
+                    height: 12.0 * s,
+                },
+            };
+            Ok(vec![word("ab", 20.0, 27.0), word("cd", 157.0, 25.0)])
+        }
+    }
+
+    /// Regression: redacting a word in the middle of a line must stay verified
+    /// after the re-OCR pass. The layer author must not write a line run that
+    /// spans the burned gap (a line-unioned, Tz-stretched run would position
+    /// invisible glyphs inside the region and fail — falsely — check 1).
+    #[test]
+    fn reocr_layer_does_not_span_the_burned_gap() {
+        let _guard = crate::test_pdfium_guard();
+        let pdfium = crate::test_pdfium();
+        let state = AppState::new(pdfium, None);
+        let bytes = text_pdf_bytes(&["ab SECRET cd"]);
+        open_mem_doc(&state, "doc1", bytes.clone());
+
+        // Redact only the middle word — the burned gap splits the line.
+        let regions = find_redaction_matches_impl(
+            &state,
+            "doc1".to_string(),
+            "SECRET".to_string(),
+            false,
+            false,
+            false,
+        )
+        .expect("find matches");
+        assert_eq!(regions.len(), 1);
+
+        let engine: Arc<dyn OcrEngine> = Arc::new(RemainingWordsOcr);
+        let (result, output) = apply_redactions_impl(
+            &no_progress,
+            pdfium,
+            &bytes,
+            &regions,
+            &["SECRET".to_string()],
+            150.0,
+            &engine,
+            &not_cancelled(),
+        )
+        .expect("apply");
+
+        assert_eq!(result.reocr_pages, 1, "the flattened page must get a re-OCR layer");
+        assert!(
+            result.verified,
+            "middle-of-line redaction must verify clean; leaks: {:?}",
+            result.leaks
+        );
+
+        // The surviving words are searchable in the output; the redacted one is gone.
+        let out = output.expect("output bytes");
+        let reloaded = pdfium.load_pdf_from_byte_vec(out, None).expect("reload");
+        let text = reloaded.pages().get(0).expect("page").text().expect("text").all();
+        assert!(text.contains("ab") && text.contains("cd"), "got: {text:?}");
+        assert!(!text.contains("SECRET"), "got: {text:?}");
     }
 
     /// A pre-set cancel token stops the run before any output is produced.
