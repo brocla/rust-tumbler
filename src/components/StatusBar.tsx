@@ -7,9 +7,8 @@ import { signatureBadge } from "../utils/signature";
 /**
  * Thin bottom border strip, right-justified. Shows (right to left): the app
  * version number (always, in the theme accent color), then the digital-signature
- * badge and, for a password-protected document (issue #12), a view-only lock
- * badge — both for the **active tab only** (issue #17). The version stays
- * rightmost.
+ * badge and, for a password-protected document (issues #12/#57), a lock badge —
+ * both for the **active tab only** (issue #17). The version stays rightmost.
  */
 export function StatusBar() {
   const tab = usePdfStore((s) => s.tabs.find((t) => t.id === s.activeTabId));
@@ -28,9 +27,12 @@ export function StatusBar() {
   return (
     <div className="app-status-bar">
       {encrypted && (
-        <span className="encrypted-badge" title="Password-protected — view only">
+        <span
+          className="encrypted-badge"
+          title="Password-protected — saving keeps the password. Use the toolbar unlock button to remove it."
+        >
           <Lock size={12} />
-          Encrypted — view only
+          Encrypted
         </span>
       )}
       {badge && (

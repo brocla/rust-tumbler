@@ -24,14 +24,10 @@ interface DocInfo {
   docId: string;
   pageCount: number;
   pageDimensions: PageDimension[];
-  // True when the file was user-password-protected and was unlocked (issue #12).
+  // True when the file is password-protected. It opens fully editable (the
+  // buffer is decrypted — issue #57); Save re-encrypts with the same password.
   encrypted: boolean;
 }
-
-// Shown once per session, the first time an encrypted PDF is opened, so the
-// view-only restrictions aren't a mystery. Module-level so it persists across
-// opens without being tab/store state. (issue #12)
-let encryptedNoticeShown = false;
 
 interface AccentColors {
   accent: string;
@@ -131,19 +127,6 @@ function App() {
         encrypted: info.encrypted,
       });
       refreshSignatureStatus(info.docId, tabId);
-
-      // First encrypted open of the session: explain view-only mode so the
-      // greyed-out edit controls aren't a surprise. (issue #12)
-      if (info.encrypted && !encryptedNoticeShown) {
-        encryptedNoticeShown = true;
-        await message(
-          "This PDF is password-protected and opened in view-only mode. " +
-            "You can read, search, copy, export, and print it, but editing " +
-            "features (metadata, page operations, forms, and compression) and " +
-            "saving changes aren't available for encrypted PDFs.",
-          { title: "View-Only (Encrypted PDF)", kind: "info" },
-        );
-      }
     } catch (err) {
       await message(String(err), { title: "Failed to Open PDF", kind: "error" });
     }

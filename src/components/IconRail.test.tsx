@@ -31,7 +31,7 @@ function makeTab(overrides: Partial<TabState> = {}): TabState {
   };
 }
 
-describe("IconRail (issue #12 view-only gating)", () => {
+describe("IconRail", () => {
   beforeEach(() => {
     usePdfStore.setState({ tabs: [], activeTabId: null, activeSidebarTool: null });
   });
@@ -44,18 +44,13 @@ describe("IconRail (issue #12 view-only gating)", () => {
     }
   });
 
-  it("disables the lopdf-backed tools for an encrypted document, keeping view tools", () => {
+  // Encrypted documents are decrypted into the buffer at open (issue #57),
+  // so every tool — including the lopdf-backed ones — stays enabled.
+  it("enables every tool for an encrypted document too", () => {
     usePdfStore.setState({ tabs: [makeTab({ encrypted: true })], activeTabId: "tab-1" });
     render(<IconRail />);
-
-    // View tools stay live.
-    expect(screen.getByTitle("Thumbnails")).toBeEnabled();
-    expect(screen.getByTitle("Search")).toBeEnabled();
-
-    // Edit/metadata tools are disabled, with an explanatory tooltip.
-    for (const label of ["Metadata", "Page operations", "Compression"]) {
-      const btn = screen.getByTitle(new RegExp(`${label} isn't available`));
-      expect(btn).toBeDisabled();
+    for (const title of ["Thumbnails", "Search", "Metadata", "Page Operations", "Compress"]) {
+      expect(screen.getByTitle(title)).toBeEnabled();
     }
   });
 });

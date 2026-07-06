@@ -167,7 +167,7 @@ body {
   background: var(--color-bg-tertiary);
 }
 
-/* View-only lock badge for password-protected PDFs (issue #12). Shares the
+/* Lock badge for password-protected PDFs (issues #12/#57). Shares the
    pill shape of the signature badge; neutral colouring since it's an
    informational state, not a warning. */
 .encrypted-badge {
@@ -733,7 +733,6 @@ input[type="radio"].form-check:checked {
   color: var(--color-accent);
 }
 
-/* Disabled for a view-only (encrypted) PDF — greyed, no hover (issue #12). */
 .rail-button:disabled {
   opacity: 0.4;
   cursor: default;
@@ -758,16 +757,6 @@ input[type="radio"].form-check:checked {
   flex: 1;
   overflow-y: auto;
   overflow-x: hidden;
-}
-
-/* Shown in place of an edit panel when the active document is a view-only
-   (encrypted) PDF (issue #12). */
-.sidebar-encrypted-note {
-  margin: 0;
-  padding: 16px;
-  color: var(--color-text-secondary);
-  font-size: var(--font-size-sm);
-  line-height: 1.5;
 }
 
 .sidebar-resize-handle {

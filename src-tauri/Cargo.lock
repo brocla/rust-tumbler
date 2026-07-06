@@ -4517,6 +4517,7 @@ dependencies = [
  "der",
  "dunce",
  "flate2",
+ "getrandom 0.3.4",
  "hex",
  "image",
  "libloading",
