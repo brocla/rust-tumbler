@@ -149,6 +149,14 @@ All edits follow the **buffer model** — they read from and write back to `DocE
 
 ---
 
+## Dependency constraints (read before updating crates)
+
+- **`windows` must stay on 0.61 while on `pdfium-render` 0.9.x.** `pdfium-render` 0.9.x (with the `pdfium_use_win32` feature) references `windows::Win32::...` modules that the `windows` 0.62 crate reorganized; letting `windows` float to 0.62 breaks the build with `cannot find Win32 in windows`. Bump `windows` and `pdfium-render` together, deliberately.
+- **Never run a bare `cargo update`.** It floats the whole graph and will drag `windows` to 0.62 (see above). Always update targeted: `cargo update -p <crate>` (add `--precise <ver>` when a bump needs to cascade a transitive minor, e.g. `cargo update -p tauri --precise 2.11.5` also moves `tray-icon`).
+- **`time` is not a direct-use dependency.** It's declared only to steer version resolution; it arrives transitively via `cookie` (Tauri). See the note on the `time` line in `Cargo.toml`.
+
+---
+
 ## Frontend state
 
 `usePdfStore` (Zustand) is the single source of truth.
