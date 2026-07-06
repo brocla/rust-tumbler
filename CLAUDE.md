@@ -53,7 +53,7 @@ rust-tumbler/
 | File | Responsibility |
 |---|---|
 | `document.rs` | open / close documents (password prompt flow for encrypted PDFs, issue #12) |
-| `encryption.rs` | password-protected PDFs (issue #57): decrypt to a plaintext buffer at open, re-encrypt (AES-256) on save, `remove_password` command |
+| `encryption.rs` | password-protected PDFs (issue #57): decrypt to a plaintext buffer at open, re-encrypt (AES-256) on save, `remove_password` and `set_password` commands |
 | `render.rs` | render a page to a base64 bitmap (pdfium) |
 | `text.rs` | extract text, full-document search, export text to `.txt` (pdfium) |
 | `ocr.rs` | per-page and whole-document OCR via Windows.Media.Ocr |
@@ -108,7 +108,7 @@ Key fields:
 
 `DocEntry` holds the `PdfDocument<'static>` (pdfium handle), the `file_path` string, `buffer: Vec<u8>` (the authoritative current bytes, including unsaved edits; `document` is always a pdfium render of it) and `dirty: bool` (true when there are unsaved changes). Buffer-model edits end with `state.set_buffer_and_refresh(doc_id, bytes)` and emit `document-dirty-changed`; `save_document` / `save_document_as` (in `commands/save.rs`) are the only commands that write the buffer to disk.
 
-A password-protected file is decrypted **into the buffer** at open (issue #57), so the buffer is always plaintext and every editing feature works on encrypted documents. `DocEntry` keeps `encrypted: bool`, the `password` (in memory only), and the original permission bits; Save re-encrypts the buffer with AES-256 on the way to disk. The `remove_password` command (in `commands/encryption.rs`) clears the stored password so the next Save writes an unprotected file.
+A password-protected file is decrypted **into the buffer** at open (issue #57), so the buffer is always plaintext and every editing feature works on encrypted documents. `DocEntry` keeps `encrypted: bool`, the `password` (in memory only), and the original permission bits; Save re-encrypts the buffer with AES-256 on the way to disk. The `remove_password` command (in `commands/encryption.rs`) clears the stored password so the next Save writes an unprotected file; its mirror `set_password` (issue #58) stores one — protecting a plain document or changing an existing password — so the next Save writes an AES-256-encrypted file.
 
 Accessing a document safely:
 ```rust
