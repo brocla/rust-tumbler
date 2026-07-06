@@ -8,6 +8,7 @@ pub mod ocr;
 pub mod optimize;
 pub mod pages;
 pub mod print;
+pub mod redact;
 pub mod render;
 pub mod save;
 pub mod text_layer;

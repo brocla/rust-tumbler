@@ -422,6 +422,23 @@ fn add_text_layer_impl(
     cache: OcrCache,
     cancel: Arc<AtomicBool>,
 ) -> Result<(AddTextLayerResult, Option<Vec<u8>>), AppError> {
+    add_text_layer_impl_filtered(emit_progress, entry, doc_id, engine, cache, cancel, None)
+}
+
+/// [`add_text_layer_impl`] with an optional page filter: when `only_pages` is
+/// `Some`, pages outside the set are neither OCR'd nor given a layer. Redaction
+/// (issue #1) uses this to re-OCR just the pages it flattened, instead of
+/// running OCR over every scanned page of a large document.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn add_text_layer_impl_filtered(
+    emit_progress: impl Fn(u32, u32),
+    entry: Arc<Mutex<DocEntry>>,
+    doc_id: String,
+    engine: Arc<dyn OcrEngine>,
+    cache: OcrCache,
+    cancel: Arc<AtomicBool>,
+    only_pages: Option<&std::collections::HashSet<u32>>,
+) -> Result<(AddTextLayerResult, Option<Vec<u8>>), AppError> {
     // The buffer is the authoritative bytes (it carries any unsaved edits), so
     // the layer is authored into it, not into the file on disk.
     let (source_bytes, page_count) = {
@@ -436,6 +453,9 @@ fn add_text_layer_impl(
     let mut textless_pages: Vec<u32> = Vec::new();
     for i in 0..page_count {
         let page_num = i + 1;
+        if only_pages.is_some_and(|s| !s.contains(&page_num)) {
+            continue;
+        }
 
         if cancel.load(Ordering::Relaxed) {
             return Ok((

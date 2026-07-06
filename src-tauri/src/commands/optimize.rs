@@ -93,7 +93,7 @@ fn step_delete_zero_length(doc: &mut Document) {
 /// the catalog's XMP `/Metadata` and `/OpenAction`, the `/JavaScript` and
 /// `/EmbeddedFiles` name trees, and each page's `/Thumb` thumbnail. Named
 /// destinations (`/Dests`) and the rest of the `/Names` tree are left intact.
-fn step_strip_extras(doc: &mut Document) {
+pub(crate) fn step_strip_extras(doc: &mut Document) {
     if let Ok(catalog) = doc.catalog_mut() {
         catalog.remove(b"Metadata");
         catalog.remove(b"OpenAction");
