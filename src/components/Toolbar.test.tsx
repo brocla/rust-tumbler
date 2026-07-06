@@ -458,3 +458,129 @@ describe("Toolbar for encrypted PDFs (issue #57 — fully editable)", () => {
     );
   });
 });
+
+describe("Toolbar set / change password (issue #58)", () => {
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset();
+    vi.mocked(message).mockReset();
+    vi.mocked(confirm).mockReset();
+    vi.mocked(message).mockResolvedValue(undefined as never);
+    // document_has_form is polled on mount; keep it quiet.
+    vi.mocked(invoke).mockResolvedValue(false);
+  });
+
+  async function openDialogAndSubmit(password: string) {
+    await act(async () => {
+      fireEvent.click(screen.getByTitle(/Set a password|Change the password/));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    fireEvent.change(screen.getByLabelText("Password"), {
+      target: { value: password },
+    });
+    fireEvent.change(screen.getByLabelText("Confirm password"), {
+      target: { value: password },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByText(/Set Password|Change Password/));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+  }
+
+  it("labels the button Set on an unencrypted document and Change on an encrypted one", () => {
+    const plain = renderToolbar();
+    expect(screen.getByTitle(/Set a password/)).toBeEnabled();
+    expect(screen.queryByTitle(/Change the password/)).toBeNull();
+    plain.unmount();
+
+    usePdfStore.setState({
+      tabs: [makeTab({ encrypted: true })],
+      activeTabId: "tab-1",
+      ocrProgress: null,
+    });
+    render(<Toolbar onOpenFile={vi.fn()} onPrint={vi.fn()} />);
+    expect(screen.getByTitle(/Change the password/)).toBeEnabled();
+    expect(screen.queryByTitle(/Set a password/)).toBeNull();
+  });
+
+  it("sets a password: invokes the command, flags the tab encrypted, and notifies", async () => {
+    renderToolbar();
+    await openDialogAndSubmit("secret-58");
+
+    expect(invoke).toHaveBeenCalledWith("set_password", {
+      docId: "doc-1",
+      password: "secret-58",
+    });
+    expect(usePdfStore.getState().tabs[0].encrypted).toBe(true);
+    expect(message).toHaveBeenCalledWith(
+      expect.stringContaining("Password set"),
+      expect.objectContaining({ title: "Set Password" }),
+    );
+  });
+
+  it("changes the password of an already-encrypted document", async () => {
+    usePdfStore.setState({
+      tabs: [makeTab({ encrypted: true })],
+      activeTabId: "tab-1",
+      ocrProgress: null,
+    });
+    render(<Toolbar onOpenFile={vi.fn()} onPrint={vi.fn()} />);
+    await openDialogAndSubmit("new-pw");
+
+    expect(invoke).toHaveBeenCalledWith("set_password", {
+      docId: "doc-1",
+      password: "new-pw",
+    });
+    expect(usePdfStore.getState().tabs[0].encrypted).toBe(true);
+    expect(message).toHaveBeenCalledWith(
+      expect.stringContaining("Password changed"),
+      expect.objectContaining({ title: "Change Password" }),
+    );
+  });
+
+  it("cancelling the dialog invokes nothing", async () => {
+    renderToolbar();
+    await act(async () => {
+      fireEvent.click(screen.getByTitle(/Set a password/));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    fireEvent.click(screen.getByText("Cancel"));
+
+    expect(invoke).not.toHaveBeenCalledWith("set_password", expect.anything());
+    expect(usePdfStore.getState().tabs[0].encrypted).toBeFalsy();
+  });
+
+  it("surfaces a backend failure without flagging the tab encrypted", async () => {
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === "set_password") throw "boom";
+      return false;
+    });
+    renderToolbar();
+    await openDialogAndSubmit("secret");
+
+    expect(usePdfStore.getState().tabs[0].encrypted).toBeFalsy();
+    expect(message).toHaveBeenCalledWith(
+      "boom",
+      expect.objectContaining({ title: "Set Password", kind: "error" }),
+    );
+  });
+
+  it("warns before protecting a signed document and aborts if declined", async () => {
+    vi.mocked(confirm).mockResolvedValue(false);
+    usePdfStore.setState({
+      tabs: [makeTab({ signatureStatus: "verified" })],
+      activeTabId: "tab-1",
+      ocrProgress: null,
+    });
+    render(<Toolbar onOpenFile={vi.fn()} onPrint={vi.fn()} />);
+
+    await act(async () => {
+      fireEvent.click(screen.getByTitle(/Set a password/));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    expect(confirm).toHaveBeenCalled();
+    // Declined: no dialog opened, nothing invoked.
+    expect(screen.queryByLabelText("Password")).toBeNull();
+    expect(invoke).not.toHaveBeenCalledWith("set_password", expect.anything());
+  });
+});

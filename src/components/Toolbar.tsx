@@ -1,4 +1,4 @@
-import { BookOpen, ChevronLeft, ChevronRight, Eraser, FileSearch, LockOpen, Moon, MoveHorizontal, MoveVertical, Printer, Save, SaveAll, ScanSearch, ScrollText, Sun, ZoomIn, ZoomOut } from "lucide-react";
+import { BookOpen, ChevronLeft, ChevronRight, Eraser, FileSearch, Lock, LockOpen, Moon, MoveHorizontal, MoveVertical, Printer, Save, SaveAll, ScanSearch, ScrollText, Sun, ZoomIn, ZoomOut } from "lucide-react";
 import { useEffect, useState } from "react";
 import { save, message, ask } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
@@ -10,6 +10,7 @@ import { confirmBreakingEdit } from "../utils/confirmBreakingEdit";
 import { saveTab, saveTabAs } from "../utils/saveDocument";
 import { isSigned, SIGNATURE_EDIT_WARNING } from "../utils/signature";
 import type { SignatureInfo } from "../utils/signature";
+import { SetPasswordDialog } from "./SetPasswordDialog";
 
 interface TextExportResult {
   pages: number;
@@ -290,6 +291,47 @@ export function Toolbar({ onOpenFile, onPrint }: ToolbarProps) {
     }
   };
 
+  // "Set password" / "Change password" (issue #58): store a password on the
+  // document so the next Save writes an AES-256-encrypted file. Like
+  // remove-password this is an in-memory change — no confirmation dialog, the
+  // tooltip and the post-action notice state the consequence.
+  const [setPasswordOpen, setSetPasswordOpen] = useState(false);
+
+  const handleSetPasswordClick = async () => {
+    if (!activeTab) return;
+
+    // Saving after this rewrites the bytes, so an embedded digital signature
+    // won't verify anymore. Warn first (overridable; nothing is saved yet).
+    if (isSigned(activeTab.signatureStatus)) {
+      const proceed = await confirmBreakingEdit(SIGNATURE_EDIT_WARNING);
+      if (!proceed) return;
+    }
+    setSetPasswordOpen(true);
+  };
+
+  const handleSetPasswordSubmit = async (password: string) => {
+    if (!activeTab) return;
+    setSetPasswordOpen(false);
+    const changing = encrypted;
+    try {
+      await invoke("set_password", { docId: activeTab.docId, password });
+      updateTab(activeTab.id, { encrypted: true });
+      await message(
+        changing
+          ? "Password changed. Save or Save As will write the file " +
+              "encrypted with the new password."
+          : "Password set. Save or Save As will write an encrypted PDF " +
+              "that requires this password to open.",
+        { title: changing ? "Change Password" : "Set Password", kind: "info" },
+      );
+    } catch (err) {
+      await message(String(err), {
+        title: changing ? "Change Password" : "Set Password",
+        kind: "error",
+      });
+    }
+  };
+
   // "Add Text Layer": embed an invisible OCR text layer into the document's
   // scanned pages, searchable in any reader. Like every edit (issue #31) it
   // lands in the in-memory buffer — the user commits it with Save / Save As.
@@ -384,6 +426,17 @@ export function Toolbar({ onOpenFile, onPrint }: ToolbarProps) {
               title="Save As... (Ctrl+Shift+S)"
             >
               <SaveAll size={18} />
+            </button>
+            <button
+              className="toolbar-button"
+              onClick={handleSetPasswordClick}
+              title={
+                encrypted
+                  ? "Change the password (the next Save uses the new password)"
+                  : "Set a password (the next Save writes an encrypted file)"
+              }
+            >
+              <Lock size={18} />
             </button>
             {encrypted && (
               <button
@@ -522,6 +575,15 @@ export function Toolbar({ onOpenFile, onPrint }: ToolbarProps) {
           >
             <Printer size={18} />
           </button>
+
+          {setPasswordOpen && (
+            <SetPasswordDialog
+              fileName={activeTab.fileName}
+              changing={encrypted}
+              onSubmit={handleSetPasswordSubmit}
+              onCancel={() => setSetPasswordOpen(false)}
+            />
+          )}
         </>
       )}
     </div>

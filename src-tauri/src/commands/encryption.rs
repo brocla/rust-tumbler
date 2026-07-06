@@ -9,6 +9,9 @@
 //!
 //! `remove_password` is the one explicit way to drop the protection: it
 //! clears the stored password so the next Save writes a plaintext file.
+//! `set_password` (issue #58) is its mirror: it stores a password so the next
+//! Save writes an AES-256-encrypted file — on an already-protected document it
+//! simply replaces the stored password (the buffer is plaintext either way).
 
 use crate::error::AppError;
 use crate::state::{lock_mutex, AppState};
@@ -132,6 +135,54 @@ pub(crate) fn remove_password_impl(state: &AppState, doc_id: &str) -> Result<(),
     Ok(())
 }
 
+/// Protects the document with `password` (AES-256, same string for the user
+/// and owner password — issue #58): the next Save / Save As writes an
+/// encrypted file that requires it to open. On an already-protected document
+/// this just replaces the stored password. The buffer stays plaintext — like
+/// `remove_password`, only what Save will write changes, so the document goes
+/// dirty and nothing touches disk until the user saves.
+#[tauri::command]
+pub fn set_password(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    doc_id: String,
+    password: String,
+) -> Result<(), String> {
+    set_password_impl(&state, &doc_id, &password).map_err(String::from)?;
+    let _ = app.emit(
+        "document-dirty-changed",
+        crate::commands::save::DirtyChangedPayload {
+            doc_id,
+            dirty: true,
+        },
+    );
+    Ok(())
+}
+
+pub(crate) fn set_password_impl(
+    state: &AppState,
+    doc_id: &str,
+    password: &str,
+) -> Result<(), AppError> {
+    // An empty user password means "opens without a prompt" — that's what
+    // remove_password is for, and storing it would silently protect nothing.
+    if password.is_empty() {
+        return Err(AppError::Other("The password cannot be empty.".to_string()));
+    }
+    let entry_arc = state.get_document(doc_id)?;
+    let mut entry = lock_mutex(&entry_arc)?;
+    // A password change keeps the file's original permission bits; a newly
+    // protected document allows everything (owner == user makes the bits
+    // advisory anyway).
+    if entry.permissions.is_none() {
+        entry.permissions = Some(Permissions::all());
+    }
+    entry.encrypted = true;
+    entry.password = Some(password.to_string());
+    entry.dirty = true;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -222,6 +273,98 @@ mod tests {
         assert!(!entry.encrypted);
         assert!(entry.password.is_none());
         assert!(entry.dirty, "save output changed, doc must be dirty");
+    }
+
+    #[test]
+    fn set_password_protects_document_and_marks_dirty() {
+        let _guard = crate::test_pdfium_guard();
+        let pdfium = crate::test_pdfium();
+        let state = AppState::new(pdfium, None);
+        let path = crate::fixture_path().to_string_lossy().into_owned();
+        let entry = DocEntry::load(pdfium, &path, None).expect("open");
+        state.insert_document("doc1".to_string(), entry).expect("insert");
+
+        set_password_impl(&state, "doc1", "new-secret").expect("set password");
+
+        let entry_arc = state.get_document("doc1").expect("get");
+        let entry = lock_mutex(&entry_arc).expect("lock");
+        assert!(entry.encrypted);
+        assert_eq!(entry.password.as_deref(), Some("new-secret"));
+        assert_eq!(entry.permissions, Some(Permissions::all()));
+        assert!(entry.dirty, "save output changed, doc must be dirty");
+        // The buffer stays plaintext — encryption happens only at Save.
+        let parsed = lopdf::Document::load_mem(&entry.buffer).expect("parse buffer");
+        assert!(!parsed.is_encrypted());
+    }
+
+    /// Calling set_password on an already-protected document is a password
+    /// change: it replaces the stored password and keeps the file's original
+    /// permission bits.
+    #[test]
+    fn set_password_on_encrypted_document_changes_password() {
+        let _guard = crate::test_pdfium_guard();
+        let pdfium = crate::test_pdfium();
+        let state = AppState::new(pdfium, None);
+        let path = crate::encrypted_fixture_path().to_string_lossy().into_owned();
+        let entry = DocEntry::load(pdfium, &path, Some(crate::ENCRYPTED_FIXTURE_PASSWORD))
+            .expect("open encrypted");
+        let original_permissions = entry.permissions;
+        state.insert_document("doc1".to_string(), entry).expect("insert");
+
+        set_password_impl(&state, "doc1", "different-pw").expect("change password");
+
+        let entry_arc = state.get_document("doc1").expect("get");
+        let entry = lock_mutex(&entry_arc).expect("lock");
+        assert!(entry.encrypted);
+        assert_eq!(entry.password.as_deref(), Some("different-pw"));
+        assert_eq!(entry.permissions, original_permissions);
+        assert!(entry.dirty);
+    }
+
+    #[test]
+    fn set_password_rejects_empty_password() {
+        let _guard = crate::test_pdfium_guard();
+        let pdfium = crate::test_pdfium();
+        let state = AppState::new(pdfium, None);
+        let path = crate::fixture_path().to_string_lossy().into_owned();
+        let entry = DocEntry::load(pdfium, &path, None).expect("open");
+        state.insert_document("doc1".to_string(), entry).expect("insert");
+
+        let err = set_password_impl(&state, "doc1", "").expect_err("must reject");
+        assert!(err.to_string().contains("cannot be empty"));
+
+        let entry_arc = state.get_document("doc1").expect("get");
+        let entry = lock_mutex(&entry_arc).expect("lock");
+        assert!(!entry.encrypted, "a rejected call must not change the entry");
+        assert!(!entry.dirty);
+    }
+
+    /// End-to-end shape of issue #58: plain file → set_password → Save As
+    /// writes a file pdfium rejects without the password and opens with it.
+    #[test]
+    fn set_password_then_save_writes_encrypted_file() {
+        let _guard = crate::test_pdfium_guard();
+        let pdfium = crate::test_pdfium();
+        let state = AppState::new(pdfium, None);
+        let path = crate::fixture_path().to_string_lossy().into_owned();
+        let entry = DocEntry::load(pdfium, &path, None).expect("open");
+        state.insert_document("doc1".to_string(), entry).expect("insert");
+
+        set_password_impl(&state, "doc1", "issue58-pw").expect("set password");
+        let dest = tmp_path("tumbler_set_password_save.pdf");
+        crate::commands::save::save_document_as_impl(&state, "doc1", &dest)
+            .expect("save as");
+
+        assert!(
+            pdfium.load_pdf_from_file(&dest, None).is_err(),
+            "saved file must require the password"
+        );
+        let doc = pdfium
+            .load_pdf_from_file(&dest, Some("issue58-pw"))
+            .expect("open with the new password");
+        assert_eq!(doc.pages().len(), 1);
+
+        std::fs::remove_file(&dest).ok();
     }
 
     #[test]

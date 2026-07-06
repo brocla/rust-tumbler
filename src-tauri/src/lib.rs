@@ -45,6 +45,7 @@ pub fn run() {
             commands::document::close_document,
             commands::document::canonicalize_path,
             commands::encryption::remove_password,
+            commands::encryption::set_password,
             commands::render::render_page,
             commands::text::extract_page_text,
             commands::text::search_document,
