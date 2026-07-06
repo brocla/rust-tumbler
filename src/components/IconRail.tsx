@@ -52,7 +52,8 @@ export function IconRail() {
         onClick={() => setSidebarTool("redact")}
         title="Redact"
       >
-        <EyeOff size={20} />
+        {/* Mirrored: the slash reads better rising left-to-right. */}
+        <EyeOff size={20} style={{ transform: "scaleX(-1)" }} />
       </button>
     </div>
   );

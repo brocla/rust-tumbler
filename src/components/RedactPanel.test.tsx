@@ -108,6 +108,30 @@ describe("RedactPanel", () => {
     expect(screen.getByText("2 regions marked")).toBeTruthy();
   });
 
+  it("passes the search-mode toggles through and skips output-verification queries for subset modes", async () => {
+    render(<RedactPanel />);
+    fireEvent.click(screen.getByTitle("Match case"));
+    fireEvent.click(screen.getByTitle("Whole word"));
+    fireEvent.change(screen.getByPlaceholderText(/find text to redact/i), {
+      target: { value: "Smith" },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByText("Redact all"));
+    });
+
+    const call = vi.mocked(invoke).mock.calls.find((c) => c[0] === "find_redaction_matches");
+    expect(call![1]).toMatchObject({
+      query: "Smith",
+      matchCase: true,
+      wholeWord: true,
+      useRegex: false,
+    });
+    // A case/word-restricted find marks a deliberate subset of occurrences;
+    // recording it for the zero-hits output check would block the save.
+    expect(activeTab().redactQueries ?? []).toEqual([]);
+    expect(activeTab().redactRegions).toHaveLength(2);
+  });
+
   it("Apply sends the regions, queries, and DPI, and enters the preview", async () => {
     usePdfStore.getState().addRedactRegions("doc-1", MATCHES);
     usePdfStore.getState().updateTab("tab-1", { redactQueries: ["SECRET"] });

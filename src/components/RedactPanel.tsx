@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { CaseSensitive, WholeWord, Regex } from "lucide-react";
 import { message } from "@tauri-apps/plugin-dialog";
 import { usePdfStore } from "../store/usePdfStore";
 import type { RedactRegion } from "../store/usePdfStore";
@@ -33,6 +34,9 @@ export function RedactPanel() {
 
   const [query, setQuery] = useState("");
   const [findCount, setFindCount] = useState<number | null>(null);
+  const [matchCase, setMatchCase] = useState(false);
+  const [wholeWord, setWholeWord] = useState(false);
+  const [useRegex, setUseRegex] = useState(false);
   const [targetDpi, setTargetDpi] = useState(200);
   const [running, setRunning] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -67,17 +71,22 @@ export function RedactPanel() {
       const found = await invoke<RedactRegion[]>("find_redaction_matches", {
         docId,
         query,
-        matchCase: false,
-        wholeWord: false,
-        useRegex: false,
+        matchCase,
+        wholeWord,
+        useRegex,
       });
       setFindCount(found.length);
       if (found.length > 0) {
         addRedactRegions(docId, found);
         // Remember the query so verification can assert zero hits for it in
-        // the saved output.
+        // the saved output — but only for a plain substring search. A
+        // match-case / whole-word / regex find deliberately marks a *subset*
+        // of occurrences, and the output check (a case-insensitive literal
+        // search) would flag the intentionally-kept ones as leaks and block
+        // the save.
+        const plainSearch = !matchCase && !wholeWord && !useRegex;
         const queries = activeTab.redactQueries ?? [];
-        if (!queries.includes(query)) {
+        if (plainSearch && !queries.includes(query)) {
           updateTab(activeTab.id, { redactQueries: [...queries, query] });
         }
         setResult(null);
@@ -173,6 +182,35 @@ export function RedactPanel() {
           disabled={running || previewing || !query.trim()}
         >
           Redact all
+        </button>
+      </div>
+      <div className="search-mode-row">
+        <button
+          className={`toolbar-button${matchCase ? " active" : ""}`}
+          onClick={() => setMatchCase((v) => !v)}
+          title="Match case"
+          aria-pressed={matchCase}
+          disabled={running || previewing}
+        >
+          <CaseSensitive size={16} />
+        </button>
+        <button
+          className={`toolbar-button${wholeWord ? " active" : ""}`}
+          onClick={() => setWholeWord((v) => !v)}
+          title="Whole word"
+          aria-pressed={wholeWord}
+          disabled={running || previewing}
+        >
+          <WholeWord size={16} />
+        </button>
+        <button
+          className={`toolbar-button${useRegex ? " active" : ""}`}
+          onClick={() => setUseRegex((v) => !v)}
+          title="Regular expression"
+          aria-pressed={useRegex}
+          disabled={running || previewing}
+        >
+          <Regex size={16} />
         </button>
       </div>
       {findCount !== null && (

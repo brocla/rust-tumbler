@@ -1684,7 +1684,10 @@ input[type="radio"].form-check:checked {
 
 .redact-explainer {
   color: var(--color-text-secondary);
+  /* 150% of the panel's 12px base, plus breathing room before the controls. */
+  font-size: 18px;
   line-height: 1.4;
+  margin-bottom: 40px;
 }
 
 .redact-find {
