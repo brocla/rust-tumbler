@@ -25,26 +25,26 @@ Built with Tauri v2
 
 - Page operations: delete, rotate, reorder (drag-and-drop), merge, and split pages
 - Text layer with copy-to-clipboard and full-document search
-- OCR for scanned pages — make image-only pages searchable, selectable, and copyable
-- Exptract text to a file
+- OCR for scanned pages — make image-only pages searchable, selectable, copyable, and savable
+- Extract text to a file
 - View and Edit metadata
-- Native Windows printing at printer-native resolution
+- Native Windows printing
+- Form Filling
+- File compression
+- open password protected files
+- Detect ISO Standard
+- Verify Digital Signatures
 
 
 ## Futures
 
 Planned enhancements:
 
-- **Form Filling** — Enumerate form fields via pdfium's form API, render
-  interactive overlays, and save filled forms.
-- **OCR — Save Searchable Copy** — Persist recognized text as an invisible
-  layer so the OCR'd document is searchable in any PDF reader (the in-app
-  ephemeral OCR above already ships).
-- **Web Optimization** - Compress, Linearize
-- **open password protected files**
+- **Web Optimization** - Linearize
 - **CLI**
-- **Detect ISO Standard**
-- **Verify Digital Signatures**
+- **Encrypt** files and add password
+- **Redaction**
+
  
 
 ## UI

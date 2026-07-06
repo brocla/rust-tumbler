@@ -16,7 +16,7 @@ Opens PDF files (via file-association or drag-and-drop), displays them in a cont
 | Frontend | React 18, TypeScript, Vite | Single-page app mounted in the WebView |
 | State | Zustand | `src/store/usePdfStore.ts` — one global store |
 | PDF rendering | pdfium-render (wraps Google's pdfium) | Read-only; renders pages to RGBA bitmaps |
-| PDF editing | lopdf | Used for all write operations: metadata, page ops, compression |
+| PDF editing | lopdf | Object-model write operations: metadata, compression, forms, text layer (page ops use pdfium) |
 | OCR | Windows.Media.Ocr (WinRT) | Windows 10/11 built-in; requires a language pack |
 | Printing | windows crate (GDI / PrintDlgExW) | Native Windows print dialogs and spooler |
 | Icons | Lucide React | `lucide-react` package |
@@ -52,18 +52,22 @@ rust-tumbler/
 
 | File | Responsibility |
 |---|---|
-| `document.rs` | open / close documents |
-| `render.rs` | render a page to a base64 bitmap |
-| `text.rs` | extract text, full-document search, export text to `.txt` |
+| `document.rs` | open / close documents (opens password-protected PDFs view-only, issue #12) |
+| `render.rs` | render a page to a base64 bitmap (pdfium) |
+| `text.rs` | extract text, full-document search, export text to `.txt` (pdfium) |
 | `ocr.rs` | per-page and whole-document OCR via Windows.Media.Ocr |
-| `metadata.rs` | read / write PDF metadata (lopdf) |
-| `pages.rs` | delete, rotate, reorder, merge, split pages (lopdf) |
+| `metadata.rs` | read PDF metadata (pdfium) / write it (lopdf) |
+| `pages.rs` | delete, rotate, reorder, merge, split pages (**pdfium** — mutates the `PdfDocument` then `save_to_bytes()`) |
 | `save.rs` | Save / Save As — the only commands that write the in-memory buffer to disk |
 | `optimize.rs` | five-step compression pipeline (lopdf) |
-| `text_layer.rs` | embed an invisible OCR text layer into the document buffer (issue #4) |
+| `text_layer.rs` | embed an invisible OCR text layer into the document buffer (lopdf; issue #4) |
+| `forms.rs` | AcroForm field discovery + inline value writes (lopdf on the buffer; issue #2) |
+| `signature.rs` | digital-signature integrity verification, read-only (lopdf `/ByteRange` parse; issue #17) |
+| `conformance.rs` | declared ISO sub-format detection — PDF/A, PDF/X, PDF/E, PDF/UA — from the XMP packet (lopdf) |
 | `print.rs` | native GDI printing with progress and cancellation |
 | `startup.rs` | read the file-association path passed on the command line |
 | `theme.rs` | read the Windows accent color for UI theming |
+| `app.rs` | app-level info commands |
 
 ---
 
@@ -133,8 +137,8 @@ Split each command into a public `#[tauri::command]` wrapper and a private `_imp
 
 | Library | Use for | Cannot do |
 |---|---|---|
-| **pdfium** (via `pdfium-render`) | Rendering pages to bitmaps, reading text/coordinates, search | Structural edits (adding/removing objects) |
-| **lopdf** | Metadata edits, page delete/rotate/reorder/merge/split, compression | Rendering |
+| **pdfium** (via `pdfium-render`) | Rendering pages to bitmaps, reading text/coordinates, search, and page ops (delete/rotate/reorder/merge/split) | Object-level structural edits (adding/removing/rewriting individual objects) |
+| **lopdf** | Metadata edits, compression, forms, text-layer embedding, signature/conformance parsing | Rendering |
 
 All edits follow the **buffer model** — they read from and write back to `DocEntry.buffer`, never to disk:
 
