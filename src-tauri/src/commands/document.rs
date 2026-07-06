@@ -15,9 +15,10 @@ pub struct DocInfo {
     pub doc_id: String,
     pub page_count: u32,
     pub page_dimensions: Vec<PageDimension>,
-    /// True when the file was user-password-protected and was unlocked with the
-    /// supplied password. The frontend switches to view-only mode for these
-    /// (editing an encrypted PDF isn't supported — issue #12).
+    /// True when the file is password-protected. The buffer is decrypted at
+    /// open (issue #57) so all editing works; Save re-encrypts with the same
+    /// password. The frontend shows a lock badge and the remove-password
+    /// action for these.
     pub encrypted: bool,
 }
 
@@ -178,6 +179,15 @@ mod tests {
         .expect("correct password should open");
         assert!(info.encrypted, "encrypted fixture must report encrypted = true");
         assert_eq!(info.page_count, 1);
+
+        // The buffer must be plaintext (issue #57) so lopdf-based features
+        // (metadata, compression, forms, text layer) work on it directly.
+        let entry_arc = state.get_document(&info.doc_id).expect("get");
+        let entry = crate::state::lock_mutex(&entry_arc).expect("lock");
+        let parsed = lopdf::Document::load_mem(&entry.buffer).expect("parse buffer");
+        assert!(!parsed.is_encrypted(), "buffer must be decrypted at open");
+        assert_eq!(entry.password.as_deref(), Some(crate::ENCRYPTED_FIXTURE_PASSWORD));
+        assert!(entry.permissions.is_some());
     }
 
     /// An unencrypted document reports `encrypted == false`.

@@ -11,26 +11,28 @@ pub struct DocEntry {
     /// Where Save writes; updated by Save As.
     pub file_path: String,
     /// The authoritative current bytes of the document, including any
-    /// not-yet-saved edits. Differs from the file on disk exactly when
-    /// `dirty` is true. (issue #31)
+    /// not-yet-saved edits. (issue #31)
     ///
-    /// For a password-protected document these bytes stay **encrypted** — we
-    /// never decrypt the buffer (the pinned lopdf can't decrypt AES, and
-    /// pdfium can't export plaintext). Only pdfium's live `document` view,
-    /// opened with `password`, can read it. Consequently every lopdf-based
-    /// feature (metadata, page ops, compression, forms, text layer) is
-    /// disabled in the UI for encrypted docs. (issue #12)
+    /// Always **plaintext**: a password-protected file is decrypted into this
+    /// buffer at load time (issue #57), so every buffer-model feature works
+    /// on it unchanged. Save re-encrypts with `password` on the way to disk,
+    /// so for an encrypted document these bytes never byte-match the file —
+    /// `dirty` means "there are unsaved changes", not "buffer != disk".
     pub buffer: Vec<u8>,
     /// True once an in-memory edit has been applied and not yet saved.
     pub dirty: bool,
-    /// The user password that unlocked this document, kept in memory only
-    /// (never written to disk) so operations that reopen the bytes — currently
-    /// Print, whose GDI path loads from a temp file — can supply it. `None`
-    /// for unencrypted documents. (issue #12)
+    /// The password that unlocked this document, kept in memory only (never
+    /// written to disk). Save re-encrypts the buffer with it, and Print's GDI
+    /// path needs it when printing the still-encrypted file on disk. `None`
+    /// for unencrypted documents and after `remove_password`. (issues #12, #57)
     pub password: Option<String>,
-    /// True when the source file was user-password-protected. Mirrored to the
-    /// frontend so the UI can switch to view-only mode (issue #12).
+    /// True while the document is password-protected (i.e. Save will encrypt).
+    /// Mirrored to the frontend for the lock badge and the remove-password
+    /// action. Cleared by `remove_password`. (issues #12, #57)
     pub encrypted: bool,
+    /// The permission bits of the original file, re-applied when Save
+    /// re-encrypts. `None` when `encrypted` is false.
+    pub permissions: Option<lopdf::Permissions>,
 }
 
 impl DocEntry {
@@ -42,6 +44,9 @@ impl DocEntry {
     /// [`AppError::PasswordRequired`]. A password-protected file loaded without
     /// one yields `PasswordRequired`; loaded with a rejected one yields
     /// [`AppError::WrongPassword`]. (issue #12)
+    ///
+    /// An encrypted file's bytes are decrypted into the buffer here, so the
+    /// rest of the app never sees ciphertext (issue #57).
     pub fn load(
         pdfium: &'static Pdfium,
         path: &str,
@@ -64,13 +69,45 @@ impl DocEntry {
                     AppError::pdfium("Failed to load PDF", e)
                 }
             })?;
+
+        // A file can be encrypted yet open with no password (owner-password-
+        // only protection uses an empty user password), so ask pdfium instead
+        // of inferring from `password`.
+        let encrypted = document
+            .permissions()
+            .security_handler_revision()
+            .map(|r| r != PdfSecurityHandlerRevision::Unprotected)
+            .unwrap_or(password.is_some());
+
+        if encrypted {
+            // pdfium accepted the password, so lopdf gets the validated one
+            // ("" for owner-only protection). The plaintext becomes the
+            // buffer; the pdfium view is rebuilt from it, password-free.
+            let pw = password.unwrap_or("");
+            let (plaintext, permissions) =
+                crate::commands::encryption::decrypt_to_plaintext(&buffer, pw)?;
+            let document = pdfium
+                .load_pdf_from_byte_vec(plaintext.clone(), None)
+                .map_err(|e| AppError::pdfium("Failed to reload decrypted PDF", e))?;
+            return Ok(Self {
+                document,
+                file_path: path.to_string(),
+                buffer: plaintext,
+                dirty: false,
+                password: Some(pw.to_string()),
+                encrypted: true,
+                permissions: Some(permissions),
+            });
+        }
+
         Ok(Self {
             document,
             file_path: path.to_string(),
             buffer,
             dirty: false,
-            password: password.map(str::to_string),
-            encrypted: password.is_some(),
+            password: None,
+            encrypted: false,
+            permissions: None,
         })
     }
 }
@@ -340,11 +377,10 @@ mod tests {
         assert!(matches!(state.get_document("doc1"), Err(AppError::NotFound(_))));
     }
 
-    /// The view-only design (issue #12) rests on two pdfium facts: an encrypted
-    /// file is rejected with `PasswordError` when no password is given (so we
-    /// can prompt), and opens normally when the correct password is supplied
-    /// (so the view works without decrypting the buffer). The buffer is left
-    /// encrypted on disk/in memory — we never convert it to plaintext.
+    /// The password prompt flow (issue #12) rests on two pdfium facts: an
+    /// encrypted file is rejected with `PasswordError` when no password is
+    /// given (so we can prompt), and opens normally when the correct password
+    /// is supplied. (The buffer itself is decrypted at load — issue #57.)
     #[test]
     fn encrypted_fixture_rejects_missing_password_and_opens_with_correct_one() {
         let _guard = crate::test_pdfium_guard();

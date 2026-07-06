@@ -16,6 +16,22 @@ pub struct DirtyChangedPayload {
     pub dirty: bool,
 }
 
+/// The bytes Save writes to disk: the buffer as-is for an ordinary document,
+/// or the buffer re-encrypted with the document's password for a
+/// password-protected one — the buffer itself is plaintext (issue #57) and
+/// must never reach disk unprotected unless the user removed the password.
+fn bytes_for_disk(entry: &crate::state::DocEntry) -> Result<std::borrow::Cow<'_, [u8]>, AppError> {
+    match (&entry.password, entry.encrypted) {
+        (Some(pw), true) => {
+            let permissions = entry.permissions.unwrap_or_else(lopdf::Permissions::all);
+            let bytes =
+                crate::commands::encryption::encrypt_with_password(&entry.buffer, pw, permissions)?;
+            Ok(std::borrow::Cow::Owned(bytes))
+        }
+        _ => Ok(std::borrow::Cow::Borrowed(&entry.buffer)),
+    }
+}
+
 /// Atomically writes `bytes` to `dest_path` (temp file in the same directory,
 /// then rename), so a crash or disk-full error can't leave a truncated file.
 fn atomic_write(dest_path: &str, bytes: &[u8]) -> Result<(), AppError> {
@@ -49,7 +65,8 @@ pub fn save_document(
 pub(crate) fn save_document_impl(state: &AppState, doc_id: &str) -> Result<(), AppError> {
     let entry_arc = state.get_document(doc_id)?;
     let mut entry = lock_mutex(&entry_arc)?;
-    atomic_write(&entry.file_path, &entry.buffer)?;
+    let bytes = bytes_for_disk(&entry)?;
+    atomic_write(&entry.file_path, &bytes)?;
     entry.dirty = false;
     Ok(())
 }
@@ -95,7 +112,8 @@ pub(crate) fn save_document_as_impl(
 
     let entry_arc = state.get_document(doc_id)?;
     let mut entry = lock_mutex(&entry_arc)?;
-    atomic_write(dest_path, &entry.buffer)?;
+    let bytes = bytes_for_disk(&entry)?;
+    atomic_write(dest_path, &bytes)?;
 
     // Canonicalize after the write (the file may not have existed before) so
     // the stored path matches what `canonicalize_path` gives the frontend.
@@ -231,6 +249,78 @@ mod tests {
 
         std::fs::remove_file(&path_a).ok();
         std::fs::remove_file(&path_b).ok();
+    }
+
+    /// A password-protected document is fully editable (issue #57) and Save
+    /// writes a file that is still encrypted with the same password — the
+    /// plaintext buffer must never reach disk while a password is set.
+    #[test]
+    fn save_of_encrypted_document_keeps_password_protection() {
+        let _guard = crate::test_pdfium_guard();
+        let pdfium = crate::test_pdfium();
+        let state = AppState::new(pdfium, None);
+        let path = tmp_path("tumbler_save_encrypted.pdf");
+        std::fs::copy(crate::encrypted_fixture_path(), &path).expect("copy fixture");
+        let entry = DocEntry::load(
+            pdfium,
+            &path,
+            Some(crate::ENCRYPTED_FIXTURE_PASSWORD),
+        )
+        .expect("load encrypted");
+        state.insert_document("doc1".to_string(), entry).expect("insert");
+
+        // An edit that was impossible under view-only mode (issue #12).
+        crate::commands::pages::rotate_pages_impl(&state, "doc1".to_string(), vec![1], 1)
+            .expect("rotate");
+        save_document_impl(&state, "doc1").expect("save");
+
+        // The saved file must reject a missing password...
+        assert!(
+            pdfium.load_pdf_from_file(&path, None).is_err(),
+            "saved file must still require the password"
+        );
+        // ...and carry the edit when opened with it.
+        let reopened = pdfium
+            .load_pdf_from_file(&path, Some(crate::ENCRYPTED_FIXTURE_PASSWORD))
+            .expect("reopen with password");
+        let p0 = reopened.pages().get(0).expect("page 0");
+        assert_eq!(
+            p0.rotation().unwrap_or(pdfium_render::prelude::PdfPageRenderRotation::None),
+            pdfium_render::prelude::PdfPageRenderRotation::Degrees90
+        );
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// After `remove_password`, Save As writes a plaintext PDF that opens
+    /// with no password and carries no `/Encrypt` (issue #57).
+    #[test]
+    fn save_after_remove_password_writes_plaintext() {
+        let _guard = crate::test_pdfium_guard();
+        let pdfium = crate::test_pdfium();
+        let state = AppState::new(pdfium, None);
+        let path = crate::encrypted_fixture_path().to_string_lossy().into_owned();
+        let entry = DocEntry::load(
+            pdfium,
+            &path,
+            Some(crate::ENCRYPTED_FIXTURE_PASSWORD),
+        )
+        .expect("load encrypted");
+        state.insert_document("doc1".to_string(), entry).expect("insert");
+
+        crate::commands::encryption::remove_password_impl(&state, "doc1")
+            .expect("remove password");
+        let dest = tmp_path("tumbler_unlocked_plaintext.pdf");
+        std::fs::remove_file(&dest).ok();
+        save_document_as_impl(&state, "doc1", &dest).expect("save as");
+
+        let saved = std::fs::read(&dest).expect("read saved");
+        let doc = lopdf::Document::load_mem(&saved).expect("parse saved");
+        assert!(!doc.is_encrypted(), "saved file must carry no /Encrypt");
+        let reopened = pdfium.load_pdf_from_file(&dest, None).expect("open without password");
+        assert_eq!(reopened.pages().len(), 1);
+
+        std::fs::remove_file(&dest).ok();
     }
 
     /// Saving to the document's *own* path via Save As is allowed (it's just

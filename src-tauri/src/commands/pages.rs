@@ -458,6 +458,7 @@ mod tests {
                     dirty: false,
                     password: None,
                     encrypted: false,
+                    permissions: None,
                 },
             )
             .expect("insert document");

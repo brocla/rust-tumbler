@@ -1,6 +1,7 @@
 pub mod app;
 pub mod conformance;
 pub mod document;
+pub mod encryption;
 pub mod forms;
 pub mod metadata;
 pub mod ocr;

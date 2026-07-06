@@ -52,10 +52,11 @@ export interface TabState {
   // edit-invalidation guards. Populated on open and refreshed after edits;
   // undefined until the first verification completes. (issue #17)
   signatureStatus?: SignatureStatus;
-  // True when the document was opened from a user-password-protected file.
-  // Its bytes stay encrypted, so all editing/lopdf features are disabled and
-  // the UI shows a view-only lock badge. Optional so existing tab construction
-  // sites don't need updating. (issue #12)
+  // True while the document is password-protected: it is fully editable (the
+  // buffer is decrypted at open — issue #57) and Save re-encrypts with the
+  // same password. Drives the lock badge and the toolbar's "Remove password"
+  // button, which clears it. Optional so existing tab construction sites
+  // don't need updating. (issues #12, #57)
   encrypted?: boolean;
 }
 

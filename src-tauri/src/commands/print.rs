@@ -145,9 +145,10 @@ async fn print_document_impl(
     // thread, so a dirty document (unsaved buffer edits, issue #31) is handed
     // off via a temp file holding the buffer; a clean document prints straight
     // from its file. The temp file is removed after the print thread finishes.
-    // A password-protected document's bytes stay encrypted (issue #12), so the
-    // STA thread's pdfium load needs the same password to open them — whether it
-    // reads the original file or the temp buffer copy.
+    // A password-protected document's *file* is encrypted, so when printing a
+    // clean document straight from disk the STA thread's pdfium load needs the
+    // password. The buffer (and thus a dirty document's temp copy) is plaintext
+    // (issue #57); pdfium ignores a password supplied for an unencrypted file.
     let (file_path, temp_handoff, password) = {
         let entry = state.get_document(&doc_id)?;
         let entry = lock_mutex(&entry)?;

@@ -1,4 +1,4 @@
-import { BookOpen, ChevronLeft, ChevronRight, Eraser, FileSearch, Moon, MoveHorizontal, MoveVertical, Printer, Save, SaveAll, ScanSearch, ScrollText, Sun, ZoomIn, ZoomOut } from "lucide-react";
+import { BookOpen, ChevronLeft, ChevronRight, Eraser, FileSearch, LockOpen, Moon, MoveHorizontal, MoveVertical, Printer, Save, SaveAll, ScanSearch, ScrollText, Sun, ZoomIn, ZoomOut } from "lucide-react";
 import { useEffect, useState } from "react";
 import { save, message, ask } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
@@ -28,11 +28,6 @@ interface ToolbarProps {
   onPrint: () => void;
 }
 
-// Tooltip on controls disabled because the active document is a
-// password-protected (encrypted) PDF, which is view-only (issue #12).
-const ENCRYPTED_DISABLED_TITLE =
-  "Not available for password-protected PDFs (view-only)";
-
 const DISPLAY_MODE_ORDER: DisplayMode[] = ["normal", "invert", "sepia"];
 
 const DISPLAY_MODE_INFO: Record<DisplayMode, { label: string; icon: typeof Sun }> = {
@@ -49,8 +44,9 @@ export function Toolbar({ onOpenFile, onPrint }: ToolbarProps) {
   const setOcrProgress = usePdfStore((s) => s.setOcrProgress);
   const bumpFormEpoch = usePdfStore((s) => s.bumpFormEpoch);
 
-  // Password-protected PDFs open view-only: their bytes stay encrypted, so
-  // every buffer-editing feature is disabled (issue #12).
+  // A password-protected PDF is fully editable (its buffer is decrypted at
+  // open, and Save re-encrypts with the same password — issue #57). The flag
+  // only drives the "Remove password" button.
   const encrypted = !!activeTab?.encrypted;
 
   // Whether the active document has any AcroForm fields — gates the Clear-form
@@ -267,6 +263,33 @@ export function Toolbar({ onOpenFile, onPrint }: ToolbarProps) {
     }
   };
 
+  // "Remove password": drop the document's password protection so the next
+  // Save writes an ordinary, unprotected PDF (issue #57). In-memory like every
+  // other edit — closing without saving leaves the file untouched — so no
+  // confirmation dialog; the button tooltip states the consequence.
+  const handleRemovePassword = async () => {
+    if (!activeTab) return;
+
+    // Saving after this rewrites the bytes, so an embedded digital signature
+    // won't verify anymore. Warn first (overridable; nothing is saved yet).
+    if (isSigned(activeTab.signatureStatus)) {
+      const proceed = await confirmBreakingEdit(SIGNATURE_EDIT_WARNING);
+      if (!proceed) return;
+    }
+
+    try {
+      await invoke("remove_password", { docId: activeTab.docId });
+      updateTab(activeTab.id, { encrypted: false });
+      await message(
+        "Password protection removed. Save or Save As will write an " +
+          "unprotected PDF that opens without a password.",
+        { title: "Remove Password", kind: "info" },
+      );
+    } catch (err) {
+      await message(String(err), { title: "Remove Password", kind: "error" });
+    }
+  };
+
   // "Add Text Layer": embed an invisible OCR text layer into the document's
   // scanned pages, searchable in any reader. Like every edit (issue #31) it
   // lands in the in-memory buffer — the user commits it with Save / Save As.
@@ -350,7 +373,7 @@ export function Toolbar({ onOpenFile, onPrint }: ToolbarProps) {
             <button
               className="toolbar-button"
               onClick={() => void saveTab(activeTab)}
-              disabled={!activeTab.isDirty || encrypted}
+              disabled={!activeTab.isDirty}
               title="Save (Ctrl+S)"
             >
               <Save size={18} />
@@ -358,12 +381,20 @@ export function Toolbar({ onOpenFile, onPrint }: ToolbarProps) {
             <button
               className="toolbar-button"
               onClick={() => void saveTabAs(activeTab)}
-              disabled={encrypted}
-              title={encrypted ? ENCRYPTED_DISABLED_TITLE : "Save As... (Ctrl+Shift+S)"}
+              title="Save As... (Ctrl+Shift+S)"
             >
               <SaveAll size={18} />
             </button>
-            {hasForm && !encrypted && (
+            {encrypted && (
+              <button
+                className="toolbar-button"
+                onClick={handleRemovePassword}
+                title="Remove password protection (the next Save writes an unprotected file)"
+              >
+                <LockOpen size={18} />
+              </button>
+            )}
+            {hasForm && (
               <button
                 className="toolbar-button"
                 onClick={handleClearForm}
@@ -473,12 +504,7 @@ export function Toolbar({ onOpenFile, onPrint }: ToolbarProps) {
           <button
             className="toolbar-button"
             onClick={handleAddTextLayer}
-            disabled={encrypted}
-            title={
-              encrypted
-                ? ENCRYPTED_DISABLED_TITLE
-                : "Add Text Layer (make searchable in any reader)"
-            }
+            title="Add Text Layer (make searchable in any reader)"
           >
             <FileSearch size={18} />
           </button>

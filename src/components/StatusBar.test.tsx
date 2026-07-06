@@ -40,13 +40,13 @@ describe("StatusBar", () => {
     usePdfStore.setState({ tabs: [], activeTabId: null });
   });
 
-  it("shows the view-only lock badge for an encrypted active tab (issue #12)", () => {
+  it("shows the lock badge for an encrypted active tab (issues #12/#57)", () => {
     usePdfStore.setState({
       tabs: [makeTab({ encrypted: true })],
       activeTabId: "tab-1",
     });
     render(<StatusBar />);
-    expect(screen.getByText("Encrypted — view only")).toBeTruthy();
+    expect(screen.getByText("Encrypted")).toBeTruthy();
   });
 
   it("shows no lock badge for an unencrypted active tab", () => {
@@ -55,7 +55,7 @@ describe("StatusBar", () => {
       activeTabId: "tab-1",
     });
     render(<StatusBar />);
-    expect(screen.queryByText("Encrypted — view only")).toBeNull();
+    expect(screen.queryByText("Encrypted")).toBeNull();
   });
 
   it("shows 'Verified Signed Document' for a verified active tab", () => {

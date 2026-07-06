@@ -36,6 +36,10 @@ flate2 = "1"
 # std::fs::canonicalize returns \\?\-prefixed paths on Windows; dunce strips
 # the prefix when the plain path is equivalent (see canonicalize_path).
 dunce = "1"
+# OS randomness for the AES-256 file-encryption key when Save re-encrypts a
+# password-protected document (commands/encryption.rs). Already in the tree
+# transitively (uuid).
+getrandom = "0.3"
 
 # time is not used directly; it comes in transitively via cookie (Tauri).
 # It was formerly pinned to =0.3.41 to dodge a blanket-impl conflict with

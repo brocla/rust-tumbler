@@ -391,7 +391,7 @@ describe("Toolbar add text layer", () => {
   });
 });
 
-describe("Toolbar view-only gating for encrypted PDFs (issue #12)", () => {
+describe("Toolbar for encrypted PDFs (issue #57 — fully editable)", () => {
   beforeEach(() => {
     vi.mocked(invoke).mockReset();
     // document_has_form is polled on mount; keep it quiet.
@@ -407,20 +407,54 @@ describe("Toolbar view-only gating for encrypted PDFs (issue #12)", () => {
     return render(<Toolbar onOpenFile={vi.fn()} onPrint={vi.fn()} />);
   }
 
-  it("disables Save, Save As, and Add Text Layer on an encrypted document", () => {
+  it("keeps Save, Save As, and Add Text Layer enabled on an encrypted document", () => {
     renderEncrypted();
-    // Save As and Add Text Layer both carry the explanatory tooltip.
-    const disabled = screen.getAllByTitle(/Not available for password-protected PDFs/);
-    expect(disabled).toHaveLength(2);
-    for (const btn of disabled) expect(btn).toBeDisabled();
-    // Save stays disabled even though the tab is marked dirty.
-    expect(screen.getByTitle("Save (Ctrl+S)")).toBeDisabled();
+    expect(screen.getByTitle("Save (Ctrl+S)")).toBeEnabled();
+    expect(screen.getByTitle("Save As... (Ctrl+Shift+S)")).toBeEnabled();
+    expect(
+      screen.getByTitle("Add Text Layer (make searchable in any reader)"),
+    ).toBeEnabled();
   });
 
-  it("keeps view features (Export, Print, Make Searchable) available", () => {
+  it("shows the Remove-password button only for an encrypted document", () => {
+    const unencrypted = renderToolbar();
+    expect(screen.queryByTitle(/Remove password protection/)).toBeNull();
+    unencrypted.unmount();
+
     renderEncrypted();
-    expect(screen.getByTitle("Export Text...")).toBeEnabled();
-    expect(screen.getByTitle("Print (Ctrl+P)")).toBeEnabled();
-    expect(screen.getByTitle("OCR - Make Text Searchable")).toBeEnabled();
+    expect(screen.getByTitle(/Remove password protection/)).toBeEnabled();
+  });
+
+  it("Remove password invokes the command and clears the tab's encrypted flag", async () => {
+    renderEncrypted();
+    await act(async () => {
+      fireEvent.click(screen.getByTitle(/Remove password protection/));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    expect(invoke).toHaveBeenCalledWith("remove_password", { docId: "doc-1" });
+    expect(usePdfStore.getState().tabs[0].encrypted).toBe(false);
+    expect(message).toHaveBeenCalledWith(
+      expect.stringContaining("Password protection removed"),
+      expect.objectContaining({ title: "Remove Password" }),
+    );
+  });
+
+  it("surfaces a backend failure without clearing the encrypted flag", async () => {
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === "remove_password") throw "boom";
+      return false;
+    });
+    renderEncrypted();
+    await act(async () => {
+      fireEvent.click(screen.getByTitle(/Remove password protection/));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    expect(usePdfStore.getState().tabs[0].encrypted).toBe(true);
+    expect(message).toHaveBeenCalledWith(
+      "boom",
+      expect.objectContaining({ title: "Remove Password", kind: "error" }),
+    );
   });
 });
