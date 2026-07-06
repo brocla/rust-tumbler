@@ -34,7 +34,7 @@ fn bytes_for_disk(entry: &crate::state::DocEntry) -> Result<std::borrow::Cow<'_,
 
 /// Atomically writes `bytes` to `dest_path` (temp file in the same directory,
 /// then rename), so a crash or disk-full error can't leave a truncated file.
-fn atomic_write(dest_path: &str, bytes: &[u8]) -> Result<(), AppError> {
+pub(crate) fn atomic_write(dest_path: &str, bytes: &[u8]) -> Result<(), AppError> {
     let tmp_path = format!("{dest_path}.tmp-{}", uuid::Uuid::new_v4());
     if let Err(e) = std::fs::write(&tmp_path, bytes) {
         let _ = std::fs::remove_file(&tmp_path);

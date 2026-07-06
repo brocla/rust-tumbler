@@ -58,6 +58,16 @@ export interface TabState {
   // button, which clears it. Optional so existing tab construction sites
   // don't need updating. (issues #12, #57)
   encrypted?: boolean;
+  // Regions marked for redaction but not yet applied (issue #1). Drawn as
+  // black boxes by RedactLayer; sent to apply_redactions by the Redact panel.
+  redactRegions?: RedactRegion[];
+  // Queries used by "find & redact all" — passed to apply_redactions so
+  // verification can assert the saved output has zero hits for them.
+  redactQueries?: string[];
+  // Non-null after Apply: the viewer previews the staged redacted copy
+  // (rendered via render_redacted_page — the buffer is untouched) and shows
+  // the preview banner. `verified` gates Save As.
+  redactPreview?: { verified: boolean } | null;
 }
 
 /**
@@ -72,6 +82,23 @@ export const suppressedReloadDocs = new Set<string>();
 export interface SearchResult {
   page: number;
   rects: { x: number; y: number; width: number; height: number }[];
+}
+
+/**
+ * A rectangle marked for redaction (issue #1), mirroring the backend's
+ * `RedactRegion`: PDF points, top-left origin, per-page — the same coordinate
+ * space as search rects.
+ */
+export interface RedactRegion {
+  page: number;
+  rect: { x: number; y: number; width: number; height: number };
+}
+
+/** Progress of an in-flight redaction run (Tauri `redact-progress` events). */
+export interface RedactProgress {
+  stage: "flatten" | "reocr" | "verify";
+  page: number;
+  total: number;
 }
 
 export type UnsavedChoice = "save" | "discard" | "cancel";
@@ -113,7 +140,7 @@ interface PdfStore {
   activeTabId: string | null;
 
   // Global state
-  activeSidebarTool: "thumbnails" | "search" | "metadata" | "pages" | "optimize" | null;
+  activeSidebarTool: "thumbnails" | "search" | "metadata" | "pages" | "optimize" | "redact" | null;
   sidebarWidth: number;
   // Progress of an in-flight document-wide OCR run — "Make Searchable" or
   // Export Text's OCR pass (driven by Tauri `ocr-progress` events). Null when
@@ -124,6 +151,12 @@ interface PdfStore {
   // driven by Tauri `compress-progress` events. Null when none is running.
   // Shared here so the panel triggers the run while App renders the overlay.
   compressProgress: CompressProgress | null;
+  // Progress of an in-flight redaction run (the Redact panel's "Apply"),
+  // driven by Tauri `redact-progress` events. Null when none is running.
+  redactProgress: RedactProgress | null;
+  // True while the Redact panel's "Draw region" mode is armed: RedactLayer
+  // captures a marquee drag on the page instead of text selection.
+  redactDrawMode: boolean;
   // Non-null while an unsaved-changes prompt is showing (close guards await it).
   unsavedPrompt: UnsavedPrompt | null;
   // Non-null while a password prompt is showing for an encrypted PDF being
@@ -143,6 +176,13 @@ interface PdfStore {
   setSidebarWidth: (width: number) => void;
   setOcrProgress: (progress: { page: number; total: number } | null) => void;
   setCompressProgress: (progress: CompressProgress | null) => void;
+  setRedactProgress: (progress: RedactProgress | null) => void;
+  setRedactDrawMode: (on: boolean) => void;
+  // Pending-region management, keyed by docId (RedactLayer lives per page and
+  // knows the docId, not the tab id).
+  addRedactRegions: (docId: string, regions: RedactRegion[]) => void;
+  removeRedactRegion: (docId: string, index: number) => void;
+  clearRedactRegions: (docId: string) => void;
 
   showNotice: (message: string) => void;
   clearNotice: () => void;
@@ -167,6 +207,8 @@ export const usePdfStore = create<PdfStore>((set, get) => ({
   sidebarWidth: 250,
   ocrProgress: null,
   compressProgress: null,
+  redactProgress: null,
+  redactDrawMode: false,
   unsavedPrompt: null,
   passwordPrompt: null,
   notice: null,
@@ -202,6 +244,35 @@ export const usePdfStore = create<PdfStore>((set, get) => ({
   setOcrProgress: (progress) => set({ ocrProgress: progress }),
 
   setCompressProgress: (progress) => set({ compressProgress: progress }),
+
+  setRedactProgress: (progress) => set({ redactProgress: progress }),
+
+  setRedactDrawMode: (on) => set({ redactDrawMode: on }),
+
+  addRedactRegions: (docId, regions) =>
+    set((state) => ({
+      tabs: state.tabs.map((t) =>
+        t.docId === docId
+          ? { ...t, redactRegions: [...(t.redactRegions ?? []), ...regions] }
+          : t,
+      ),
+    })),
+
+  removeRedactRegion: (docId, index) =>
+    set((state) => ({
+      tabs: state.tabs.map((t) =>
+        t.docId === docId
+          ? { ...t, redactRegions: (t.redactRegions ?? []).filter((_, i) => i !== index) }
+          : t,
+      ),
+    })),
+
+  clearRedactRegions: (docId) =>
+    set((state) => ({
+      tabs: state.tabs.map((t) =>
+        t.docId === docId ? { ...t, redactRegions: [], redactQueries: [] } : t,
+      ),
+    })),
 
   setSidebarTool: (tool) =>
     set((state) => ({

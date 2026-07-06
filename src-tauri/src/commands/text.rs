@@ -6,12 +6,12 @@ use regex::Regex;
 use crate::error::AppError;
 use crate::state::{lock_mutex, AppState, DocEntry};
 use pdfium_render::prelude::*;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, State, WebviewWindow};
 
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct TextRect {
     pub x: f32,
     pub y: f32,
@@ -48,7 +48,7 @@ pub struct TextExportResult {
 /// Returns the effective left and bottom origin of the page's bounding box.
 /// Most PDFs have origin (0,0), but some have non-zero origins that shift
 /// text coordinates relative to the rendered output.
-fn page_origin(page: &PdfPage) -> (f32, f32) {
+pub(crate) fn page_origin(page: &PdfPage) -> (f32, f32) {
     // Try CropBox first (used for display), fall back to MediaBox
     let bbox = page
         .boundaries()
@@ -70,7 +70,7 @@ pub fn extract_page_text(
     extract_page_text_impl(&state, doc_id, page).map_err(String::from)
 }
 
-fn extract_page_text_impl(
+pub(crate) fn extract_page_text_impl(
     state: &AppState,
     doc_id: String,
     page: u32,
@@ -211,7 +211,7 @@ pub fn search_document(
         .map_err(String::from)
 }
 
-fn search_document_impl(
+pub(crate) fn search_document_impl(
     state: &AppState,
     doc_id: String,
     query: String,

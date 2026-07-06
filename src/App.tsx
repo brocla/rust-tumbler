@@ -14,7 +14,8 @@ import { PasswordPrompt } from "./components/PasswordPrompt";
 import { Notice } from "./components/Notice";
 import { saveTab, saveTabAs, confirmCloseDirtyTab } from "./utils/saveDocument";
 import { usePdfStore, suppressedReloadDocs } from "./store/usePdfStore";
-import type { PageDimension, CompressProgress } from "./store/usePdfStore";
+import type { PageDimension, CompressProgress, RedactProgress } from "./store/usePdfStore";
+import { discardRedaction } from "./utils/redactSave";
 import type { SignatureInfo } from "./utils/signature";
 import { contrastTextColor } from "./utils/color";
 import { reconstructCopyText, type CopyToken } from "./utils/textSelection";
@@ -41,6 +42,8 @@ function App() {
   const setOcrProgress = usePdfStore((s) => s.setOcrProgress);
   const compressProgress = usePdfStore((s) => s.compressProgress);
   const setCompressProgress = usePdfStore((s) => s.setCompressProgress);
+  const redactProgress = usePdfStore((s) => s.redactProgress);
+  const setRedactProgress = usePdfStore((s) => s.setRedactProgress);
   const openFileRef = useRef<() => Promise<void>>();
   const printRef = useRef<() => Promise<void>>();
   const [printProgress, setPrintProgress] = useState<{ page: number; total: number } | null>(null);
@@ -224,6 +227,14 @@ function App() {
     return () => { unlisten.then((f) => f()); };
   }, []);
 
+  // Listen for redaction progress (Redact panel "Apply") (issue #1)
+  useEffect(() => {
+    const unlisten = listen<RedactProgress>("redact-progress", (event) => {
+      setRedactProgress(event.payload);
+    });
+    return () => { unlisten.then((f) => f()); };
+  }, []);
+
   // Ctrl+P shortcut
   useEffect(() => {
     const handleCtrlP = (e: KeyboardEvent) => {
@@ -278,6 +289,14 @@ function App() {
         // The edit rewrote the document's bytes, so any signature is now
         // invalid — re-verify (against the buffer) so the badge reflects reality.
         refreshSignatureStatus(tab.docId, tab.id);
+        // A staged redacted copy was built from the pre-edit buffer (the
+        // backend already dropped its staging), and pending regions may point
+        // at pages that were deleted/reordered — clear both rather than let a
+        // stale redaction be applied or saved. (issue #1)
+        if (tab.redactPreview) void discardRedaction(tab);
+        if (tab.redactRegions?.length) {
+          usePdfStore.getState().clearRedactRegions(tab.docId);
+        }
       }
     });
     return () => { unlisten.then((f) => f()); };
@@ -449,6 +468,14 @@ function App() {
           </div>
         </div>
       )}
+      {redactProgress && (
+        <div className="print-progress-overlay">
+          <div className="print-progress-dialog">
+            <p>{describeRedact(redactProgress)}</p>
+            <button onClick={() => void invoke("cancel_redact")}>Cancel</button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -467,6 +494,12 @@ function describeCompress(p: CompressProgress): string {
   }
   const label = COMPRESS_STEP_LABELS[p.step] ?? "Compressing";
   return `${label} (step ${p.stepIndex} of ${p.stepCount})...`;
+}
+
+function describeRedact(p: RedactProgress): string {
+  if (p.stage === "flatten") return `Redacting — flattening page ${p.page} of ${p.total}...`;
+  if (p.stage === "reocr") return `Redacting — re-OCR page ${p.page} of ${p.total}...`;
+  return "Redacting — verifying nothing is recoverable...";
 }
 
 export default App;

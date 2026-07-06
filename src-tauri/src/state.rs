@@ -112,9 +112,31 @@ impl DocEntry {
     }
 }
 
+/// A staged redacted copy of an open document (issue #1). Produced by
+/// `apply_redactions`, rendered by `render_redacted_page` for the post-Apply
+/// preview, and written to disk only by `save_redacted_copy`. These bytes
+/// never enter `DocEntry.buffer` — that is what structurally guarantees a
+/// plain Save can never overwrite the original with redacted content.
+pub struct PendingRedaction {
+    /// pdfium render view of `bytes`, for the preview.
+    pub document: PdfDocument<'static>,
+    /// The final redacted output (post re-OCR), exactly what Save As writes
+    /// (modulo re-encryption for a password-protected document).
+    pub bytes: Vec<u8>,
+    /// True only if post-redaction verification found nothing recoverable.
+    /// `save_redacted_copy` refuses when false; the preview still works so the
+    /// user can inspect what leaked.
+    pub verified: bool,
+}
+
 pub struct AppState {
     pub pdfium: &'static Pdfium,
     documents: Mutex<HashMap<String, Arc<Mutex<DocEntry>>>>,
+    /// Staged redacted copies keyed by `doc_id` (issue #1). Same two-level
+    /// locking rationale as `documents`.
+    pending_redactions: Mutex<HashMap<String, Arc<Mutex<PendingRedaction>>>>,
+    /// Cancel token for the current redaction run (flatten + re-OCR + verify).
+    redact_job: Mutex<Option<Arc<AtomicBool>>>,
     pub startup_file: Mutex<Option<String>>,
     print_job: Mutex<Option<Arc<AtomicBool>>>,
     /// Cancel token for the current document-wide OCR run, shared by the
@@ -139,6 +161,8 @@ impl AppState {
         Self {
             pdfium,
             documents: Mutex::new(HashMap::new()),
+            pending_redactions: Mutex::new(HashMap::new()),
+            redact_job: Mutex::new(None),
             startup_file: Mutex::new(startup_file),
             print_job: Mutex::new(None),
             ocr_job: Mutex::new(None),
@@ -234,7 +258,50 @@ impl AppState {
 
     pub fn remove_document(&self, doc_id: &str) -> Result<(), AppError> {
         lock_mutex(&self.documents)?.remove(doc_id);
+        self.clear_pending_redaction(doc_id);
         Ok(())
+    }
+
+    /// Stages (or replaces) the redacted copy for a document.
+    pub fn set_pending_redaction(
+        &self,
+        doc_id: &str,
+        pending: PendingRedaction,
+    ) -> Result<(), AppError> {
+        lock_mutex(&self.pending_redactions)?
+            .insert(doc_id.to_string(), Arc::new(Mutex::new(pending)));
+        Ok(())
+    }
+
+    /// The staged redacted copy for a document, if any.
+    pub fn get_pending_redaction(&self, doc_id: &str) -> Option<Arc<Mutex<PendingRedaction>>> {
+        lock_mutex(&self.pending_redactions).ok()?.get(doc_id).cloned()
+    }
+
+    /// Drops the staged redacted copy (Discard, close, or a buffer edit that
+    /// makes it stale).
+    pub fn clear_pending_redaction(&self, doc_id: &str) {
+        if let Ok(mut map) = lock_mutex(&self.pending_redactions) {
+            map.remove(doc_id);
+        }
+    }
+
+    pub fn set_redact_job(&self, token: Arc<AtomicBool>) {
+        if let Ok(mut guard) = self.redact_job.lock() {
+            *guard = Some(token);
+        }
+    }
+
+    pub fn take_redact_job(&self) -> Option<Arc<AtomicBool>> {
+        self.redact_job.lock().ok()?.take()
+    }
+
+    pub fn cancel_redact_job(&self) {
+        if let Ok(guard) = self.redact_job.lock() {
+            if let Some(token) = guard.as_ref() {
+                token.store(true, Ordering::Relaxed);
+            }
+        }
     }
 
     pub fn set_print_job(&self, token: Arc<AtomicBool>) {
@@ -272,6 +339,10 @@ impl AppState {
             e.dirty = true;
         }
         self.clear_ocr_cache_for_doc(doc_id);
+        // A staged redacted copy was built from the pre-edit buffer; it no
+        // longer reflects the document, so drop it rather than let the user
+        // save a stale redaction.
+        self.clear_pending_redaction(doc_id);
         Ok(())
     }
 

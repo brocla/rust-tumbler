@@ -23,7 +23,8 @@
 //! [`geometry_is_simple`]); the happy path is authored correctly.
 
 use crate::commands::ocr::{
-    cache_get, ocr_page_into_cache, ocr_words_to_lines, OcrCache, OcrEngine, OcrProgress, OcrWord,
+    cache_get, ocr_page_into_cache, ocr_words_to_lines, OcrCache, OcrEngine, OcrLine, OcrProgress,
+    OcrWord,
 };
 use crate::error::AppError;
 use crate::state::{lock_mutex, AppState, DocEntry};
@@ -209,8 +210,33 @@ fn encode_for_font(text: &str) -> Vec<u8> {
 /// `Err` rather than collapsed into an empty stream, so the caller can't mistake
 /// a real error for an empty page and silently drop the layer.
 pub fn build_invisible_text_stream(words: &[OcrWord], font_name: &str) -> Result<Vec<u8>, AppError> {
+    build_invisible_text_stream_runs(words, font_name, false)
+}
+
+/// [`build_invisible_text_stream`] with a run-granularity switch. With
+/// `per_word` set, every OCR word becomes its own run at its own (tight) box
+/// instead of being grouped into lines. Redaction (issue #1) needs this for
+/// its re-OCR of flattened pages: a line-unioned run would be Tz-stretched
+/// across the burned gap where a mid-line word was redacted, positioning
+/// invisible glyphs *inside* the redaction region — verification would then
+/// (rightly) refuse to certify the output. Per-word runs cannot span a gap,
+/// so the redacted areas stay text-free. The cost — selection highlights that
+/// step per word instead of flowing per line — is confined to redacted pages.
+pub(crate) fn build_invisible_text_stream_runs(
+    words: &[OcrWord],
+    font_name: &str,
+    per_word: bool,
+) -> Result<Vec<u8>, AppError> {
+    let runs: Vec<OcrLine> = if per_word {
+        words
+            .iter()
+            .map(|w| OcrLine { text: w.text.clone(), rect: w.rect.clone() })
+            .collect()
+    } else {
+        ocr_words_to_lines(words)
+    };
     let mut ops: Vec<Operation> = Vec::new();
-    for line in ocr_words_to_lines(words) {
+    for line in runs {
         let encoded = encode_for_font(&line.text);
         if encoded.is_empty() {
             continue; // nothing representable (e.g. a pure-CJK line)
@@ -422,6 +448,26 @@ fn add_text_layer_impl(
     cache: OcrCache,
     cancel: Arc<AtomicBool>,
 ) -> Result<(AddTextLayerResult, Option<Vec<u8>>), AppError> {
+    add_text_layer_impl_filtered(emit_progress, entry, doc_id, engine, cache, cancel, None, false)
+}
+
+/// [`add_text_layer_impl`] with an optional page filter and run granularity:
+/// when `only_pages` is `Some`, pages outside the set are neither OCR'd nor
+/// given a layer, and `per_word_runs` selects per-word authoring (see
+/// [`build_invisible_text_stream_runs`]). Redaction (issue #1) uses both — it
+/// re-OCRs just the pages it flattened, with runs that cannot span a burned
+/// gap.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn add_text_layer_impl_filtered(
+    emit_progress: impl Fn(u32, u32),
+    entry: Arc<Mutex<DocEntry>>,
+    doc_id: String,
+    engine: Arc<dyn OcrEngine>,
+    cache: OcrCache,
+    cancel: Arc<AtomicBool>,
+    only_pages: Option<&std::collections::HashSet<u32>>,
+    per_word_runs: bool,
+) -> Result<(AddTextLayerResult, Option<Vec<u8>>), AppError> {
     // The buffer is the authoritative bytes (it carries any unsaved edits), so
     // the layer is authored into it, not into the file on disk.
     let (source_bytes, page_count) = {
@@ -436,6 +482,9 @@ fn add_text_layer_impl(
     let mut textless_pages: Vec<u32> = Vec::new();
     for i in 0..page_count {
         let page_num = i + 1;
+        if only_pages.is_some_and(|s| !s.contains(&page_num)) {
+            continue;
+        }
 
         if cancel.load(Ordering::Relaxed) {
             return Ok((
@@ -499,7 +548,7 @@ fn add_text_layer_impl(
                 continue;
             }
 
-            let stream_bytes = build_invisible_text_stream(&words, FONT_NAME)?;
+            let stream_bytes = build_invisible_text_stream_runs(&words, FONT_NAME, per_word_runs)?;
             if stream_bytes.is_empty() {
                 continue; // genuinely no representable text — not an error
             }

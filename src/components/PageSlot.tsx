@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCached, putCached } from "../utils/renderCache";
+import { redactPreviewCacheId } from "../utils/redactSave";
 import { TextLayer } from "./TextLayer";
 import { FormLayer } from "./FormLayer";
 import { HighlightLayer } from "./HighlightLayer";
+import { RedactLayer } from "./RedactLayer";
 
 interface HighlightRect {
   x: number;
@@ -25,6 +27,11 @@ interface PageSlotProps {
   displayMode: "normal" | "invert" | "sepia";
   highlightRects: HighlightRect[];
   activeHighlightIndex: number;
+  // True while the tab previews a staged redacted copy (issue #1): the page
+  // is rendered from the staged bytes via render_redacted_page (cached under
+  // a separate key), and the interactive overlays are hidden — the preview is
+  // the flattened raster itself.
+  redactedPreview?: boolean;
 }
 
 const DISPLAY_FILTERS = {
@@ -44,6 +51,7 @@ export function PageSlot({
   displayMode,
   highlightRects,
   activeHighlightIndex,
+  redactedPreview = false,
 }: PageSlotProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [rendered, setRendered] = useState(false);
@@ -68,7 +76,12 @@ export function PageSlot({
     const renderId = ++renderIdRef.current;
     setFailed(false);
 
-    const cached = getCached(docId, pageNumber, zoom, dpr);
+    // Preview renders come from the staged redacted bytes and are cached under
+    // their own key so they never mix with the document's own renders.
+    const cacheDocId = redactedPreview ? redactPreviewCacheId(docId) : docId;
+    const renderCommand = redactedPreview ? "render_redacted_page" : "render_page";
+
+    const cached = getCached(cacheDocId, pageNumber, zoom, dpr);
     if (cached) {
       canvas.width = cached.width;
       canvas.height = cached.height;
@@ -86,7 +99,7 @@ export function PageSlot({
 
     (async () => {
       try {
-        const buffer = await invoke<ArrayBuffer>("render_page", {
+        const buffer = await invoke<ArrayBuffer>(renderCommand, {
           docId,
           page: pageNumber,
           width: pixelWidth,
@@ -105,7 +118,7 @@ export function PageSlot({
           return;
         }
 
-        putCached(docId, pageNumber, zoom, dpr, bitmap);
+        putCached(cacheDocId, pageNumber, zoom, dpr, bitmap);
 
         canvas.width = pixelWidth;
         canvas.height = actualHeight;
@@ -125,7 +138,7 @@ export function PageSlot({
     return () => {
       cancelled = true;
     };
-  }, [docId, pageNumber, zoom, dpr, isInRenderWindow, contentEpoch, pixelWidth, cssWidth, cssHeight]);
+  }, [docId, pageNumber, zoom, dpr, isInRenderWindow, contentEpoch, pixelWidth, cssWidth, cssHeight, redactedPreview]);
 
   const filter = DISPLAY_FILTERS[displayMode];
 
@@ -150,7 +163,7 @@ export function PageSlot({
           opacity: rendered ? 1 : 0,
         }}
       />
-      {rendered && (
+      {rendered && !redactedPreview && (
         <>
           <TextLayer
             docId={docId}
@@ -165,6 +178,11 @@ export function PageSlot({
           <HighlightLayer
             rects={highlightRects}
             activeIndex={activeHighlightIndex}
+            zoom={zoom}
+          />
+          <RedactLayer
+            docId={docId}
+            pageNumber={pageNumber}
             zoom={zoom}
           />
         </>
