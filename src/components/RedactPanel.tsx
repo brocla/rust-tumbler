@@ -60,10 +60,30 @@ export function RedactPanel() {
   // (tool switched away) so the viewer isn't left capturing drags.
   useEffect(() => () => usePdfStore.getState().setRedactDrawMode(false), []);
 
+  // Ctrl+release-to-redact: while the panel is open, finishing a text
+  // selection with Ctrl held converts it straight to regions — no round-trip
+  // to the "Redact selected text" button between selections. (WebView2 has no
+  // native multi-range selection, so regions accumulate one drag at a time.)
+  const previewing = !!activeTab?.redactPreview;
+  const zoom = activeTab?.zoom ?? 100;
+  useEffect(() => {
+    if (!activeDocId || running || previewing) return;
+    const handleMouseUp = (e: MouseEvent) => {
+      if (!e.ctrlKey) return;
+      const found = selectionToRegions(zoom);
+      if (found.length === 0) return; // a plain Ctrl+click, or no selection
+      usePdfStore.getState().addRedactRegions(activeDocId, found);
+      window.getSelection()?.removeAllRanges();
+      setResult(null);
+      setSaved(false);
+    };
+    window.addEventListener("mouseup", handleMouseUp);
+    return () => window.removeEventListener("mouseup", handleMouseUp);
+  }, [activeDocId, zoom, running, previewing]);
+
   if (!activeTab) return null;
   const docId = activeTab.docId;
   const regions = activeTab.redactRegions ?? [];
-  const previewing = !!activeTab.redactPreview;
 
   const handleFind = async () => {
     if (!query.trim()) return;
@@ -237,6 +257,9 @@ export function RedactPanel() {
         >
           {drawMode ? "Drawing — click to stop" : "Draw region"}
         </button>
+      </div>
+      <div className="redact-hint">
+        Tip: hold Ctrl while selecting text to mark it instantly.
       </div>
 
       <div className="redact-region-list">

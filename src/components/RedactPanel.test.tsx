@@ -11,6 +11,9 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
   save: vi.fn(),
   message: vi.fn(),
 }));
+vi.mock("../utils/redaction", () => ({ selectionToRegions: vi.fn(() => []) }));
+
+import { selectionToRegions } from "../utils/redaction";
 
 function makeTab(overrides: Partial<TabState> = {}): TabState {
   return {
@@ -251,6 +254,27 @@ describe("RedactPanel", () => {
 
     fireEvent.click(screen.getByText("Clear all"));
     expect(activeTab().redactRegions).toEqual([]);
+  });
+
+  it("Ctrl+releasing a text selection adds its regions immediately", () => {
+    vi.mocked(selectionToRegions).mockReturnValue([MATCHES[0]]);
+    render(<RedactPanel />);
+
+    // A plain mouseup must not consume the selection.
+    fireEvent.mouseUp(window);
+    expect(activeTab().redactRegions ?? []).toEqual([]);
+
+    fireEvent.mouseUp(window, { ctrlKey: true });
+    expect(activeTab().redactRegions).toEqual([MATCHES[0]]);
+  });
+
+  it("Ctrl+release is inert while previewing", () => {
+    vi.mocked(selectionToRegions).mockReturnValue([MATCHES[0]]);
+    usePdfStore.getState().updateTab("tab-1", { redactPreview: { verified: true } });
+    render(<RedactPanel />);
+
+    fireEvent.mouseUp(window, { ctrlKey: true });
+    expect(activeTab().redactRegions ?? []).toEqual([]);
   });
 
   it("Draw region toggles the store's draw mode", () => {

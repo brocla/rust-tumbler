@@ -1857,3 +1857,8 @@ input[type="radio"].form-check:checked {
 .redact-actions button {
   flex: 1;
 }
+
+.redact-hint {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
