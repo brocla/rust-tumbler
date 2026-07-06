@@ -104,6 +104,7 @@ export function ContinuousViewer() {
   const contentEpoch = activeTab?.contentEpoch ?? 0;
   const searchResults = activeTab?.searchResults ?? [];
   const searchResultIndex = activeTab?.searchResultIndex ?? -1;
+  const redactedPreview = !!activeTab?.redactPreview;
 
   // Build per-page highlight data: { rects, activeIndex } for each page
   const pageHighlights = useMemo(() => {
@@ -405,6 +406,7 @@ export function ContinuousViewer() {
                   ? searchResultIndex - (pageHighlights.get(pageNum)?.rectStartIndex ?? 0)
                   : -1
               }
+              redactedPreview={redactedPreview}
             />
           </div>
         );

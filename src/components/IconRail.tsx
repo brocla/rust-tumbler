@@ -1,4 +1,4 @@
-import { Layers, Search, Info, PocketKnife, Minimize2 } from "lucide-react";
+import { Layers, Search, Info, PocketKnife, Minimize2, EyeOff } from "lucide-react";
 import { usePdfStore } from "../store/usePdfStore";
 
 export function IconRail() {
@@ -46,6 +46,13 @@ export function IconRail() {
         title="Compress"
       >
         <Minimize2 size={20} />
+      </button>
+      <button
+        className={`rail-button ${activeTool === "redact" ? "active" : ""}`}
+        onClick={() => setSidebarTool("redact")}
+        title="Redact"
+      >
+        <EyeOff size={20} />
       </button>
     </div>
   );

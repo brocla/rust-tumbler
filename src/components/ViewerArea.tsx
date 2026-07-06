@@ -1,6 +1,7 @@
 import { FileText } from "lucide-react";
 import { usePdfStore } from "../store/usePdfStore";
 import { ContinuousViewer } from "./ContinuousViewer";
+import { RedactPreviewBanner } from "./RedactPreviewBanner";
 
 export function ViewerArea() {
   const hasActiveTab = usePdfStore(
@@ -19,5 +20,10 @@ export function ViewerArea() {
     );
   }
 
-  return <ContinuousViewer />;
+  return (
+    <>
+      <RedactPreviewBanner />
+      <ContinuousViewer />
+    </>
+  );
 }
