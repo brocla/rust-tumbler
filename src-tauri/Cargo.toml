@@ -23,7 +23,9 @@ serde_json = "1"
 uuid = { version = "1", features = ["v4"] }
 pdfium-render = { version = "0.9", features = ["pdfium_use_win32", "thread_safe"] }
 libloading = "0.7"
-lopdf = "0.34"
+# lopdf 0.43.0's default `time` feature has a compile error (datetime.rs uses a
+# removed time-crate API); we don't use lopdf's date conversions, so drop it.
+lopdf = { version = "0.43", default-features = false, features = ["chrono", "jiff", "rayon"] }
 regex = "1"
 thiserror = "2"
 # Image decode/resize/JPEG re-encode for the image-recompression step.
