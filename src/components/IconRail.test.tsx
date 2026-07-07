@@ -39,7 +39,7 @@ describe("IconRail", () => {
   it("enables every tool for an unencrypted document", () => {
     usePdfStore.setState({ tabs: [makeTab()], activeTabId: "tab-1" });
     render(<IconRail />);
-    for (const title of ["Thumbnails", "Search", "Metadata", "Page Operations", "Compress"]) {
+    for (const title of ["Thumbnails", "Search", "Metadata", "Page Operations", "Web Optimization"]) {
       expect(screen.getByTitle(title)).toBeEnabled();
     }
   });
@@ -49,7 +49,7 @@ describe("IconRail", () => {
   it("enables every tool for an encrypted document too", () => {
     usePdfStore.setState({ tabs: [makeTab({ encrypted: true })], activeTabId: "tab-1" });
     render(<IconRail />);
-    for (const title of ["Thumbnails", "Search", "Metadata", "Page Operations", "Compress"]) {
+    for (const title of ["Thumbnails", "Search", "Metadata", "Page Operations", "Web Optimization"]) {
       expect(screen.getByTitle(title)).toBeEnabled();
     }
   });

@@ -604,7 +604,7 @@ pub async fn run_optimization_steps(
         // Compression rewrites page content (image downsampling), so the
         // frontend must evict its render caches and re-render — the same
         // signal a page edit sends.
-        crate::commands::pages::emit_pages_edited(&app, doc_id, &info);
+        crate::commands::pages::emit_pages_edited(&app, &state, doc_id, &info);
     }
     Ok(report)
 }

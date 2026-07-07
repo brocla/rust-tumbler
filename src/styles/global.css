@@ -181,6 +181,20 @@ body {
   background: var(--color-bg-tertiary);
 }
 
+/* Linearized badge (issue #3) — same neutral pill as the lock badge; turns
+   off the moment an edit rewrites the buffer, since no edit path preserves
+   the linearized structure. */
+.linearized-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  background: var(--color-bg-tertiary);
+}
+
 /* App version — always rightmost, in the theme accent color. */
 .status-version {
   color: var(--color-accent);
@@ -1042,6 +1056,14 @@ input[type="radio"].form-check:checked {
   padding: 12px;
 }
 
+.optimize-explainer {
+  color: var(--color-text-secondary);
+  font-size: 16px;
+  line-height: 1.4;
+  /* breathing room before the controls. */
+  margin-bottom: 40px;
+}
+
 .optimize-steps {
   display: flex;
   flex-direction: column;
@@ -1208,6 +1230,48 @@ input[type="radio"].form-check:checked {
   font-size: var(--font-size-md);
   font-weight: 600;
   color: var(--color-accent);
+}
+
+/* Linearize section (issue #3) — grouped at the bottom of Compress since
+   together the two steps make up "web-optimization"; kept visually distinct
+   with a divider since it's an independent export action, not part of the
+   Run/results flow above it. */
+.optimize-linearize-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 14px;
+  border-top: 1px solid var(--color-border);
+}
+
+.optimize-linearize-note {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+}
+
+.optimize-linearize-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  align-self: flex-start;
+  height: 30px;
+  padding: 0 16px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: var(--color-accent);
+  color: var(--color-on-accent);
+  font-family: var(--font-family);
+  font-size: var(--font-size-md);
+  cursor: pointer;
+}
+
+.optimize-linearize-button:hover:not(:disabled) {
+  background: var(--color-accent-dim);
+}
+
+.optimize-linearize-button:disabled {
+  cursor: default;
+  opacity: 0.6;
 }
 
 /* Pages Panel */

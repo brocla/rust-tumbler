@@ -28,6 +28,9 @@ interface DocInfo {
   // True when the file is password-protected. It opens fully editable (the
   // buffer is decrypted — issue #57); Save re-encrypts with the same password.
   encrypted: boolean;
+  // True when the opened file is linearized ("Fast Web View") — drives the
+  // status-bar badge (issue #3).
+  linearized: boolean;
 }
 
 interface AccentColors {
@@ -44,6 +47,7 @@ function App() {
   const setCompressProgress = usePdfStore((s) => s.setCompressProgress);
   const redactProgress = usePdfStore((s) => s.redactProgress);
   const setRedactProgress = usePdfStore((s) => s.setRedactProgress);
+  const linearizeProgress = usePdfStore((s) => s.linearizeProgress);
   const openFileRef = useRef<() => Promise<void>>();
   const printRef = useRef<() => Promise<void>>();
   const [printProgress, setPrintProgress] = useState<{ page: number; total: number } | null>(null);
@@ -128,6 +132,7 @@ function App() {
         sidebarScrollPage: 1,
         ocrEpoch: 0,
         encrypted: info.encrypted,
+        linearized: info.linearized,
       });
       refreshSignatureStatus(info.docId, tabId);
     } catch (err) {
@@ -302,16 +307,22 @@ function App() {
     return () => { unlisten.then((f) => f()); };
   }, [updateTab]);
 
-  // Mirror the backend's dirty flag (DocEntry.dirty) into the tab so the Save
-  // button, tab dot, and close guards react. The backend owns the truth: every
-  // buffer edit and every save emits this event. (issue #31)
+  // Mirror the backend's dirty flag (DocEntry.dirty) and linearized flag
+  // (DocEntry.linearized, issue #3) into the tab so the Save button, tab dot,
+  // close guards, and status-bar badge react. The backend owns the truth:
+  // every buffer edit and every save emits this event. (issue #31)
   useEffect(() => {
-    const unlisten = listen<{ docId: string; dirty: boolean }>(
+    const unlisten = listen<{ docId: string; dirty: boolean; linearized: boolean }>(
       "document-dirty-changed",
       (event) => {
         const { tabs } = usePdfStore.getState();
         const tab = tabs.find((t) => t.docId === event.payload.docId);
-        if (tab) updateTab(tab.id, { isDirty: event.payload.dirty });
+        if (tab) {
+          updateTab(tab.id, {
+            isDirty: event.payload.dirty,
+            linearized: event.payload.linearized,
+          });
+        }
       },
     );
     return () => { unlisten.then((f) => f()); };
@@ -473,6 +484,13 @@ function App() {
           <div className="print-progress-dialog">
             <p>{describeRedact(redactProgress)}</p>
             <button onClick={() => void invoke("cancel_redact")}>Cancel</button>
+          </div>
+        </div>
+      )}
+      {linearizeProgress && (
+        <div className="print-progress-overlay">
+          <div className="print-progress-dialog">
+            <p>Saving web-optimized copy...</p>
           </div>
         </div>
       )}

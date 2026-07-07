@@ -58,6 +58,12 @@ export interface TabState {
   // button, which clears it. Optional so existing tab construction sites
   // don't need updating. (issues #12, #57)
   encrypted?: boolean;
+  // True while the open file is linearized ("Fast Web View"). Populated on
+  // open and mirrored from the backend's DocEntry.linearized via the
+  // "document-dirty-changed" event — any edit turns this off, since no edit
+  // path preserves the linearized structure. Drives the status-bar badge.
+  // Optional so existing tab construction sites don't need updating. (issue #3)
+  linearized?: boolean;
   // Regions marked for redaction but not yet applied (issue #1). Drawn as
   // black boxes by RedactLayer; sent to apply_redactions by the Redact panel.
   redactRegions?: RedactRegion[];
@@ -154,6 +160,10 @@ interface PdfStore {
   // Progress of an in-flight redaction run (the Redact panel's "Apply"),
   // driven by Tauri `redact-progress` events. Null when none is running.
   redactProgress: RedactProgress | null;
+  // True while a "Save Web-Optimized Copy" export is in flight. qpdf's C API
+  // gives no incremental progress callback, so this drives an indeterminate
+  // spinner rather than a page-by-page overlay like OCR/compress/redact.
+  linearizeProgress: boolean;
   // True while the Redact panel's "Draw region" mode is armed: RedactLayer
   // captures a marquee drag on the page instead of text selection.
   redactDrawMode: boolean;
@@ -177,6 +187,7 @@ interface PdfStore {
   setOcrProgress: (progress: { page: number; total: number } | null) => void;
   setCompressProgress: (progress: CompressProgress | null) => void;
   setRedactProgress: (progress: RedactProgress | null) => void;
+  setLinearizeProgress: (inProgress: boolean) => void;
   setRedactDrawMode: (on: boolean) => void;
   // Pending-region management, keyed by docId (RedactLayer lives per page and
   // knows the docId, not the tab id).
@@ -208,6 +219,7 @@ export const usePdfStore = create<PdfStore>((set, get) => ({
   ocrProgress: null,
   compressProgress: null,
   redactProgress: null,
+  linearizeProgress: false,
   redactDrawMode: false,
   unsavedPrompt: null,
   passwordPrompt: null,
@@ -246,6 +258,8 @@ export const usePdfStore = create<PdfStore>((set, get) => ({
   setCompressProgress: (progress) => set({ compressProgress: progress }),
 
   setRedactProgress: (progress) => set({ redactProgress: progress }),
+
+  setLinearizeProgress: (inProgress) => set({ linearizeProgress: inProgress }),
 
   setRedactDrawMode: (on) => set({ redactDrawMode: on }),
 

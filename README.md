@@ -169,6 +169,15 @@ rust-tumbler/
 - A win-x64 `pdfium.dll` (e.g. from the
   [pdfium-binaries](https://github.com/bblanchon/pdfium-binaries) releases),
   placed at `src-tauri/resources/pdfium.dll` (not checked into the repo)
+- A win-x64 qpdf DLL (used by "Save Web-Optimized Copy"): download the
+  `qpdf-<version>-msvc64.zip` asset from the
+  [qpdf releases](https://github.com/qpdf/qpdf/releases), take
+  `bin/qpdf30.dll`, and place it at `src-tauri/resources/qpdf.dll`
+  (not checked into the repo). The MSVC build depends at runtime on
+  `msvcp140.dll`, `vcruntime140.dll`, and `vcruntime140_1.dll` from the
+  same zip's `bin/` folder — copy those three alongside `qpdf.dll` in
+  `src-tauri/resources/` too, so the app doesn't rely on the target
+  machine having the Visual C++ redistributable installed
 
 
 

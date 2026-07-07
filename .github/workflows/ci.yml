@@ -45,6 +45,14 @@ jobs:
           if (-not (Test-Path resources/tumbler-thumbnailer.dll)) {
             New-Item -ItemType File -Path resources/tumbler-thumbnailer.dll | Out-Null
           }
+          if (-not (Test-Path resources/qpdf.dll)) {
+            New-Item -ItemType File -Path resources/qpdf.dll | Out-Null
+          }
+          foreach ($f in "msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll") {
+            if (-not (Test-Path "resources/$f")) {
+              New-Item -ItemType File -Path "resources/$f" | Out-Null
+            }
+          }
       - name: Check Rust
         working-directory: src-tauri
         run: cargo check

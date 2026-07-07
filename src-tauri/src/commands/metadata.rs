@@ -78,7 +78,7 @@ pub fn set_metadata(
     let _ = app.emit("document-metadata-changed", vec![doc_id.clone()]);
     let _ = app.emit(
         "document-dirty-changed",
-        crate::commands::save::DirtyChangedPayload { doc_id, dirty: true },
+        crate::commands::save::dirty_changed_payload(&state, doc_id, true),
     );
     Ok(result)
 }
@@ -252,6 +252,7 @@ mod tests {
                     password: None,
                     encrypted: false,
                     permissions: None,
+                    linearized: false,
                 },
             )
             .expect("insert");
