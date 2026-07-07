@@ -20,10 +20,22 @@
 
 use crate::error::AppError;
 use crate::state::{lock_mutex, AppState};
+use serde::Serialize;
 use std::ffi::{c_void, CStr, CString};
 use std::os::raw::{c_char, c_int};
 use std::path::Path;
 use tauri::State;
+
+/// Sizes before/after linearizing, for an honest confirmation message.
+/// Deliberately not a "percent reduction" like Compress's report — unlike
+/// compression, linearization reorders structure and adds a hint stream, so
+/// the output is often the same size or slightly larger, never a savings.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct LinearizeResult {
+    pub original_size: u64,
+    pub linearized_size: u64,
+}
 
 /// Produces a linearized copy of a PDF at `src` and writes it to `dest`.
 /// A trait seam so command logic can be tested without the real qpdf.dll
@@ -221,7 +233,7 @@ pub fn export_linearized_copy(
     state: State<'_, AppState>,
     doc_id: String,
     dest_path: String,
-) -> Result<(), String> {
+) -> Result<LinearizeResult, String> {
     export_linearized_copy_impl(&state, &doc_id, &dest_path).map_err(String::from)
 }
 
@@ -229,7 +241,7 @@ pub(crate) fn export_linearized_copy_impl(
     state: &AppState,
     doc_id: &str,
     dest_path: &str,
-) -> Result<(), AppError> {
+) -> Result<LinearizeResult, AppError> {
     // Refuse writing over the open document's own file, or a path open in
     // another tab — this is a copy operation (unlike Save As), so there is
     // no "saving to your own path is fine" case here.
@@ -261,15 +273,25 @@ pub(crate) fn export_linearized_copy_impl(
     // the print feature. The document lock is released before the (slow)
     // linearize call so other tabs aren't blocked while qpdf runs.
     let tmp = std::env::temp_dir().join(format!("tumbler-linearize-{}.pdf", uuid::Uuid::new_v4()));
-    {
+    let original_size = {
         let entry = lock_mutex(&entry_arc)?;
         std::fs::write(&tmp, &entry.buffer)
             .map_err(|e| AppError::io("Failed to write temporary PDF for linearization", e))?;
-    }
+        entry.buffer.len() as u64
+    };
 
     let result = state.linearizer.linearize(&tmp, Path::new(dest_path));
     let _ = std::fs::remove_file(&tmp);
-    result
+    result?;
+
+    let linearized_size = std::fs::metadata(dest_path)
+        .map_err(|e| AppError::io("Failed to read linearized output size", e))?
+        .len();
+
+    Ok(LinearizeResult {
+        original_size,
+        linearized_size,
+    })
 }
 
 /// True if `dest_path` refers to the same file as `open_path`, comparing
@@ -308,10 +330,16 @@ mod tests {
         let dest = tmp_path("tumbler_linearized_out.pdf");
         std::fs::remove_file(&dest).ok();
 
-        export_linearized_copy_impl(&state, "doc1", &dest).expect("export");
+        let result = export_linearized_copy_impl(&state, "doc1", &dest).expect("export");
 
         assert!(std::path::Path::new(&dest).exists(), "output file should be created");
         assert!(std::fs::metadata(&dest).expect("metadata").len() > 0);
+        assert!(result.original_size > 0, "should report the source buffer size");
+        assert_eq!(
+            result.linearized_size,
+            std::fs::metadata(&dest).expect("metadata").len(),
+            "reported size should match the written file"
+        );
 
         std::fs::remove_file(&dest).ok();
     }
