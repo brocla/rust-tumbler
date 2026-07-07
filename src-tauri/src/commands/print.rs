@@ -24,6 +24,14 @@ pub struct PrintProgress {
 #[allow(non_camel_case_types)]
 type FnLoadDocument =
     unsafe extern "C" fn(file_path: *const u8, password: *const u8) -> *mut c_void;
+// The 64-suffixed variant takes a size_t length; the plain FPDF_LoadMemDocument
+// takes a C int and silently caps at 2 GB.
+#[allow(non_camel_case_types)]
+type FnLoadMemDocument64 = unsafe extern "C" fn(
+    data_buf: *const c_void,
+    size: usize,
+    password: *const u8,
+) -> *mut c_void;
 #[allow(non_camel_case_types)]
 type FnGetPageCount = unsafe extern "C" fn(document: *mut c_void) -> c_int;
 #[allow(non_camel_case_types)]
@@ -136,32 +144,40 @@ pub async fn print_document(
         .map_err(String::from)
 }
 
+/// What the STA print thread's pdfium loads. A clean document prints straight
+/// from its file (ciphertext on disk for a password-protected one); a dirty
+/// document (unsaved buffer edits, issue #31) hands over the buffer **in
+/// memory**. The buffer is plaintext even for an encrypted document (issue
+/// #57), so it must never be staged through a temp file — a crash or early
+/// return would leave decrypted bytes on disk.
+enum PrintSource {
+    File(String),
+    Memory(Vec<u8>),
+}
+
+/// Decides how the print thread receives the document, and with what
+/// password. Split out of `print_document_impl` so the no-plaintext-on-disk
+/// rule is unit-testable: dirty ⟹ memory, clean ⟹ file path.
+/// The password is needed only for the clean-encrypted case (the file on
+/// disk is ciphertext); pdfium ignores a password for unencrypted bytes.
+fn print_source_for(entry: &crate::state::DocEntry) -> (PrintSource, Option<String>) {
+    let password = entry.password.clone();
+    if entry.dirty {
+        (PrintSource::Memory(entry.buffer.clone()), password)
+    } else {
+        (PrintSource::File(entry.file_path.clone()), password)
+    }
+}
+
 async fn print_document_impl(
     window: tauri::WebviewWindow,
     state: &AppState,
     doc_id: String,
 ) -> Result<PrintResult, AppError> {
-    // The GDI print path loads its own pdfium from a file path on the STA
-    // thread, so a dirty document (unsaved buffer edits, issue #31) is handed
-    // off via a temp file holding the buffer; a clean document prints straight
-    // from its file. The temp file is removed after the print thread finishes.
-    // A password-protected document's *file* is encrypted, so when printing a
-    // clean document straight from disk the STA thread's pdfium load needs the
-    // password. The buffer (and thus a dirty document's temp copy) is plaintext
-    // (issue #57); pdfium ignores a password supplied for an unencrypted file.
-    let (file_path, temp_handoff, password) = {
+    let (source, password) = {
         let entry = state.get_document(&doc_id)?;
         let entry = lock_mutex(&entry)?;
-        let password = entry.password.clone();
-        if entry.dirty {
-            let tmp = std::env::temp_dir()
-                .join(format!("tumbler-print-{}.pdf", uuid::Uuid::new_v4()));
-            std::fs::write(&tmp, &entry.buffer)
-                .map_err(|e| AppError::io("Failed to write print copy", e))?;
-            (tmp.to_string_lossy().into_owned(), Some(tmp), password)
-        } else {
-            (entry.file_path.clone(), None, password)
-        }
+        print_source_for(&entry)
     };
 
     // Resolve pdfium.dll path (same logic as lib.rs)
@@ -174,26 +190,24 @@ async fn print_document_impl(
 
     let (tx, rx) = std::sync::mpsc::channel();
 
+    // `source` is owned by the closure and only borrowed by the print call,
+    // so a Memory buffer outlives the pdfium document handle opened over it
+    // (FPDF_LoadMemDocument64 does not copy the bytes).
     std::thread::spawn(move || {
         let result =
-            print_on_sta_thread(hwnd_raw, &pdfium_path, &file_path, password.as_deref(), &window, cancel);
+            print_on_sta_thread(hwnd_raw, &pdfium_path, &source, password.as_deref(), &window, cancel);
         tx.send(result).ok();
     });
 
     let result = rx.recv().map_err(|e| AppError::Other(format!("channel recv failed: {e}")));
     state.take_print_job();
-    // The print thread has exited (recv returned), so its pdfium instance has
-    // closed the document and the temp copy can be removed.
-    if let Some(tmp) = temp_handoff {
-        let _ = std::fs::remove_file(tmp);
-    }
     result?
 }
 
 fn print_on_sta_thread(
     hwnd_raw: isize,
     pdfium_path: &str,
-    pdf_path: &str,
+    source: &PrintSource,
     password: Option<&str>,
     window: &tauri::WebviewWindow,
     cancel: Arc<AtomicBool>,
@@ -209,7 +223,7 @@ fn print_on_sta_thread(
         )));
     }
 
-    let result = print_impl(hwnd_raw, pdfium_path, pdf_path, password, window, cancel);
+    let result = print_impl(hwnd_raw, pdfium_path, source, password, window, cancel);
 
     unsafe { CoUninitialize() };
     result
@@ -218,7 +232,7 @@ fn print_on_sta_thread(
 fn print_impl(
     hwnd_raw: isize,
     pdfium_path: &str,
-    pdf_path: &str,
+    source: &PrintSource,
     password: Option<&str>,
     window: &tauri::WebviewWindow,
     cancel: Arc<AtomicBool>,
@@ -275,6 +289,9 @@ fn print_impl(
     let fpdf_load_document: libloading::Symbol<FnLoadDocument> =
         unsafe { lib.get(b"FPDF_LoadDocument\0") }
             .map_err(|e| format!("Failed to find FPDF_LoadDocument: {e}"))?;
+    let fpdf_load_mem_document64: libloading::Symbol<FnLoadMemDocument64> =
+        unsafe { lib.get(b"FPDF_LoadMemDocument64\0") }
+            .map_err(|e| format!("Failed to find FPDF_LoadMemDocument64: {e}"))?;
     let fpdf_get_page_count: libloading::Symbol<FnGetPageCount> =
         unsafe { lib.get(b"FPDF_GetPageCount\0") }
             .map_err(|e| format!("Failed to find FPDF_GetPageCount: {e}"))?;
@@ -334,10 +351,8 @@ fn print_impl(
             .map_err(|e| format!("Failed to find FPDFBitmap_Destroy: {e}"))?;
 
     // Load the PDF document (pdfium is already initialized by the main thread).
-    // For an encrypted document (issue #12) the bytes are still locked, so pass
-    // the stored password; otherwise pass NULL.
-    let pdf_path_cstr = std::ffi::CString::new(pdf_path)
-        .map_err(|_| "Invalid PDF path".to_string())?;
+    // A clean encrypted document's file is ciphertext (issue #12/#57), so pass
+    // the stored password; pdfium ignores it when the bytes aren't encrypted.
     let password_cstr = password
         .map(std::ffi::CString::new)
         .transpose()
@@ -345,7 +360,18 @@ fn print_impl(
     let password_ptr = password_cstr
         .as_ref()
         .map_or(std::ptr::null(), |c| c.as_ptr() as *const u8);
-    let doc = unsafe { fpdf_load_document(pdf_path_cstr.as_ptr() as *const u8, password_ptr) };
+    let doc = match source {
+        PrintSource::File(path) => {
+            let pdf_path_cstr = std::ffi::CString::new(path.as_str())
+                .map_err(|_| "Invalid PDF path".to_string())?;
+            unsafe { fpdf_load_document(pdf_path_cstr.as_ptr() as *const u8, password_ptr) }
+        }
+        // FPDF_LoadMemDocument64 borrows the bytes; `source` belongs to our
+        // caller's frame, so it strictly outlives `_doc_guard` below.
+        PrintSource::Memory(bytes) => unsafe {
+            fpdf_load_mem_document64(bytes.as_ptr() as *const c_void, bytes.len(), password_ptr)
+        },
+    };
     if doc.is_null() {
         return Err(AppError::Other("Failed to load PDF for printing".to_string()));
     }
@@ -660,6 +686,77 @@ unsafe fn read_wide_string(ptr: *const u16) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::DocEntry;
+
+    /// The no-plaintext-on-disk rule (issue #57): a dirty document — whose
+    /// buffer is decrypted plaintext even for a password-protected file —
+    /// must be handed to the print thread in memory, never staged through a
+    /// temp file. A clean document prints from its file path (ciphertext on
+    /// disk for an encrypted one) with the stored password.
+    #[test]
+    fn dirty_document_prints_from_memory_clean_document_from_file() {
+        let _guard = crate::test_pdfium_guard();
+        let pdfium = crate::test_pdfium();
+        let path = crate::encrypted_fixture_path().to_string_lossy().into_owned();
+        let mut entry = DocEntry::load(pdfium, &path, Some(crate::ENCRYPTED_FIXTURE_PASSWORD))
+            .expect("load encrypted fixture");
+
+        // Clean: file-path handoff, password included for the encrypted file.
+        let (source, password) = print_source_for(&entry);
+        assert!(matches!(source, PrintSource::File(p) if p == entry.file_path));
+        assert_eq!(password.as_deref(), Some(crate::ENCRYPTED_FIXTURE_PASSWORD));
+
+        // Dirty: the (plaintext) buffer itself, in memory.
+        entry.dirty = true;
+        let (source, _) = print_source_for(&entry);
+        match source {
+            PrintSource::Memory(bytes) => assert_eq!(bytes, entry.buffer),
+            PrintSource::File(_) => panic!("dirty document must not print from a file path"),
+        }
+    }
+
+    /// Pins the raw `FPDF_LoadMemDocument64` binding against the shipped
+    /// pdfium.dll: the symbol exists and our signature (`*const c_void`,
+    /// `usize` length, password string) is right. A mismatch here would
+    /// otherwise only surface as a crash or null document during a live
+    /// print of an edited document.
+    #[test]
+    fn load_mem_document64_binding_matches_shipped_dll() {
+        let _guard = crate::test_pdfium_guard();
+        // Binds pdfium and calls FPDF_InitLibrary, which the raw symbols
+        // below rely on (mirrors print_impl running against the app's
+        // already-initialized library).
+        let _ = crate::test_pdfium();
+
+        let lib = unsafe { libloading::Library::new(crate::resolve_pdfium_path()) }
+            .expect("load pdfium.dll");
+        let load: libloading::Symbol<FnLoadMemDocument64> =
+            unsafe { lib.get(b"FPDF_LoadMemDocument64\0") }.expect("find FPDF_LoadMemDocument64");
+        let page_count: libloading::Symbol<FnGetPageCount> =
+            unsafe { lib.get(b"FPDF_GetPageCount\0") }.expect("find FPDF_GetPageCount");
+        let close: libloading::Symbol<FnCloseDocument> =
+            unsafe { lib.get(b"FPDF_CloseDocument\0") }.expect("find FPDF_CloseDocument");
+
+        // Plain fixture, no password.
+        let bytes = std::fs::read(crate::fixture_path()).expect("read fixture");
+        let doc = unsafe { load(bytes.as_ptr() as *const c_void, bytes.len(), std::ptr::null()) };
+        assert!(!doc.is_null(), "memory load of the plain fixture failed");
+        assert_eq!(unsafe { page_count(doc) }, 1);
+        unsafe { close(doc) };
+
+        // Encrypted fixture: rejected without the password, opens with it —
+        // the same password plumbing print_impl uses for the memory path.
+        let bytes = std::fs::read(crate::encrypted_fixture_path()).expect("read encrypted fixture");
+        let doc = unsafe { load(bytes.as_ptr() as *const c_void, bytes.len(), std::ptr::null()) };
+        assert!(doc.is_null(), "encrypted bytes must not open without a password");
+        let pw = std::ffi::CString::new(crate::ENCRYPTED_FIXTURE_PASSWORD).unwrap();
+        let doc = unsafe {
+            load(bytes.as_ptr() as *const c_void, bytes.len(), pw.as_ptr() as *const u8)
+        };
+        assert!(!doc.is_null(), "encrypted bytes must open with the password");
+        assert_eq!(unsafe { page_count(doc) }, 1);
+        unsafe { close(doc) };
+    }
 
     /// Exercises the token-check branch by pre-setting the cancel flag and
     /// invoking print_impl. Requires pdfium.dll and a real (or PDF) printer.
