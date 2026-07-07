@@ -39,8 +39,8 @@ export interface SignatureBadge {
  * Status-bar badge for the active tab. Honest wording: "Verified" means the
  * signature is cryptographically intact, not that the signer is trusted;
  * "not verified here" means we detected a signature but can't check it in this
- * build (e.g. an Adobe BER-encoded CMS) — NOT that it's invalid. Returns null
- * when there's nothing to show (unsigned).
+ * build (e.g. an unsupported digest algorithm or an unparsable CMS) — NOT that
+ * it's invalid. Returns null when there's nothing to show (unsigned).
  */
 export function signatureBadge(status: SignatureStatus | undefined): SignatureBadge | null {
   switch (status) {
