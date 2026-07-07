@@ -1926,3 +1926,8 @@ input[type="radio"].form-check:checked {
   color: var(--color-text-muted);
   font-size: var(--font-size-sm);
 }
+
+.redact-violations {
+  margin: 6px 0 0;
+  padding-left: 18px;
+}

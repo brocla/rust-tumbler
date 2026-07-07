@@ -52,6 +52,7 @@ const MATCHES: RedactRegion[] = [
 ];
 
 const VERIFIED_RESULT = {
+  structuralViolations: [],
   regions: 2,
   pagesFlattened: 2,
   verified: true,
@@ -185,6 +186,30 @@ describe("RedactPanel", () => {
     // The dialog must never even open for an unverified result.
     fireEvent.click(saveButton);
     expect(save).not.toHaveBeenCalled();
+  });
+
+  it("a structural violation fails the banner and blocks Save As even with zero region leaks", async () => {
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === "apply_redactions") {
+        return {
+          ...VERIFIED_RESULT,
+          verified: false,
+          leaks: [],
+          structuralViolations: ["catalog /StructTreeRoot present"],
+        };
+      }
+      return undefined;
+    });
+    usePdfStore.getState().addRedactRegions("doc-1", MATCHES);
+    render(<RedactPanel />);
+
+    await act(async () => {
+      fireEvent.click(screen.getByText("Apply redactions"));
+    });
+
+    expect(screen.getByText(/Verification FAILED/)).toBeTruthy();
+    expect(screen.getByText("catalog /StructTreeRoot present")).toBeTruthy();
+    expect((screen.getByText("Save As…") as HTMLButtonElement).disabled).toBe(true);
   });
 
   it("Save As suggests <name>-redacted.pdf, saves, and clears the redaction state", async () => {

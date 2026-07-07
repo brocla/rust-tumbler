@@ -7,8 +7,10 @@
 //! nothing left to extract, which is what makes the result *provable*.
 //!
 //! After the flatten, document-level leak vectors are scrubbed (Info dictionary,
-//! XMP metadata, JavaScript/EmbeddedFiles name trees, orphaned AcroForm fields
-//! whose widgets lived on flattened pages), the flattened pages are re-OCR'd
+//! XMP metadata, JavaScript/EmbeddedFiles name trees, the structure tree and
+//! outlines — tagged-PDF `/ActualText`/`/Alt` and bookmark titles duplicate
+//! visible text — page `/Metadata`/`/PieceInfo`, and AcroForm fields left
+//! without a widget by the flatten), the flattened pages are re-OCR'd
 //! into an invisible text layer (reusing issue #4's machinery — the burned
 //! rectangles read as blank, so search comes back for everything *except* the
 //! redacted spots), and then verification runs on the **final bytes, reloaded
@@ -18,7 +20,10 @@
 //!    redaction region;
 //! 2. defense-in-depth OCR of each burned region — no legible text (skipped,
 //!    and reported as skipped, when no Windows OCR language pack is installed);
-//! 3. a search for every "find & redact all" query — zero hits.
+//! 3. a search for every "find & redact all" query — zero hits;
+//! 4. structural postconditions (fail-closed): the leak vectors the text-based
+//!    checks cannot see — structure tree, outlines, metadata, widget-less form
+//!    fields — must be absent, so a scrub regression can never certify.
 //!
 //! Any failure populates `RedactionResult.leaks`, `verified` stays false, and
 //! `save_redacted_copy` refuses to write. The staged bytes never enter
@@ -58,6 +63,10 @@ pub struct RedactionResult {
     /// Any region where verification still found extractable text — must be
     /// empty for `verified` to be true. Surfaced so the UI can fail loudly.
     pub leaks: Vec<RedactRegion>,
+    /// Structural postconditions of the scrub that failed on the final bytes
+    /// (check 4 — fail-closed: e.g. a surviving structure tree or a
+    /// widget-less form field). Must be empty for `verified` to be true.
+    pub structural_violations: Vec<String>,
     /// Whether the defense-in-depth OCR check ran (false when no Windows OCR
     /// language pack is installed). Checks 1 and 3 are the hard gate either way.
     pub ocr_check_ran: bool,
@@ -183,15 +192,13 @@ fn crop_rgba(rgba: &[u8], bw: u32, x0: u32, y0: u32, x1: u32, y1: u32) -> Vec<u8
 /// Replaces one page's content with a single full-page image: the JPEG becomes
 /// an Image XObject, `/Contents` becomes one stream drawing it across the
 /// page, `/Resources` is replaced wholesale (old fonts/XObjects unreferenced),
-/// and the page's annotations are dropped (they can quote redacted text).
+/// and the page's annotations, metadata, and private application data are
+/// dropped (all of them can quote redacted text).
 ///
 /// The page is normalized to `MediaBox [0 0 page_w page_h]` with `/Rotate 0`:
 /// pdfium rendered the page in *display* orientation, so the raster already
 /// includes any rotation and origin shift — rewriting the geometry keeps the
 /// visual result identical for every page geometry without special cases.
-///
-/// Returns the object ids of the removed annotations so AcroForm field entries
-/// pointing at them can be scrubbed too.
 fn replace_page_with_image(
     doc: &mut Document,
     page_id: ObjectId,
@@ -200,26 +207,7 @@ fn replace_page_with_image(
     px_h: u32,
     page_w: f32,
     page_h: f32,
-) -> Result<Vec<ObjectId>, AppError> {
-    // Collect the ids of the page's annotations before mutating anything.
-    let removed_annots: Vec<ObjectId> = {
-        let annots = doc
-            .get_object(page_id)
-            .ok()
-            .and_then(|o| o.as_dict().ok())
-            .and_then(|p| p.get(b"Annots").ok().cloned());
-        match annots {
-            Some(Object::Array(a)) => a.iter().filter_map(|o| o.as_reference().ok()).collect(),
-            Some(Object::Reference(r)) => doc
-                .get_object(r)
-                .ok()
-                .and_then(|o| o.as_array().ok())
-                .map(|a| a.iter().filter_map(|o| o.as_reference().ok()).collect())
-                .unwrap_or_default(),
-            _ => Vec::new(),
-        }
-    };
-
+) -> Result<(), AppError> {
     let img_id = doc.add_object(Object::Stream(Stream::new(
         dictionary! {
             "Type" => "XObject",
@@ -270,66 +258,269 @@ fn replace_page_with_image(
         b"B",
         b"AA",
         b"StructParents",
+        // Page-level metadata and private application data (/PieceInfo can
+        // hold an authoring app's own copy of the original page content).
+        b"Metadata",
+        b"PieceInfo",
     ] {
         page.remove(key);
     }
-    Ok(removed_annots)
+    Ok(())
 }
 
-/// Removes from the AcroForm `/Fields` array any field whose object is one of
-/// the widget annotations dropped from a flattened page (fields and widgets
-/// are commonly merged into one object; a leftover field's `/V` could echo
-/// redacted text). Fields living on untouched pages are preserved.
-fn filter_acroform_fields(acroform: &mut Dictionary, removed: &HashSet<ObjectId>) {
-    if let Ok(Object::Array(fields)) = acroform.get_mut(b"Fields") {
-        fields.retain(|o| o.as_reference().map(|id| !removed.contains(&id)).unwrap_or(true));
+/// Recursion guard for AcroForm field trees. Both the scrub and the
+/// verification postcondition check use the same helper with the same limit,
+/// so they can't disagree about a pathological document.
+const FIELD_TREE_MAX_DEPTH: u8 = 32;
+
+/// Object ids of every annotation still referenced from some page's `/Annots`
+/// (flattened pages have already had theirs removed).
+fn live_annot_ids(doc: &Document) -> HashSet<ObjectId> {
+    let mut live = HashSet::new();
+    for page_id in doc.get_pages().into_values() {
+        let annots = doc
+            .get_object(page_id)
+            .ok()
+            .and_then(|o| o.as_dict().ok())
+            .and_then(|p| p.get(b"Annots").ok().cloned());
+        let array = match annots {
+            Some(Object::Array(a)) => Some(a),
+            Some(Object::Reference(r)) => {
+                doc.get_object(r).ok().and_then(|o| o.as_array().ok()).cloned()
+            }
+            _ => None,
+        };
+        if let Some(a) = array {
+            live.extend(a.iter().filter_map(|o| o.as_reference().ok()));
+        }
+    }
+    live
+}
+
+/// True when the field subtree rooted at `id` still has at least one terminal
+/// widget referenced from a page. A field whose widgets all sat on flattened
+/// pages (or a merged field+widget dropped with its page's `/Annots`) has
+/// none — its `/V` value could echo redacted text the user typed, invisibly
+/// to text-extraction-based verification, so the scrub drops it. At the depth
+/// limit the field is treated as live (kept) — the postcondition check uses
+/// the same rule, so a pathological tree blocks nothing spuriously.
+fn field_has_live_widget(
+    doc: &Document,
+    id: ObjectId,
+    live: &HashSet<ObjectId>,
+    depth: u8,
+) -> bool {
+    if depth == 0 {
+        return true;
+    }
+    let Some(dict) = doc.get_object(id).ok().and_then(|o| o.as_dict().ok()) else {
+        return false;
+    };
+    match dict.get(b"Kids") {
+        // Hierarchical field: live iff any widget below it is live.
+        Ok(Object::Array(kids)) if !kids.is_empty() => kids
+            .iter()
+            .filter_map(|k| k.as_reference().ok())
+            .any(|kid| field_has_live_widget(doc, kid, live, depth - 1)),
+        // Terminal node: the merged field+widget object itself.
+        _ => live.contains(&id),
     }
 }
 
-/// Scrubs the document-level leak vectors: the Info dictionary, the catalog's
-/// XMP `/Metadata` and `/OpenAction`, the `/JavaScript` and `/EmbeddedFiles`
-/// name trees, page thumbnails (all via `step_strip_extras`), and AcroForm
-/// field entries orphaned by the flatten. Ends with a prune so the scrubbed
-/// objects don't survive as unreferenced garbage still containing the text.
-fn scrub_leak_vectors(doc: &mut Document, removed_annots: &HashSet<ObjectId>) {
-    crate::commands::optimize::step_strip_extras(doc);
-    doc.trailer.remove(b"Info");
-
-    let acroform = doc
-        .catalog()
+/// Removes dead widget references from a surviving field's `/Kids`,
+/// recursively, so the dropped widgets (and their appearance streams, which
+/// can paint the field's text) become unreachable and are pruned.
+fn prune_dead_kids(doc: &mut Document, id: ObjectId, live: &HashSet<ObjectId>, depth: u8) {
+    if depth == 0 {
+        return;
+    }
+    let kids: Vec<ObjectId> = doc
+        .get_object(id)
         .ok()
-        .and_then(|c| c.get(b"AcroForm").ok().cloned());
+        .and_then(|o| o.as_dict().ok())
+        .and_then(|d| d.get(b"Kids").ok())
+        .and_then(|o| o.as_array().ok())
+        .map(|a| a.iter().filter_map(|o| o.as_reference().ok()).collect())
+        .unwrap_or_default();
+    if kids.is_empty() {
+        return;
+    }
+    let retained: Vec<ObjectId> = kids
+        .into_iter()
+        .filter(|&kid| field_has_live_widget(doc, kid, live, depth - 1))
+        .collect();
+    for &kid in &retained {
+        prune_dead_kids(doc, kid, live, depth - 1);
+    }
+    if let Ok(d) = doc.get_dictionary_mut(id) {
+        d.set(
+            "Kids",
+            Object::Array(retained.iter().map(|&k| Object::Reference(k)).collect()),
+        );
+    }
+}
+
+/// The AcroForm `/Fields` entries as object ids, resolving an indirect
+/// `/AcroForm` and an indirect `/Fields` array.
+fn acroform_field_ids(doc: &Document) -> Vec<ObjectId> {
+    let acroform = match doc.catalog().ok().and_then(|c| c.get(b"AcroForm").ok().cloned()) {
+        Some(Object::Reference(id)) => doc.get_dictionary(id).ok().cloned(),
+        Some(Object::Dictionary(d)) => Some(d),
+        _ => None,
+    };
+    let fields = match acroform.and_then(|a| a.get(b"Fields").ok().cloned()) {
+        Some(Object::Array(a)) => Some(a),
+        Some(Object::Reference(r)) => {
+            doc.get_object(r).ok().and_then(|o| o.as_array().ok()).cloned()
+        }
+        _ => None,
+    };
+    fields
+        .map(|a| a.iter().filter_map(|o| o.as_reference().ok()).collect())
+        .unwrap_or_default()
+}
+
+/// Drops every AcroForm field — hierarchical or merged — with no widget left
+/// on any page, and prunes dead widget refs from surviving fields' `/Kids`.
+/// Keyed on which widgets are *still referenced* (rather than which were
+/// removed), so pre-existing orphan fields are cleaned too and the
+/// verification postcondition ("no field without a live widget") holds by
+/// construction.
+fn scrub_acroform(doc: &mut Document) {
+    let field_ids = acroform_field_ids(doc);
+    if field_ids.is_empty() {
+        return;
+    }
+    let live = live_annot_ids(doc);
+    let retained: Vec<ObjectId> = field_ids
+        .into_iter()
+        .filter(|&id| field_has_live_widget(doc, id, &live, FIELD_TREE_MAX_DEPTH))
+        .collect();
+    for &id in &retained {
+        prune_dead_kids(doc, id, &live, FIELD_TREE_MAX_DEPTH);
+    }
+
+    let fields_array =
+        Object::Array(retained.iter().map(|&id| Object::Reference(id)).collect());
+    let acroform = doc.catalog().ok().and_then(|c| c.get(b"AcroForm").ok().cloned());
     match acroform {
         Some(Object::Reference(id)) => {
             if let Ok(d) = doc.get_dictionary_mut(id) {
-                filter_acroform_fields(d, removed_annots);
+                d.set("Fields", fields_array);
             }
         }
         Some(Object::Dictionary(_)) => {
             if let Ok(catalog) = doc.catalog_mut() {
                 if let Ok(Object::Dictionary(d)) = catalog.get_mut(b"AcroForm") {
-                    filter_acroform_fields(d, removed_annots);
+                    d.set("Fields", fields_array);
                 }
             }
         }
         _ => {}
     }
+}
 
+/// Scrubs the document-level leak vectors: the Info dictionary; the catalog's
+/// XMP `/Metadata` and `/OpenAction`, the `/JavaScript` and `/EmbeddedFiles`
+/// name trees, page thumbnails (all via `step_strip_extras`); the structure
+/// tree and outlines; and AcroForm fields orphaned by the flatten. Ends with
+/// a prune so the scrubbed objects don't survive as unreferenced garbage
+/// still containing the text.
+///
+/// The structure tree (`/StructTreeRoot`) and bookmarks (`/Outlines`) are
+/// dropped wholesale: a tagged PDF's `/ActualText`/`/Alt` strings and bookmark
+/// titles routinely duplicate visible text, none of the verification checks
+/// can read them (pdfium's text APIs cover page content only), and there is
+/// no provable way to keep just the "safe" parts. The redacted copy loses
+/// accessibility tagging and bookmarks — the standard redaction trade-off.
+fn scrub_leak_vectors(doc: &mut Document) {
+    crate::commands::optimize::step_strip_extras(doc);
+    doc.trailer.remove(b"Info");
+    if let Ok(catalog) = doc.catalog_mut() {
+        catalog.remove(b"StructTreeRoot");
+        catalog.remove(b"MarkInfo");
+        catalog.remove(b"Outlines");
+    }
+    scrub_acroform(doc);
     doc.prune_objects();
+}
+
+/// Check 4 (fail-closed): asserts the scrub's structural postconditions on
+/// the final bytes, so a scrub regression (or a text-bearing structure the
+/// text-based checks can't see) can never yield a false "verified". Returns
+/// human-readable violations; any entry blocks Save As.
+fn verify_scrub_postconditions(
+    final_bytes: &[u8],
+    flattened_pages: &HashSet<u32>,
+) -> Result<Vec<String>, AppError> {
+    let doc = Document::load_mem(final_bytes)
+        .map_err(|e| AppError::lopdf("Failed to reparse redacted output", e))?;
+    let mut violations = Vec::new();
+
+    if doc.trailer.get(b"Info").is_ok() {
+        violations.push("document Info dictionary present".to_string());
+    }
+    if let Ok(catalog) = doc.catalog() {
+        for key in ["Metadata", "StructTreeRoot", "MarkInfo", "Outlines", "OpenAction"] {
+            if catalog.get(key.as_bytes()).is_ok() {
+                violations.push(format!("catalog /{key} present"));
+            }
+        }
+        let names = catalog
+            .get(b"Names")
+            .ok()
+            .and_then(|o| match o {
+                Object::Reference(r) => doc.get_dictionary(*r).ok(),
+                Object::Dictionary(d) => Some(d),
+                _ => None,
+            });
+        if let Some(names) = names {
+            for key in ["JavaScript", "EmbeddedFiles"] {
+                if names.get(key.as_bytes()).is_ok() {
+                    violations.push(format!("name tree /{key} present"));
+                }
+            }
+        }
+    }
+
+    for (&page_num, &page_id) in &doc.get_pages() {
+        if !flattened_pages.contains(&page_num) {
+            continue;
+        }
+        if let Ok(page) = doc.get_dictionary(page_id) {
+            for key in ["Annots", "Metadata", "PieceInfo", "Thumb"] {
+                if page.get(key.as_bytes()).is_ok() {
+                    violations.push(format!("flattened page {page_num}: /{key} present"));
+                }
+            }
+        }
+    }
+
+    // No form field may survive without a widget on some page — a widget-less
+    // field's /V is invisible to the text checks yet fully recoverable.
+    let live = live_annot_ids(&doc);
+    for id in acroform_field_ids(&doc) {
+        if !field_has_live_widget(&doc, id, &live, FIELD_TREE_MAX_DEPTH) {
+            violations.push(format!("form field without a widget (object {} {})", id.0, id.1));
+        }
+    }
+
+    Ok(violations)
 }
 
 // ── Verification ────────────────────────────────────────────────────────────
 
 /// Verifies redacted output. Runs on `final_bytes` loaded fresh — the artifact
 /// that will be written to disk, after the re-OCR pass. Returns the leaked
-/// regions (empty = verified) and whether the OCR check ran.
+/// regions, whether the OCR check ran, and any structural-postcondition
+/// violations (checks 1–4; empty leaks + empty violations = verified).
 pub(crate) fn verify_redactions(
     pdfium: &Pdfium,
     final_bytes: &[u8],
     regions: &[RedactRegion],
     queries: &[String],
     engine: &Arc<dyn OcrEngine>,
-) -> Result<(Vec<RedactRegion>, bool), AppError> {
+) -> Result<(Vec<RedactRegion>, bool, Vec<String>), AppError> {
     let doc = pdfium
         .load_pdf_from_byte_vec(final_bytes.to_vec(), None)
         .map_err(|e| AppError::pdfium("Failed to reload redacted output for verification", e))?;
@@ -450,7 +641,13 @@ pub(crate) fn verify_redactions(
         }
     }
 
-    Ok((leaks, ocr_check_ran))
+    // Check 4: structural postconditions (fail-closed) — leak vectors the
+    // text-based checks above cannot see (structure tree, outlines, metadata,
+    // widget-less form fields) must be absent from the output.
+    let flattened: HashSet<u32> = by_page.keys().copied().collect();
+    let structural_violations = verify_scrub_postconditions(final_bytes, &flattened)?;
+
+    Ok((leaks, ocr_check_ran, structural_violations))
 }
 
 // ── The pipeline ────────────────────────────────────────────────────────────
@@ -481,6 +678,7 @@ pub(crate) fn apply_redactions_impl(
         pages_flattened: 0,
         verified: false,
         leaks: Vec::new(),
+        structural_violations: Vec::new(),
         ocr_check_ran: false,
         reocr_pages: 0,
         cancelled: true,
@@ -511,7 +709,6 @@ pub(crate) fn apply_redactions_impl(
 
     // Flatten each redacted page.
     let flatten_total = by_page.len() as u32;
-    let mut removed_annots: HashSet<ObjectId> = HashSet::new();
     for (i, (&page_num, rects)) in by_page.iter().enumerate() {
         if cancel.load(Ordering::Relaxed) {
             return Ok((cancelled_result(), None));
@@ -542,12 +739,11 @@ pub(crate) fn apply_redactions_impl(
         let &page_id = page_ids.get(&page_num).ok_or_else(|| {
             AppError::Other(format!("Page {page_num} not found in the PDF object tree"))
         })?;
-        removed_annots
-            .extend(replace_page_with_image(&mut ldoc, page_id, jpeg, bw, bh, page_w, page_h)?);
+        replace_page_with_image(&mut ldoc, page_id, jpeg, bw, bh, page_w, page_h)?;
     }
     drop(fdoc);
 
-    scrub_leak_vectors(&mut ldoc, &removed_annots);
+    scrub_leak_vectors(&mut ldoc);
 
     let mut flattened = Vec::new();
     ldoc.save_to(&mut flattened)
@@ -609,15 +805,16 @@ pub(crate) fn apply_redactions_impl(
     // Verification runs on the final bytes — the artifact Save As will write —
     // reloaded fresh, after the re-OCR pass.
     emit(RedactProgress { stage: RedactStage::Verify, page: 0, total: 0 });
-    let (leaks, ocr_check_ran) =
+    let (leaks, ocr_check_ran, structural_violations) =
         verify_redactions(pdfium, &final_bytes, regions, verify_queries, engine)?;
 
     Ok((
         RedactionResult {
             regions: regions.len() as u32,
             pages_flattened: flatten_total,
-            verified: leaks.is_empty(),
+            verified: leaks.is_empty() && structural_violations.is_empty(),
             leaks,
+            structural_violations,
             ocr_check_ran,
             reocr_pages,
             cancelled: false,
@@ -1071,7 +1268,7 @@ mod tests {
         assert!(!regions.is_empty());
 
         // The wrong approach: text still in the content stream under the box.
-        let (leaks, _ocr_ran) =
+        let (leaks, _ocr_ran, _violations) =
             verify_redactions(pdfium, &bytes, &regions, &["SECRET".to_string()], &empty_engine())
                 .expect("verify");
 
@@ -1134,6 +1331,288 @@ mod tests {
         assert!(
             !out.windows(needle.len()).any(|w| w == needle),
             "redacted metadata string must not survive in the output bytes"
+        );
+    }
+
+    /// Structure-tree `/ActualText`, bookmark titles, and page-level
+    /// `/Metadata`/`/PieceInfo` all duplicate text invisibly to pdfium's text
+    /// APIs; the scrub must remove them and the output must carry no echo.
+    #[test]
+    fn redaction_scrubs_struct_tree_outlines_and_page_extras() {
+        let _guard = crate::test_pdfium_guard();
+        let pdfium = crate::test_pdfium();
+
+        let bytes = {
+            let mut doc = Document::load_mem(&text_pdf_bytes(&["Top Secret"])).expect("parse");
+            let elem = doc.add_object(dictionary! {
+                "Type" => "StructElem",
+                "S" => "P",
+                "ActualText" => Object::string_literal("SECRET heading"),
+            });
+            let root = doc.add_object(dictionary! {
+                "Type" => "StructTreeRoot",
+                "K" => vec![Object::Reference(elem)],
+            });
+            let outlines_id = doc.new_object_id();
+            let item = doc.add_object(dictionary! {
+                "Title" => Object::string_literal("SECRET section"),
+                "Parent" => Object::Reference(outlines_id),
+            });
+            doc.objects.insert(
+                outlines_id,
+                Object::Dictionary(dictionary! {
+                    "Type" => "Outlines",
+                    "First" => Object::Reference(item),
+                    "Last" => Object::Reference(item),
+                    "Count" => Object::Integer(1),
+                }),
+            );
+            let meta_id = doc.add_object(Stream::new(
+                dictionary! { "Type" => "Metadata", "Subtype" => "XML" },
+                b"<x>SECRET meta</x>".to_vec(),
+            ));
+            let catalog_id = doc
+                .trailer
+                .get(b"Root")
+                .and_then(Object::as_reference)
+                .expect("root");
+            {
+                let catalog = doc.get_dictionary_mut(catalog_id).expect("catalog");
+                catalog.set("StructTreeRoot", Object::Reference(root));
+                catalog.set("MarkInfo", Object::Dictionary(dictionary! { "Marked" => true }));
+                catalog.set("Outlines", Object::Reference(outlines_id));
+            }
+            let page_id = *doc.get_pages().get(&1).expect("page 1");
+            {
+                let page = doc.get_dictionary_mut(page_id).expect("page");
+                page.set("Metadata", Object::Reference(meta_id));
+                page.set(
+                    "PieceInfo",
+                    Object::Dictionary(dictionary! {
+                        "SomeApp" => dictionary! {
+                            "Private" => Object::string_literal("SECRET note"),
+                        },
+                    }),
+                );
+            }
+            let mut out = Vec::new();
+            doc.save_to(&mut out).expect("serialize");
+            out
+        };
+
+        let (result, output) = apply_redactions_impl(
+            &no_progress,
+            pdfium,
+            &bytes,
+            &[full_page_region(1)],
+            &["SECRET".to_string()],
+            150.0,
+            &empty_engine(),
+            &not_cancelled(),
+        )
+        .expect("apply");
+        assert!(
+            result.verified,
+            "leaks: {:?}, violations: {:?}",
+            result.leaks, result.structural_violations
+        );
+
+        let out = output.expect("output bytes");
+        let doc = Document::load_mem(&out).expect("parse output");
+        let catalog = doc.catalog().expect("catalog");
+        for key in ["StructTreeRoot", "MarkInfo", "Outlines"] {
+            assert!(catalog.get(key.as_bytes()).is_err(), "/{key} must be removed");
+        }
+        let page = doc.get_dictionary(*doc.get_pages().get(&1).unwrap()).expect("page");
+        assert!(page.get(b"Metadata").is_err(), "page /Metadata must be removed");
+        assert!(page.get(b"PieceInfo").is_err(), "page /PieceInfo must be removed");
+        for needle in [
+            b"SECRET heading".as_slice(),
+            b"SECRET section",
+            b"SECRET meta",
+            b"SECRET note",
+        ] {
+            assert!(
+                !out.windows(needle.len()).any(|w| w == needle),
+                "{} must not survive in the output bytes",
+                String::from_utf8_lossy(needle)
+            );
+        }
+    }
+
+    /// A two-page document with one hierarchical text field (separate parent
+    /// object holding /V, widget kids on both pages).
+    fn hierarchical_form_pdf_bytes() -> Vec<u8> {
+        let mut doc = Document::load_mem(&text_pdf_bytes(&["page one", "page two"])).expect("parse");
+        let parent_id = doc.new_object_id();
+        let widget = |doc: &mut Document| {
+            doc.add_object(dictionary! {
+                "Type" => "Annot",
+                "Subtype" => "Widget",
+                "Rect" => vec![
+                    Object::Integer(20), Object::Integer(20),
+                    Object::Integer(120), Object::Integer(50),
+                ],
+                "F" => Object::Integer(4),
+                "Parent" => Object::Reference(parent_id),
+            })
+        };
+        let w1 = widget(&mut doc);
+        let w2 = widget(&mut doc);
+        doc.objects.insert(
+            parent_id,
+            Object::Dictionary(dictionary! {
+                "FT" => "Tx",
+                "T" => Object::string_literal("ssn"),
+                "V" => Object::string_literal("SECRET-123"),
+                "Kids" => vec![Object::Reference(w1), Object::Reference(w2)],
+            }),
+        );
+        let pages = doc.get_pages();
+        for (page_num, w) in [(1u32, w1), (2u32, w2)] {
+            let page_id = *pages.get(&page_num).expect("page");
+            doc.get_dictionary_mut(page_id)
+                .expect("page dict")
+                .set("Annots", vec![Object::Reference(w)]);
+        }
+        let acroform_id = doc.add_object(dictionary! {
+            "Fields" => vec![Object::Reference(parent_id)],
+        });
+        let catalog_id = doc
+            .trailer
+            .get(b"Root")
+            .and_then(Object::as_reference)
+            .expect("root");
+        doc.get_dictionary_mut(catalog_id)
+            .expect("catalog")
+            .set("AcroForm", Object::Reference(acroform_id));
+        let mut out = Vec::new();
+        doc.save_to(&mut out).expect("serialize");
+        out
+    }
+
+    /// A hierarchical field whose widgets ALL sat on flattened pages is
+    /// dropped — its /V (typed by the user, invisible to text extraction)
+    /// must not survive.
+    #[test]
+    fn hierarchical_field_with_all_widgets_flattened_is_dropped() {
+        let _guard = crate::test_pdfium_guard();
+        let pdfium = crate::test_pdfium();
+        let bytes = hierarchical_form_pdf_bytes();
+
+        let (result, output) = apply_redactions_impl(
+            &no_progress,
+            pdfium,
+            &bytes,
+            &[full_page_region(1), full_page_region(2)],
+            &[],
+            150.0,
+            &empty_engine(),
+            &not_cancelled(),
+        )
+        .expect("apply");
+        assert!(
+            result.verified,
+            "leaks: {:?}, violations: {:?}",
+            result.leaks, result.structural_violations
+        );
+
+        let out = output.expect("output bytes");
+        let doc = Document::load_mem(&out).expect("parse output");
+        assert!(acroform_field_ids(&doc).is_empty(), "orphaned field must be dropped");
+        let needle = b"SECRET-123";
+        assert!(
+            !out.windows(needle.len()).any(|w| w == needle),
+            "the field value must not survive in the output bytes"
+        );
+    }
+
+    /// A field with a surviving widget on an unredacted page keeps its value
+    /// (it is visible content the user chose not to redact), but the dead
+    /// widget is pruned from its /Kids.
+    #[test]
+    fn hierarchical_field_with_surviving_widget_is_kept_and_pruned() {
+        let _guard = crate::test_pdfium_guard();
+        let pdfium = crate::test_pdfium();
+        let bytes = hierarchical_form_pdf_bytes();
+
+        let (result, output) = apply_redactions_impl(
+            &no_progress,
+            pdfium,
+            &bytes,
+            &[full_page_region(1)], // page 2's widget survives
+            &[],
+            150.0,
+            &empty_engine(),
+            &not_cancelled(),
+        )
+        .expect("apply");
+        assert!(
+            result.verified,
+            "leaks: {:?}, violations: {:?}",
+            result.leaks, result.structural_violations
+        );
+
+        let doc = Document::load_mem(&output.expect("output bytes")).expect("parse output");
+        let fields = acroform_field_ids(&doc);
+        assert_eq!(fields.len(), 1, "the partially-live field must be kept");
+        let parent = doc.get_dictionary(fields[0]).expect("field");
+        assert!(parent.get(b"V").is_ok(), "the surviving field keeps its value");
+        let kids = parent.get(b"Kids").and_then(|o| o.as_array()).expect("kids");
+        assert_eq!(kids.len(), 1, "the flattened page's widget must be pruned from /Kids");
+    }
+
+    /// Check 4 fails closed: if a text-bearing structure the text checks can't
+    /// see survives into the output (here: an injected structure tree), the
+    /// verifier refuses to certify even though checks 1–3 pass.
+    #[test]
+    fn verification_fails_closed_on_surviving_struct_tree() {
+        let _guard = crate::test_pdfium_guard();
+        let pdfium = crate::test_pdfium();
+        let bytes = text_pdf_bytes(&["Top Secret"]);
+        let regions = [full_page_region(1)];
+
+        let (result, output) = apply_redactions_impl(
+            &no_progress,
+            pdfium,
+            &bytes,
+            &regions,
+            &[],
+            150.0,
+            &empty_engine(),
+            &not_cancelled(),
+        )
+        .expect("apply");
+        assert!(result.verified, "baseline must verify");
+
+        // Simulate a scrub regression: re-inject a structure tree.
+        let tampered = {
+            let mut doc = Document::load_mem(&output.expect("output")).expect("parse");
+            let elem = doc.add_object(dictionary! {
+                "Type" => "StructElem",
+                "S" => "P",
+                "ActualText" => Object::string_literal("SECRET heading"),
+            });
+            let root = doc.add_object(dictionary! {
+                "Type" => "StructTreeRoot",
+                "K" => vec![Object::Reference(elem)],
+            });
+            let catalog_id = doc.trailer.get(b"Root").and_then(Object::as_reference).unwrap();
+            doc.get_dictionary_mut(catalog_id)
+                .unwrap()
+                .set("StructTreeRoot", Object::Reference(root));
+            let mut out = Vec::new();
+            doc.save_to(&mut out).expect("serialize");
+            out
+        };
+
+        let (leaks, _ocr, violations) =
+            verify_redactions(pdfium, &tampered, &regions, &[], &empty_engine())
+                .expect("verify");
+        assert!(leaks.is_empty(), "checks 1–3 see nothing — that is the point");
+        assert!(
+            violations.iter().any(|v| v.contains("StructTreeRoot")),
+            "check 4 must flag the surviving structure tree, got: {violations:?}"
         );
     }
 
