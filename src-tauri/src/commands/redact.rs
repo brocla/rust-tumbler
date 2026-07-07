@@ -1591,6 +1591,17 @@ mod tests {
             "clean page",
         ]))
         .expect("parse base");
+        inject_leak_vectors(&mut doc, secret);
+        let mut out = Vec::new();
+        doc.save_to(&mut out).expect("serialize");
+        out
+    }
+
+    /// Seeds `secret` into every known document-level leak vector of an
+    /// already-parsed document (the injections attach to page 1). Shared by
+    /// [`leaky_pdf_bytes`] (the automated-test fixture) and the checked-in
+    /// live-test fixture written by [`dump_leaky_fixture`].
+    fn inject_leak_vectors(doc: &mut Document, secret: &str) {
         let catalog_id = doc
             .trailer
             .get(b"Root")
@@ -1730,25 +1741,125 @@ mod tests {
                 vec![Object::Reference(annot), Object::Reference(widget)],
             );
         }
-
-        let mut out = Vec::new();
-        doc.save_to(&mut out).expect("serialize");
-        out
     }
 
     fn count_occurrences(haystack: &[u8], needle: &[u8]) -> usize {
         haystack.windows(needle.len()).filter(|w| *w == needle).count()
     }
 
-    /// Manual-testing helper, not a test: writes the all-leak-vectors fixture
-    /// to `C:\tmp\leaky-fixture.pdf` for live testing in the app. Run with:
-    /// `cargo test dump_leaky_fixture -- --ignored --test-threads=1`
+    /// Builds a document of US-letter pages, each carrying the given lines
+    /// at 12pt Helvetica from the top-left. Lines must not contain `(`, `)`,
+    /// or `\` (written as PDF literal strings, unescaped).
+    fn lines_pdf_bytes(pages: &[&[&str]]) -> Vec<u8> {
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        let font_id = doc.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "Helvetica",
+            "Encoding" => "WinAnsiEncoding",
+        });
+        let mut kids = Vec::new();
+        for lines in pages {
+            let mut content = String::new();
+            for (i, line) in lines.iter().enumerate() {
+                let y = 750 - (i as i32) * 18;
+                content.push_str(&format!("BT /F1 12 Tf 40 {y} Td ({line}) Tj ET\n"));
+            }
+            let cid = doc.add_object(Stream::new(Dictionary::new(), content.into_bytes()));
+            let page_id = doc.add_object(dictionary! {
+                "Type" => "Page",
+                "Parent" => pages_id,
+                "Contents" => cid,
+                "MediaBox" => vec![
+                    Object::Integer(0), Object::Integer(0),
+                    Object::Integer(612), Object::Integer(792),
+                ],
+                "Resources" => dictionary! {
+                    "Font" => dictionary! { "F1" => Object::Reference(font_id) },
+                },
+            });
+            kids.push(Object::Reference(page_id));
+        }
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => kids,
+                "Count" => Object::Integer(pages.len() as i64),
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        doc.trailer.set("Root", catalog_id);
+        let mut out = Vec::new();
+        doc.save_to(&mut out).expect("serialize");
+        out
+    }
+
+    /// The checked-in live-test fixture: the same seeded leak vectors as
+    /// [`leaky_pdf_bytes`], on letter pages whose visible text IS the testing
+    /// and regeneration instructions — the fixture documents itself. The
+    /// instructions on page 1 mention the secret, so a correct redaction
+    /// removes them along with everything else; the regeneration note lives
+    /// on the clean page 2 and survives.
+    fn live_test_fixture_bytes() -> Vec<u8> {
+        let page1: &[&str] = &[
+            "Tumbler redaction live-test fixture",
+            "",
+            "The secret word ZANZIBAR appears throughout this file: in this",
+            "visible text, and hidden in the Info dictionary, XMP metadata,",
+            "the structure tree, a bookmark title, page metadata, PieceInfo,",
+            "a sticky-note comment, a form field value, a JavaScript action,",
+            "and an embedded file.",
+            "",
+            "How to live test:",
+            "1. Open this file in Tumbler and open the Redact panel.",
+            "2. Type ZANZIBAR in the find box and click Redact all.",
+            "3. Click Apply redactions and wait for the verification banner.",
+            "4. Expect the green Verified banner; then click Save As and",
+            "   save a copy.",
+            "5. In PowerShell run:  findstr ZANZIBAR your-saved-copy.pdf",
+            "   No output means nothing leaked anywhere in the file.",
+            "   Run the same command against THIS file to see the seeded",
+            "   copies of the secret.",
+            "",
+            "Every ZANZIBAR on this page gets redacted too, including these",
+            "instructions - the saved copy documents its own success by",
+            "showing black boxes where the secret used to be.",
+        ];
+        let page2: &[&str] = &[
+            "This page is clean.",
+            "",
+            "It must remain untouched by the redaction, so after Save As you",
+            "can confirm that unredacted pages keep their text and stay",
+            "searchable.",
+            "",
+            "How to regenerate this fixture:",
+            "",
+            "  cargo test dump_leaky_fixture -- --ignored --test-threads=1",
+            "",
+            "The generator lives in src-tauri/src/commands/redact.rs; it",
+            "writes to src-tauri/tests/fixtures/redaction/leaky-fixture.pdf",
+            "and seeds the secret into every leak vector listed on page 1.",
+        ];
+        let mut doc =
+            Document::load_mem(&lines_pdf_bytes(&[page1, page2])).expect("parse base");
+        inject_leak_vectors(&mut doc, "ZANZIBAR");
+        let mut out = Vec::new();
+        doc.save_to(&mut out).expect("serialize");
+        out
+    }
+
+    /// Manual-testing helper, not a test: regenerates the checked-in
+    /// live-test fixture at `tests/fixtures/redaction/leaky-fixture.pdf`.
+    /// Run with: `cargo test dump_leaky_fixture -- --ignored --test-threads=1`
     #[test]
-    #[ignore = "writes a fixture file for manual live testing"]
+    #[ignore = "regenerates the checked-in live-test fixture"]
     fn dump_leaky_fixture() {
-        let dest = std::path::Path::new(r"C:\tmp\leaky-fixture.pdf");
-        std::fs::create_dir_all(dest.parent().unwrap()).expect("create C:\\tmp");
-        std::fs::write(dest, leaky_pdf_bytes("ZANZIBAR")).expect("write fixture");
+        let dest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/redaction/leaky-fixture.pdf");
+        std::fs::create_dir_all(dest.parent().unwrap()).expect("create fixture dir");
+        std::fs::write(&dest, live_test_fixture_bytes()).expect("write fixture");
         println!("wrote {}", dest.display());
     }
 
