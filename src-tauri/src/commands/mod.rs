@@ -3,6 +3,7 @@ pub mod conformance;
 pub mod document;
 pub mod encryption;
 pub mod forms;
+pub mod linearize;
 pub mod metadata;
 pub mod ocr;
 pub mod optimize;

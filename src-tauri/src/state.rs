@@ -1,3 +1,4 @@
+use crate::commands::linearize::{Linearizer, QpdfLinearizer};
 use crate::commands::ocr::{cache_get, OcrCache, OcrEngine, OcrWord, WindowsOcrEngine};
 use crate::error::AppError;
 use pdfium_render::prelude::*;
@@ -154,6 +155,10 @@ pub struct AppState {
     /// pages without re-running recognition. Shared (`Arc`) so the blocking
     /// export task can hold a handle without borrowing `AppState`.
     ocr_cache: OcrCache,
+    /// Linearization backend behind a trait seam so tests can inject a fake
+    /// (the real `QpdfLinearizer` needs qpdf.dll, absent in CI). See
+    /// `commands::linearize`.
+    pub linearizer: Arc<dyn Linearizer>,
 }
 
 impl AppState {
@@ -169,6 +174,9 @@ impl AppState {
             compress_job: Mutex::new(None),
             ocr_engine: Arc::new(WindowsOcrEngine::new()),
             ocr_cache: Arc::new(Mutex::new(HashMap::new())),
+            linearizer: Arc::new(QpdfLinearizer {
+                dll_path: std::path::PathBuf::from(crate::resolve_qpdf_path()),
+            }),
         }
     }
 
@@ -177,6 +185,14 @@ impl AppState {
     #[cfg(test)]
     pub fn with_ocr_engine(mut self, engine: Arc<dyn OcrEngine>) -> Self {
         self.ocr_engine = engine;
+        self
+    }
+
+    /// Replaces the linearizer with an injected one. Test-only: production wires
+    /// the real `QpdfLinearizer` via `new`.
+    #[cfg(test)]
+    pub fn with_linearizer(mut self, linearizer: Arc<dyn Linearizer>) -> Self {
+        self.linearizer = linearizer;
         self
     }
 

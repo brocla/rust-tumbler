@@ -82,6 +82,7 @@ pub fn run() {
             commands::redact::cancel_redact,
             commands::print::print_document,
             commands::print::cancel_print,
+            commands::linearize::export_linearized_copy,
             commands::startup::take_startup_file,
             commands::theme::get_accent_color,
             commands::app::get_app_version,
@@ -148,6 +149,32 @@ pub fn resolve_pdfium_path() -> String {
 
     // Fallback
     "pdfium.dll".to_string()
+}
+
+/// Resolve the path to qpdf.dll, used by "Save Web-Optimized Copy" (issue #3).
+/// Same resolution order as `resolve_pdfium_path`; unlike pdfium, qpdf.dll is
+/// loaded lazily per export call rather than at startup, so a missing DLL
+/// only fails that one command.
+pub fn resolve_qpdf_path() -> String {
+    let dev_path = std::path::Path::new("resources/qpdf.dll");
+    if dev_path.exists() {
+        return dev_path.to_string_lossy().into_owned();
+    }
+
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            let bundled = exe_dir.join("resources").join("qpdf.dll");
+            if bundled.exists() {
+                return bundled.to_string_lossy().into_owned();
+            }
+            let beside_exe = exe_dir.join("qpdf.dll");
+            if beside_exe.exists() {
+                return beside_exe.to_string_lossy().into_owned();
+            }
+        }
+    }
+
+    "qpdf.dll".to_string()
 }
 
 /// A process-wide mutex that serializes tests which create or mutate pdfium
