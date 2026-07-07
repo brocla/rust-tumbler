@@ -1562,6 +1562,253 @@ mod tests {
         assert_eq!(kids.len(), 1, "the flattened page's widget must be pruned from /Kids");
     }
 
+    /// Two pages — the secret visible on page 1, a clean page 2 — with the
+    /// secret also echoed into **every known document-level leak vector**:
+    ///
+    /// - Info dictionary `/Title`
+    /// - catalog XMP `/Metadata` stream
+    /// - structure tree `/ActualText` + `/Alt` (tagged PDF)
+    /// - `/Outlines` bookmark `/Title`
+    /// - page 1 `/Metadata` stream and `/PieceInfo` private data
+    /// - a page 1 text annotation's `/Contents`
+    /// - a hierarchical AcroForm field `/V` whose only widget is on page 1
+    /// - `/Names` `/JavaScript` action source and an `/EmbeddedFiles` payload
+    ///
+    /// All injected streams are uncompressed, so a raw byte scan of the
+    /// redacted output is a sound leak detector for this fixture (nothing in
+    /// the pipeline recompresses pre-existing streams).
+    fn leaky_pdf_bytes(secret: &str) -> Vec<u8> {
+        let mut doc = Document::load_mem(&text_pdf_bytes(&[
+            &format!("{secret} visible"),
+            "clean page",
+        ]))
+        .expect("parse base");
+        let catalog_id = doc
+            .trailer
+            .get(b"Root")
+            .and_then(Object::as_reference)
+            .expect("root");
+        let page1 = *doc.get_pages().get(&1).expect("page 1");
+
+        // Info + XMP.
+        let info_id = doc.add_object(dictionary! {
+            "Title" => Object::string_literal(format!("{secret} report")),
+        });
+        doc.trailer.set("Info", info_id);
+        let xmp_id = doc.add_object(Stream::new(
+            dictionary! { "Type" => "Metadata", "Subtype" => "XML" },
+            format!("<xmp>{secret} xmp</xmp>").into_bytes(),
+        ));
+
+        // Structure tree + MarkInfo.
+        let elem = doc.add_object(dictionary! {
+            "Type" => "StructElem",
+            "S" => "P",
+            "ActualText" => Object::string_literal(format!("{secret} actualtext")),
+            "Alt" => Object::string_literal(format!("{secret} alt")),
+        });
+        let struct_root = doc.add_object(dictionary! {
+            "Type" => "StructTreeRoot",
+            "K" => vec![Object::Reference(elem)],
+        });
+
+        // Outlines.
+        let outlines_id = doc.new_object_id();
+        let item = doc.add_object(dictionary! {
+            "Title" => Object::string_literal(format!("{secret} bookmark")),
+            "Parent" => Object::Reference(outlines_id),
+        });
+        doc.objects.insert(
+            outlines_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Outlines",
+                "First" => Object::Reference(item),
+                "Last" => Object::Reference(item),
+                "Count" => Object::Integer(1),
+            }),
+        );
+
+        // Page 1 extras: metadata, private data, a quoting annotation.
+        let page_meta = doc.add_object(Stream::new(
+            dictionary! { "Type" => "Metadata", "Subtype" => "XML" },
+            format!("<x>{secret} pagemeta</x>").into_bytes(),
+        ));
+        let annot = doc.add_object(dictionary! {
+            "Type" => "Annot",
+            "Subtype" => "Text",
+            "Rect" => vec![
+                Object::Integer(10), Object::Integer(10),
+                Object::Integer(30), Object::Integer(30),
+            ],
+            "Contents" => Object::string_literal(format!("{secret} comment")),
+        });
+
+        // Hierarchical form field: parent holds /V, widget lives on page 1.
+        let parent_id = doc.new_object_id();
+        let widget = doc.add_object(dictionary! {
+            "Type" => "Annot",
+            "Subtype" => "Widget",
+            "Rect" => vec![
+                Object::Integer(20), Object::Integer(20),
+                Object::Integer(120), Object::Integer(50),
+            ],
+            "F" => Object::Integer(4),
+            "Parent" => Object::Reference(parent_id),
+        });
+        doc.objects.insert(
+            parent_id,
+            Object::Dictionary(dictionary! {
+                "FT" => "Tx",
+                "T" => Object::string_literal("ssn"),
+                "V" => Object::string_literal(format!("{secret} fieldvalue")),
+                "Kids" => vec![Object::Reference(widget)],
+            }),
+        );
+        let acroform_id = doc.add_object(dictionary! {
+            "Fields" => vec![Object::Reference(parent_id)],
+        });
+
+        // Name trees: JavaScript action + embedded file payload.
+        let js_action = doc.add_object(dictionary! {
+            "S" => "JavaScript",
+            "JS" => Object::string_literal(format!("app.alert(\"{secret} js\");")),
+        });
+        let file_stream = doc.add_object(Stream::new(
+            dictionary! { "Type" => "EmbeddedFile" },
+            format!("{secret} embedded payload").into_bytes(),
+        ));
+        let filespec = doc.add_object(dictionary! {
+            "Type" => "Filespec",
+            "F" => Object::string_literal("leak.txt"),
+            "EF" => dictionary! { "F" => Object::Reference(file_stream) },
+        });
+        let names_id = doc.add_object(dictionary! {
+            "JavaScript" => dictionary! {
+                "Names" => vec![
+                    Object::string_literal("docjs"),
+                    Object::Reference(js_action),
+                ],
+            },
+            "EmbeddedFiles" => dictionary! {
+                "Names" => vec![
+                    Object::string_literal("leak.txt"),
+                    Object::Reference(filespec),
+                ],
+            },
+        });
+
+        {
+            let catalog = doc.get_dictionary_mut(catalog_id).expect("catalog");
+            catalog.set("Metadata", Object::Reference(xmp_id));
+            catalog.set("StructTreeRoot", Object::Reference(struct_root));
+            catalog.set("MarkInfo", Object::Dictionary(dictionary! { "Marked" => true }));
+            catalog.set("Outlines", Object::Reference(outlines_id));
+            catalog.set("AcroForm", Object::Reference(acroform_id));
+            catalog.set("Names", Object::Reference(names_id));
+        }
+        {
+            let page = doc.get_dictionary_mut(page1).expect("page 1");
+            page.set("Metadata", Object::Reference(page_meta));
+            page.set(
+                "PieceInfo",
+                Object::Dictionary(dictionary! {
+                    "SomeApp" => dictionary! {
+                        "Private" => Object::string_literal(format!("{secret} pieceinfo")),
+                    },
+                }),
+            );
+            page.set(
+                "Annots",
+                vec![Object::Reference(annot), Object::Reference(widget)],
+            );
+        }
+
+        let mut out = Vec::new();
+        doc.save_to(&mut out).expect("serialize");
+        out
+    }
+
+    fn count_occurrences(haystack: &[u8], needle: &[u8]) -> usize {
+        haystack.windows(needle.len()).filter(|w| *w == needle).count()
+    }
+
+    /// The headline guarantee, end to end: redact the page carrying the
+    /// secret, and NO copy of it — page text, metadata, structure tree,
+    /// bookmarks, annotations, form value, scripts, attachments — survives
+    /// anywhere in the saved bytes. The fixture seeds ~12 copies; a sanity
+    /// precondition proves they are really there before the run.
+    #[test]
+    fn redaction_removes_the_secret_from_every_known_leak_vector() {
+        let _guard = crate::test_pdfium_guard();
+        let pdfium = crate::test_pdfium();
+        const SECRET: &[u8] = b"ZANZIBAR";
+        let bytes = leaky_pdf_bytes("ZANZIBAR");
+
+        // Fixture sanity: the secret is seeded broadly (guards fixture rot).
+        assert!(
+            count_occurrences(&bytes, SECRET) >= 11,
+            "fixture must seed the secret into every vector, found {}",
+            count_occurrences(&bytes, SECRET)
+        );
+
+        let (result, output) = apply_redactions_impl(
+            &no_progress,
+            pdfium,
+            &bytes,
+            &[full_page_region(1)],
+            &["ZANZIBAR".to_string()],
+            150.0,
+            &empty_engine(),
+            &not_cancelled(),
+        )
+        .expect("apply");
+        assert!(
+            result.verified,
+            "leaks: {:?}, violations: {:?}",
+            result.leaks, result.structural_violations
+        );
+
+        let out = output.expect("output bytes");
+        assert_eq!(
+            count_occurrences(&out, SECRET),
+            0,
+            "the secret must not survive anywhere in the saved bytes"
+        );
+        // The clean page is untouched.
+        let doc = Document::load_mem(&out).expect("parse output");
+        assert_eq!(doc.get_pages().len(), 2);
+    }
+
+    /// The verifier detects each seeded vector *independently of the scrub*:
+    /// running the structural postcondition check on the un-scrubbed fixture
+    /// (as if the scrub had silently done nothing) must flag every area.
+    #[test]
+    fn postcondition_check_detects_every_seeded_leak_vector() {
+        let bytes = leaky_pdf_bytes("ZANZIBAR");
+        let flattened: HashSet<u32> = HashSet::from([1]);
+
+        let violations =
+            verify_scrub_postconditions(&bytes, &flattened).expect("postconditions");
+
+        for expected in [
+            "Info dictionary",
+            "/Metadata",       // catalog XMP
+            "/StructTreeRoot",
+            "/MarkInfo",
+            "/Outlines",
+            "/JavaScript",     // name tree
+            "/EmbeddedFiles",  // name tree
+            "page 1: /Annots",
+            "page 1: /Metadata",
+            "page 1: /PieceInfo",
+        ] {
+            assert!(
+                violations.iter().any(|v| v.contains(expected)),
+                "the verifier must flag {expected}; got: {violations:?}"
+            );
+        }
+    }
+
     /// Check 4 fails closed: if a text-bearing structure the text checks can't
     /// see survives into the output (here: an injected structure tree), the
     /// verifier refuses to certify even though checks 1–3 pass.
