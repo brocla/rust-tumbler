@@ -44,6 +44,7 @@ function App() {
   const setCompressProgress = usePdfStore((s) => s.setCompressProgress);
   const redactProgress = usePdfStore((s) => s.redactProgress);
   const setRedactProgress = usePdfStore((s) => s.setRedactProgress);
+  const linearizeProgress = usePdfStore((s) => s.linearizeProgress);
   const openFileRef = useRef<() => Promise<void>>();
   const printRef = useRef<() => Promise<void>>();
   const [printProgress, setPrintProgress] = useState<{ page: number; total: number } | null>(null);
@@ -473,6 +474,13 @@ function App() {
           <div className="print-progress-dialog">
             <p>{describeRedact(redactProgress)}</p>
             <button onClick={() => void invoke("cancel_redact")}>Cancel</button>
+          </div>
+        </div>
+      )}
+      {linearizeProgress && (
+        <div className="print-progress-overlay">
+          <div className="print-progress-dialog">
+            <p>Saving web-optimized copy...</p>
           </div>
         </div>
       )}

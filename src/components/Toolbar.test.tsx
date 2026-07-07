@@ -71,6 +71,13 @@ async function clickAddTextLayer() {
   });
 }
 
+async function clickSaveLinearized() {
+  await act(async () => {
+    fireEvent.click(screen.getByTitle("Save Web-Optimized Copy..."));
+    await new Promise((r) => setTimeout(r, 0));
+  });
+}
+
 describe("Toolbar save / save as (issue #31)", () => {
   beforeEach(() => {
     vi.mocked(invoke).mockReset();
@@ -388,6 +395,108 @@ describe("Toolbar add text layer", () => {
     );
     // No edit happened, so there's nothing to re-verify.
     expect(invoke).not.toHaveBeenCalledWith("get_signature_info", expect.anything());
+  });
+});
+
+describe("Toolbar Save Web-Optimized Copy (issue #3)", () => {
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset();
+    vi.mocked(save).mockReset();
+    vi.mocked(message).mockReset();
+    vi.mocked(message).mockResolvedValue(undefined as never);
+    usePdfStore.setState({ linearizeProgress: false });
+  });
+
+  it("prompts for a destination with a -web suggested name and exports", async () => {
+    vi.mocked(save).mockResolvedValue("C:\\Users\\test\\test-web.pdf");
+    vi.mocked(invoke).mockResolvedValue({ originalSize: 1000, linearizedSize: 1100 });
+
+    renderToolbar();
+    await clickSaveLinearized();
+
+    expect(save).toHaveBeenCalledWith(
+      expect.objectContaining({ defaultPath: "C:\\Users\\test/test-web.pdf" }),
+    );
+    expect(invoke).toHaveBeenCalledWith("export_linearized_copy", {
+      docId: "doc-1",
+      destPath: "C:\\Users\\test\\test-web.pdf",
+    });
+    expect(message).toHaveBeenCalledWith(
+      expect.stringContaining("Saved web-optimized copy (1.1 KB, was 1000 B)."),
+      expect.objectContaining({ title: "Save Web-Optimized Copy" }),
+    );
+  });
+
+  it("does nothing when the save dialog is cancelled", async () => {
+    vi.mocked(save).mockResolvedValue(null);
+
+    renderToolbar();
+    await clickSaveLinearized();
+
+    expect(invoke).not.toHaveBeenCalledWith(
+      "export_linearized_copy",
+      expect.anything(),
+    );
+  });
+
+  it("notes the copy is unencrypted for a password-protected document", async () => {
+    vi.mocked(save).mockResolvedValue("C:\\Users\\test\\test-web.pdf");
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === "export_linearized_copy")
+        return Promise.resolve({ originalSize: 1000, linearizedSize: 1000 });
+      return Promise.resolve(false);
+    });
+    usePdfStore.setState({
+      tabs: [makeTab({ encrypted: true })],
+      activeTabId: "tab-1",
+      ocrProgress: null,
+    });
+    render(<Toolbar onOpenFile={vi.fn()} onPrint={vi.fn()} />);
+
+    await clickSaveLinearized();
+
+    expect(message).toHaveBeenCalledWith(
+      expect.stringContaining("The copy is unencrypted"),
+      expect.objectContaining({ title: "Save Web-Optimized Copy" }),
+    );
+  });
+
+  it("reports a failed export", async () => {
+    vi.mocked(save).mockResolvedValue("C:\\Users\\test\\test-web.pdf");
+    vi.mocked(invoke).mockRejectedValue("qpdf.dll failed to load");
+
+    renderToolbar();
+    await clickSaveLinearized();
+
+    expect(message).toHaveBeenCalledWith(
+      "qpdf.dll failed to load",
+      expect.objectContaining({ title: "Save Web-Optimized Copy", kind: "error" }),
+    );
+  });
+
+  it("sets linearizeProgress while the export is in flight and clears it after", async () => {
+    vi.mocked(save).mockResolvedValue("C:\\Users\\test\\test-web.pdf");
+    let resolveInvoke!: (v: unknown) => void;
+    vi.mocked(invoke).mockImplementation(
+      () => new Promise((resolve) => (resolveInvoke = resolve)),
+    );
+
+    renderToolbar();
+    await act(async () => {
+      fireEvent.click(screen.getByTitle("Save Web-Optimized Copy..."));
+      // Let the save() dialog promise and the invoke() call kick off.
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(usePdfStore.getState().linearizeProgress).toBe(true);
+
+    await act(async () => {
+      resolveInvoke({ originalSize: 500, linearizedSize: 500 });
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    expect(usePdfStore.getState().linearizeProgress).toBe(false);
   });
 });
 
