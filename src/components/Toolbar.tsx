@@ -1,4 +1,4 @@
-import { BookOpen, ChevronLeft, ChevronRight, Eraser, FileSearch, Lock, LockOpen, Moon, MoveHorizontal, MoveVertical, Printer, Save, SaveAll, ScanSearch, ScrollText, Sun, Zap, ZoomIn, ZoomOut } from "lucide-react";
+import { BookOpen, ChevronLeft, ChevronRight, Eraser, FileSearch, Lock, LockOpen, Moon, MoveHorizontal, MoveVertical, Printer, Save, SaveAll, ScanSearch, ScrollText, Sun, ZoomIn, ZoomOut } from "lucide-react";
 import { useEffect, useState } from "react";
 import { save, message, ask } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
@@ -24,12 +24,6 @@ interface AddTextLayerResult {
   cancelled: boolean;
 }
 
-function suggestLinearizedName(fileName: string): string {
-  const dot = fileName.lastIndexOf(".");
-  const base = dot > 0 ? fileName.slice(0, dot) : fileName;
-  return `${base}-linearized.pdf`;
-}
-
 interface ToolbarProps {
   onOpenFile: () => void;
   onPrint: () => void;
@@ -49,7 +43,6 @@ export function Toolbar({ onOpenFile, onPrint }: ToolbarProps) {
   );
   const updateTab = usePdfStore((s) => s.updateTab);
   const setOcrProgress = usePdfStore((s) => s.setOcrProgress);
-  const setLinearizeProgress = usePdfStore((s) => s.setLinearizeProgress);
   const bumpFormEpoch = usePdfStore((s) => s.bumpFormEpoch);
 
   // A password-protected PDF is fully editable (its buffer is decrypted at
@@ -404,46 +397,6 @@ export function Toolbar({ onOpenFile, onPrint }: ToolbarProps) {
     }
   };
 
-  // "Save Linearized Copy" (issue #3): export-only — writes a linearized
-  // ("Fast Web View") copy via qpdf and never touches the buffer or the
-  // original file, so there is no dirty-state/signature interaction to guard
-  // here (unlike the in-place edits above). qpdf's C API gives no incremental
-  // progress, so the overlay is an indeterminate spinner rather than a page
-  // counter. Deliberately not named "web-optimized" — that would imply
-  // compression, a separate, not-guaranteed step (see Compress).
-  const handleSaveLinearized = async () => {
-    if (!activeTab) return;
-    const dir = activeTab.filePath.replace(/[\\/][^\\/]*$/, "");
-    const destPath = await save({
-      filters: [{ name: "PDF", extensions: ["pdf"] }],
-      defaultPath: `${dir}/${suggestLinearizedName(activeTab.fileName)}`,
-    });
-    if (!destPath) return;
-
-    setLinearizeProgress(true);
-    try {
-      await invoke("export_linearized_copy", {
-        docId: activeTab.docId,
-        destPath,
-      });
-      // Deliberately no size comparison here — unlike Compress, linearizing
-      // isn't about file size (it reorders structure and adds a hint
-      // stream), so a before/after byte count would be misleading.
-      const note =
-        activeTab.encrypted
-          ? " The copy is unencrypted (linearized copies are written without password protection)."
-          : "";
-      await message(`Saved linearized copy.${note}`, {
-        title: "Save Linearized Copy",
-        kind: "info",
-      });
-    } catch (err) {
-      await message(String(err), { title: "Save Linearized Copy", kind: "error" });
-    } finally {
-      setLinearizeProgress(false);
-    }
-  };
-
   return (
     <div className="toolbar">
       <div className="toolbar-group">
@@ -614,13 +567,6 @@ export function Toolbar({ onOpenFile, onPrint }: ToolbarProps) {
             title="Export Text..."
           >
             <ScrollText size={18} />
-          </button>
-          <button
-            className="toolbar-button"
-            onClick={() => void handleSaveLinearized()}
-            title="Save Linearized Copy..."
-          >
-            <Zap size={18} />
           </button>
           <button
             className="toolbar-button"

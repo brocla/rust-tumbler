@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { message } from "@tauri-apps/plugin-dialog";
+import { save, message } from "@tauri-apps/plugin-dialog";
+import { Zap } from "lucide-react";
 import { usePdfStore } from "../store/usePdfStore";
 import { confirmBreakingEdit } from "../utils/confirmBreakingEdit";
 import { isSigned, SIGNATURE_EDIT_WARNING } from "../utils/signature";
@@ -121,6 +122,12 @@ function suggestName(fileName: string): string {
   return `${base}-compressed.pdf`;
 }
 
+function suggestLinearizedName(fileName: string): string {
+  const dot = fileName.lastIndexOf(".");
+  const base = dot > 0 ? fileName.slice(0, dot) : fileName;
+  return `${base}-linearized.pdf`;
+}
+
 export function OptimizePanel() {
   const activeTab = usePdfStore((s) => s.tabs.find((t) => t.id === s.activeTabId));
 
@@ -131,6 +138,8 @@ export function OptimizePanel() {
   const [saving, setSaving] = useState(false);
   const [report, setReport] = useState<OptimizationReport | null>(null);
   const [saved, setSaved] = useState(false);
+  const linearizeProgress = usePdfStore((s) => s.linearizeProgress);
+  const setLinearizeProgress = usePdfStore((s) => s.setLinearizeProgress);
 
   // Reset results when the active document changes, so one file's optimization
   // never lingers on another file's panel. The panel stays mounted across tab
@@ -224,12 +233,57 @@ export function OptimizePanel() {
     }
   };
 
+  // "Save Linearized Copy" (issue #3): export-only — writes a linearized
+  // ("Fast Web View") copy via qpdf of the buffer as it currently stands, and
+  // never touches the buffer or the original file. Grouped here with Compress
+  // because together they're "web-optimization" (see the explainer above),
+  // but this is an independent action — it doesn't require a Compress run
+  // first, though the explainer's ordering (compress, then linearize) still
+  // applies if you do want both: run this last, since linearizing after any
+  // further edit (including a later Compress run) would undo it.
+  const handleSaveLinearized = async () => {
+    const dir = activeTab.filePath.replace(/[\\/][^\\/]*$/, "");
+    const destPath = await save({
+      filters: [{ name: "PDF", extensions: ["pdf"] }],
+      defaultPath: `${dir}/${suggestLinearizedName(activeTab.fileName)}`,
+    });
+    if (!destPath) return;
+
+    setLinearizeProgress(true);
+    try {
+      await invoke("export_linearized_copy", { docId: activeTab.docId, destPath });
+      // No size comparison — unlike Compress, linearizing isn't about file
+      // size (it reorders structure and adds a hint stream).
+      const note = activeTab.encrypted
+        ? " The copy is unencrypted (linearized copies are written without password protection)."
+        : "";
+      await message(`Saved linearized copy.${note}`, {
+        title: "Save Linearized Copy",
+        kind: "info",
+      });
+    } catch (err) {
+      await message(String(err), { title: "Save Linearized Copy", kind: "error" });
+    } finally {
+      setLinearizeProgress(false);
+    }
+  };
+
   const results = report?.results ?? [];
   const totalBefore = results.length > 0 ? results[0].sizeBefore : 0;
   const totalAfter = results.length > 0 ? results[results.length - 1].sizeAfter : 0;
 
   return (
     <div className="optimize-panel">
+      <div className="optimize-explainer">
+        Web-optimization prepares a PDF to be accessed efficiently over a network,
+        as two separate steps. <strong>Compress</strong> shrinks the file by
+        removing redundant data. <strong>Save Linearized Copy</strong>, below,
+        reorders the file so a viewer streaming it over the web can render page 1
+        before the rest has downloaded. Linearizing must be the last step — run
+        it after Compress, since any edit afterward (including a later Compress
+        run) undoes it.
+      </div>
+
       <div className="optimize-steps">
         {STEPS.map((step) => (
           <label key={step.id} className="optimize-step">
@@ -337,6 +391,21 @@ export function OptimizePanel() {
           )}
         </div>
       )}
+
+      <div className="optimize-linearize-section">
+        <div className="optimize-linearize-note">
+          Writes a new, separate file — the original and this document's buffer
+          are untouched. Run this last.
+        </div>
+        <button
+          className="optimize-linearize-button"
+          onClick={() => void handleSaveLinearized()}
+          disabled={linearizeProgress}
+        >
+          <Zap size={16} />
+          {linearizeProgress ? "Saving…" : "Save Linearized Copy…"}
+        </button>
+      </div>
     </div>
   );
 }

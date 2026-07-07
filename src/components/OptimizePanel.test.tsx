@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, act, waitFor } from "@testing-library/react";
 import { invoke } from "@tauri-apps/api/core";
-import { save, confirm } from "@tauri-apps/plugin-dialog";
+import { save, confirm, message } from "@tauri-apps/plugin-dialog";
 import { OptimizePanel } from "./OptimizePanel";
 import { usePdfStore } from "../store/usePdfStore";
 import type { TabState } from "../store/usePdfStore";
@@ -329,5 +329,126 @@ describe("OptimizePanel", () => {
 
     expect(screen.queryByText(/Total:/)).toBeNull();
     expect(screen.queryByText("Save As…")).toBeNull();
+  });
+
+  it("explains web-optimization as compress-then-linearize", () => {
+    render(<OptimizePanel />);
+    expect(screen.getByText(/Web-optimization prepares a PDF/)).toBeTruthy();
+    expect(screen.getByText(/Linearizing must be the last step/)).toBeTruthy();
+  });
+});
+
+describe("OptimizePanel Save Linearized Copy (issue #3)", () => {
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset();
+    vi.mocked(save).mockReset();
+    vi.mocked(message).mockReset();
+    vi.mocked(message).mockResolvedValue(undefined as never);
+    usePdfStore.setState({
+      tabs: [makeTab()],
+      activeTabId: "tab-1",
+      activeSidebarTool: "optimize",
+      sidebarWidth: 250,
+      linearizeProgress: false,
+    });
+  });
+
+  function clickSaveLinearized() {
+    return act(async () => {
+      fireEvent.click(screen.getByText("Save Linearized Copy…"));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+  }
+
+  it("is available independent of running Compress first", () => {
+    render(<OptimizePanel />);
+    expect(screen.getByText("Save Linearized Copy…")).toBeEnabled();
+  });
+
+  it("prompts for a destination with a -linearized suggested name and exports", async () => {
+    vi.mocked(save).mockResolvedValue("C:\\Users\\test\\report-linearized.pdf");
+    vi.mocked(invoke).mockResolvedValue(undefined);
+
+    render(<OptimizePanel />);
+    await clickSaveLinearized();
+
+    expect(save).toHaveBeenCalledWith(
+      expect.objectContaining({ defaultPath: "C:\\Users\\test/report-linearized.pdf" }),
+    );
+    expect(invoke).toHaveBeenCalledWith("export_linearized_copy", {
+      docId: "doc-1",
+      destPath: "C:\\Users\\test\\report-linearized.pdf",
+    });
+    expect(message).toHaveBeenCalledWith(
+      "Saved linearized copy.",
+      expect.objectContaining({ title: "Save Linearized Copy" }),
+    );
+  });
+
+  it("does nothing when the save dialog is cancelled", async () => {
+    vi.mocked(save).mockResolvedValue(null);
+
+    render(<OptimizePanel />);
+    await clickSaveLinearized();
+
+    expect(invoke).not.toHaveBeenCalledWith("export_linearized_copy", expect.anything());
+  });
+
+  it("notes the copy is unencrypted for a password-protected document", async () => {
+    vi.mocked(save).mockResolvedValue("C:\\Users\\test\\report-linearized.pdf");
+    vi.mocked(invoke).mockResolvedValue(undefined);
+    usePdfStore.setState({
+      tabs: [makeTab({ encrypted: true })],
+      activeTabId: "tab-1",
+      activeSidebarTool: "optimize",
+      sidebarWidth: 250,
+    });
+
+    render(<OptimizePanel />);
+    await clickSaveLinearized();
+
+    expect(message).toHaveBeenCalledWith(
+      expect.stringContaining("The copy is unencrypted"),
+      expect.objectContaining({ title: "Save Linearized Copy" }),
+    );
+  });
+
+  it("reports a failed export", async () => {
+    vi.mocked(save).mockResolvedValue("C:\\Users\\test\\report-linearized.pdf");
+    vi.mocked(invoke).mockRejectedValue("qpdf.dll failed to load");
+
+    render(<OptimizePanel />);
+    await clickSaveLinearized();
+
+    expect(message).toHaveBeenCalledWith(
+      "qpdf.dll failed to load",
+      expect.objectContaining({ title: "Save Linearized Copy", kind: "error" }),
+    );
+  });
+
+  it("disables the button and shows a busy label while the export is in flight", async () => {
+    vi.mocked(save).mockResolvedValue("C:\\Users\\test\\report-linearized.pdf");
+    let resolveInvoke!: (v: unknown) => void;
+    vi.mocked(invoke).mockImplementation(
+      () => new Promise((resolve) => (resolveInvoke = resolve)),
+    );
+
+    render(<OptimizePanel />);
+    await act(async () => {
+      fireEvent.click(screen.getByText("Save Linearized Copy…"));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(usePdfStore.getState().linearizeProgress).toBe(true);
+    expect(screen.getByText("Saving…")).toBeDisabled();
+
+    await act(async () => {
+      resolveInvoke(undefined);
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    expect(usePdfStore.getState().linearizeProgress).toBe(false);
+    expect(screen.getByText("Save Linearized Copy…")).toBeTruthy();
   });
 });
