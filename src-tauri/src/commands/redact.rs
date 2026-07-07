@@ -776,9 +776,7 @@ pub(crate) fn apply_redactions_impl(
             file_path: String::new(),
             buffer: final_bytes.clone(),
             dirty: false,
-            password: None,
-            encrypted: false,
-            permissions: None,
+            protection: crate::state::Protection::Plaintext,
             linearized: false,
         }));
         let temp_cache: OcrCache = Arc::new(Mutex::new(HashMap::new()));
@@ -1022,12 +1020,15 @@ fn save_redacted_copy_impl(
                 "Verification failed — this redacted copy cannot be saved.".to_string(),
             ));
         }
-        match (&entry.password, entry.encrypted) {
-            (Some(pw), true) => {
-                let permissions = entry.permissions.unwrap_or_else(lopdf::Permissions::all);
-                crate::commands::encryption::encrypt_with_password(&pending.bytes, pw, permissions)?
+        match &entry.protection {
+            crate::state::Protection::Plaintext => pending.bytes.clone(),
+            crate::state::Protection::Encrypted { password, permissions } => {
+                crate::commands::encryption::encrypt_with_password(
+                    &pending.bytes,
+                    password,
+                    *permissions,
+                )?
             }
-            _ => pending.bytes.clone(),
         }
     };
     drop(entry);
@@ -1135,9 +1136,7 @@ mod tests {
                     file_path: format!("{doc_id}.pdf"),
                     buffer: bytes,
                     dirty: false,
-                    password: None,
-                    encrypted: false,
-                    permissions: None,
+                    protection: crate::state::Protection::Plaintext,
                     linearized: false,
                 },
             )
