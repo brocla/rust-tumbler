@@ -34,7 +34,10 @@
     "resources": [
       "resources/pdfium.dll",
       "resources/tumbler-thumbnailer.dll",
-      "resources/qpdf.dll"
+      "resources/qpdf.dll",
+      "resources/msvcp140.dll",
+      "resources/vcruntime140.dll",
+      "resources/vcruntime140_1.dll"
     ],
     "icon": [
       "icons/32x32.png",

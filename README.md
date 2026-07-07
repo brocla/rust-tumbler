@@ -173,10 +173,11 @@ rust-tumbler/
   `qpdf-<version>-msvc64.zip` asset from the
   [qpdf releases](https://github.com/qpdf/qpdf/releases), take
   `bin/qpdf30.dll`, and place it at `src-tauri/resources/qpdf.dll`
-  (not checked into the repo). The MSVC build requires the
-  [Visual C++ redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist)
-  at runtime (present on most systems; without it, only the
-  web-optimized export fails, with an error message)
+  (not checked into the repo). The MSVC build depends at runtime on
+  `msvcp140.dll`, `vcruntime140.dll`, and `vcruntime140_1.dll` from the
+  same zip's `bin/` folder — copy those three alongside `qpdf.dll` in
+  `src-tauri/resources/` too, so the app doesn't rely on the target
+  machine having the Visual C++ redistributable installed
 
 
 

@@ -25,8 +25,11 @@ src-tauri/resources/pdfium.dll
 # Thumbnailer DLL (build artifact, copied from target/ by beforeBuildCommand)
 src-tauri/resources/tumbler-thumbnailer.dll
 
-# qpdf binary (downloaded separately, see README)
+# qpdf binary and its VC++ runtime deps (downloaded separately, see README)
 src-tauri/resources/qpdf.dll
+src-tauri/resources/msvcp140.dll
+src-tauri/resources/vcruntime140.dll
+src-tauri/resources/vcruntime140_1.dll
 node_modules
 
 # Project docs (planning/review notes, not part of the shipped product)
