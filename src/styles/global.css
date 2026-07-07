@@ -1058,7 +1058,7 @@ input[type="radio"].form-check:checked {
 
 .optimize-explainer {
   color: var(--color-text-secondary);
-  font-size: 16px;
+  font-size: 14px;
   line-height: 1.4;
   /* breathing room before the controls. */
   margin-bottom: 40px;
