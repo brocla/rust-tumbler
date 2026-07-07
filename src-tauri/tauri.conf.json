@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicegui-org/nicegui/main/.vscode/tauri-v2.schema.json",
   "productName": "Tumbler",
-  "version": "2.10.1",
+  "version": "2.10.2",
   "identifier": "com.brocla.tumbler",
   "build": {
     "beforeDevCommand": "npm run dev",
