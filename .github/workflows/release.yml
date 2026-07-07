@@ -42,6 +42,22 @@ jobs:
           tar -xzf pdfium.tgz bin/pdfium.dll
           Copy-Item bin/pdfium.dll resources/pdfium.dll -Force
 
+      - name: Download qpdf.dll and MSVC runtime DLLs
+        # qpdf.dll (qpdf30.dll renamed) and the three VC-runtime DLLs listed in
+        # tauri.conf.json bundle.resources ship from the official qpdf msvc64
+        # release (issue #3, linearization). Pinned — linearize.rs's FFI
+        # surface was verified against qpdf 12.x; bump the two together.
+        working-directory: src-tauri
+        run: |
+          $ver = "12.3.2"
+          $url = "https://github.com/qpdf/qpdf/releases/download/v$ver/qpdf-$ver-msvc64.zip"
+          Invoke-WebRequest -Uri $url -OutFile qpdf.zip
+          Expand-Archive qpdf.zip -DestinationPath qpdf-tmp
+          Copy-Item "qpdf-tmp/qpdf-$ver-msvc64/bin/qpdf30.dll" resources/qpdf.dll -Force
+          foreach ($dll in "msvcp140.dll","vcruntime140.dll","vcruntime140_1.dll") {
+            Copy-Item "qpdf-tmp/qpdf-$ver-msvc64/bin/$dll" "resources/$dll" -Force
+          }
+
       - name: Build and publish release
         # tauri-action runs `tauri build`, which triggers the
         # beforeBuildCommand in tauri.conf.json — that builds the
