@@ -726,7 +726,15 @@ pub(crate) fn apply_redactions_impl(
         let page_w = page.width().value;
         let page_h = page.height().value;
         let target_width = ((page_w / 72.0) * dpi).round().max(1.0) as u32;
-        let config = PdfRenderConfig::new().set_target_width(target_width as Pixels);
+        // Render WITHOUT annotations or form data: the scrub removes those
+        // objects, so their appearances (a typed field value, a note icon)
+        // must not survive as pixels in the flattened raster either — the
+        // real OCR would resurrect them as searchable text and verification
+        // would (rightly) refuse to certify.
+        let config = PdfRenderConfig::new()
+            .set_target_width(target_width as Pixels)
+            .render_annotations(false)
+            .render_form_data(false);
         let bitmap = page
             .render_with_config(&config)
             .map_err(|e| AppError::pdfium(format!("Failed to render page {page_num}"), e))?;
@@ -1789,6 +1797,66 @@ mod tests {
         // The clean page is untouched.
         let doc = Document::load_mem(&out).expect("parse output");
         assert_eq!(doc.get_pages().len(), 2);
+    }
+
+    /// Annotation and form-field appearances must not survive as pixels in
+    /// the flattened raster: the scrub removes their objects, so a typed
+    /// field value or note icon baked into the image would be a visible
+    /// (and re-OCR-able) leak. Redact only the page text — leaving the
+    /// seeded widget/annotation areas unburned — and assert those areas
+    /// render blank in the output.
+    #[test]
+    fn flatten_raster_excludes_annotation_appearances() {
+        let _guard = crate::test_pdfium_guard();
+        let pdfium = crate::test_pdfium();
+        let bytes = leaky_pdf_bytes("ZANZIBAR");
+
+        // Just the visible "ZANZIBAR visible" text near the top (top-left
+        // y ≈ 26..50) — well clear of the widget (y 150..180) and the note
+        // icon (y 170..190).
+        let region = RedactRegion {
+            page: 1,
+            rect: TextRect { x: 15.0, y: 20.0, width: 180.0, height: 40.0 },
+        };
+        let (result, output) = apply_redactions_impl(
+            &no_progress,
+            pdfium,
+            &bytes,
+            &[region],
+            &["ZANZIBAR".to_string()],
+            150.0,
+            &empty_engine(),
+            &not_cancelled(),
+        )
+        .expect("apply");
+        assert!(
+            result.verified,
+            "leaks: {:?}, violations: {:?}",
+            result.leaks, result.structural_violations
+        );
+
+        // Render the flattened output page at 1px/pt and assert the widget +
+        // icon areas are blank (white, with JPEG-artifact slack).
+        let doc = pdfium
+            .load_pdf_from_byte_vec(output.expect("output"), None)
+            .expect("reload");
+        let page = doc.pages().get(0).expect("page 1");
+        let bitmap = page
+            .render_with_config(&PdfRenderConfig::new().set_target_width(200 as Pixels))
+            .expect("render");
+        let rgba = bitmap.as_rgba_bytes();
+        let bw = bitmap.width() as u32;
+        for y in 145u32..195 {
+            for x in 5u32..125 {
+                let i = ((y * bw + x) * 4) as usize;
+                assert!(
+                    rgba[i] >= 235 && rgba[i + 1] >= 235 && rgba[i + 2] >= 235,
+                    "annotation/widget pixels must be blank; found ink at ({x},{y}): \
+                     {:?}",
+                    &rgba[i..i + 3]
+                );
+            }
+        }
     }
 
     /// The verifier detects each seeded vector *independently of the scrub*:

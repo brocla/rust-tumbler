@@ -180,6 +180,8 @@ describe("RedactPanel", () => {
     });
 
     expect(screen.getByText(/Verification FAILED/)).toBeTruthy();
+    // The banner names the leaked region's page.
+    expect(screen.getByText(/1 region \(page 1\)/)).toBeTruthy();
     expect(activeTab().redactPreview).toEqual({ verified: false });
     const saveButton = screen.getByText("Save As…") as HTMLButtonElement;
     expect(saveButton.disabled).toBe(true);
