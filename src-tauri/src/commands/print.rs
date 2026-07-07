@@ -161,7 +161,10 @@ enum PrintSource {
 /// The password is needed only for the clean-encrypted case (the file on
 /// disk is ciphertext); pdfium ignores a password for unencrypted bytes.
 fn print_source_for(entry: &crate::state::DocEntry) -> (PrintSource, Option<String>) {
-    let password = entry.password.clone();
+    let password = match &entry.protection {
+        crate::state::Protection::Encrypted { password, .. } => Some(password.clone()),
+        crate::state::Protection::Plaintext => None,
+    };
     if entry.dirty {
         (PrintSource::Memory(entry.buffer.clone()), password)
     } else {

@@ -47,7 +47,7 @@ fn open_document_impl(
     password: Option<String>,
 ) -> Result<DocInfo, AppError> {
     let entry = DocEntry::load(state.pdfium, &path, password.as_deref())?;
-    let encrypted = entry.encrypted;
+    let encrypted = entry.protection.is_encrypted();
     let linearized = entry.linearized;
 
     let page_count = entry.document.pages().len() as u32;
@@ -194,8 +194,14 @@ mod tests {
         let entry = crate::state::lock_mutex(&entry_arc).expect("lock");
         let parsed = lopdf::Document::load_mem(&entry.buffer).expect("parse buffer");
         assert!(!parsed.is_encrypted(), "buffer must be decrypted at open");
-        assert_eq!(entry.password.as_deref(), Some(crate::ENCRYPTED_FIXTURE_PASSWORD));
-        assert!(entry.permissions.is_some());
+        assert!(
+            matches!(
+                &entry.protection,
+                crate::state::Protection::Encrypted { password, .. }
+                    if password == crate::ENCRYPTED_FIXTURE_PASSWORD
+            ),
+            "entry must be Encrypted with the validated password"
+        );
     }
 
     /// An unencrypted document reports `encrypted == false`.

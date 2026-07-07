@@ -1345,9 +1345,7 @@ mod tests {
                     file_path: path.into(),
                     buffer: bytes,
                     dirty: false,
-                    password: None,
-                    encrypted: false,
-                    permissions: None,
+                    protection: crate::state::Protection::Plaintext,
                     linearized: false,
                 },
             )

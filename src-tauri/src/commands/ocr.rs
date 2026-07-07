@@ -640,9 +640,7 @@ mod tests {
                     // No backing file; these tests never touch the buffer.
                     buffer: Vec::new(),
                     dirty: false,
-                    password: None,
-                    encrypted: false,
-                    permissions: None,
+                    protection: crate::state::Protection::Plaintext,
                     linearized: false,
                 },
             )

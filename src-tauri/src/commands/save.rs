@@ -36,14 +36,16 @@ pub(crate) fn dirty_changed_payload(
 /// password-protected one — the buffer itself is plaintext (issue #57) and
 /// must never reach disk unprotected unless the user removed the password.
 fn bytes_for_disk(entry: &crate::state::DocEntry) -> Result<std::borrow::Cow<'_, [u8]>, AppError> {
-    match (&entry.password, entry.encrypted) {
-        (Some(pw), true) => {
-            let permissions = entry.permissions.unwrap_or_else(lopdf::Permissions::all);
-            let bytes =
-                crate::commands::encryption::encrypt_with_password(&entry.buffer, pw, permissions)?;
+    match &entry.protection {
+        crate::state::Protection::Plaintext => Ok(std::borrow::Cow::Borrowed(&entry.buffer)),
+        crate::state::Protection::Encrypted { password, permissions } => {
+            let bytes = crate::commands::encryption::encrypt_with_password(
+                &entry.buffer,
+                password,
+                *permissions,
+            )?;
             Ok(std::borrow::Cow::Owned(bytes))
         }
-        _ => Ok(std::borrow::Cow::Borrowed(&entry.buffer)),
     }
 }
 
@@ -336,6 +338,43 @@ mod tests {
         assert_eq!(reopened.pages().len(), 1);
 
         std::fs::remove_file(&dest).ok();
+    }
+
+    /// The encrypt-or-not decision is total over `Protection` (issue #71):
+    /// `Plaintext` writes the buffer as-is, every `Encrypted` case — including
+    /// the owner-only empty password — re-encrypts.
+    #[test]
+    fn bytes_for_disk_encrypts_iff_protected() {
+        let _guard = crate::test_pdfium_guard();
+        let pdfium = crate::test_pdfium();
+        let path = crate::fixture_path().to_string_lossy().into_owned();
+        let mut entry = DocEntry::load(pdfium, &path, None).expect("load");
+
+        // Plaintext → the buffer itself, byte for byte.
+        let bytes = bytes_for_disk(&entry).expect("plaintext bytes");
+        assert_eq!(bytes.as_ref(), entry.buffer.as_slice());
+
+        // Encrypted (ordinary password) → carries /Encrypt.
+        entry.protection = crate::state::Protection::Encrypted {
+            password: "pw".to_string(),
+            permissions: lopdf::Permissions::all(),
+        };
+        let bytes = bytes_for_disk(&entry).expect("encrypted bytes");
+        let doc = lopdf::Document::load_mem(&bytes).expect("parse");
+        assert!(doc.is_encrypted(), "protected save must carry /Encrypt");
+
+        // Encrypted with the empty owner-only password → still encrypts.
+        entry.protection = crate::state::Protection::Encrypted {
+            password: String::new(),
+            permissions: lopdf::Permissions::all(),
+        };
+        let bytes = bytes_for_disk(&entry).expect("owner-only bytes");
+        // lopdf's loader auto-unlocks an empty user password (and drops
+        // /Encrypt in the parse), so check the serialized bytes directly.
+        assert!(
+            bytes.windows(b"/Encrypt".len()).any(|w| w == b"/Encrypt"),
+            "owner-only save must still carry /Encrypt"
+        );
     }
 
     /// Saving to the document's *own* path via Save As is allowed (it's just

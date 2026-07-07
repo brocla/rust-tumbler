@@ -14,7 +14,7 @@
 //! simply replaces the stored password (the buffer is plaintext either way).
 
 use crate::error::AppError;
-use crate::state::{lock_mutex, AppState};
+use crate::state::{lock_mutex, AppState, Protection};
 use lopdf::encryption::crypt_filters::{Aes256CryptFilter, CryptFilter};
 use lopdf::{EncryptionState, EncryptionVersion, Permissions};
 use std::collections::BTreeMap;
@@ -120,14 +120,12 @@ pub fn remove_password(
 pub(crate) fn remove_password_impl(state: &AppState, doc_id: &str) -> Result<(), AppError> {
     let entry_arc = state.get_document(doc_id)?;
     let mut entry = lock_mutex(&entry_arc)?;
-    if !entry.encrypted {
+    if !entry.protection.is_encrypted() {
         return Err(AppError::Other(
             "This document is not password-protected.".to_string(),
         ));
     }
-    entry.encrypted = false;
-    entry.password = None;
-    entry.permissions = None;
+    entry.protection = Protection::Plaintext;
     entry.dirty = true;
     Ok(())
 }
@@ -168,11 +166,11 @@ pub(crate) fn set_password_impl(
     // A password change keeps the file's original permission bits; a newly
     // protected document allows everything (owner == user makes the bits
     // advisory anyway).
-    if entry.permissions.is_none() {
-        entry.permissions = Some(Permissions::all());
-    }
-    entry.encrypted = true;
-    entry.password = Some(password.to_string());
+    let permissions = match &entry.protection {
+        Protection::Encrypted { permissions, .. } => *permissions,
+        Protection::Plaintext => Permissions::all(),
+    };
+    entry.protection = Protection::Encrypted { password: password.to_string(), permissions };
     entry.dirty = true;
     Ok(())
 }
@@ -242,8 +240,10 @@ mod tests {
 
         let pdfium = crate::test_pdfium();
         let entry = DocEntry::load(pdfium, &path, Some("rc4pw")).expect("open rc4 file");
-        assert!(entry.encrypted);
-        assert_eq!(entry.password.as_deref(), Some("rc4pw"));
+        assert!(
+            matches!(&entry.protection, Protection::Encrypted { password, .. } if password == "rc4pw"),
+            "entry must be Encrypted with the validated password"
+        );
         let parsed = lopdf::Document::load_mem(&entry.buffer).expect("parse buffer");
         assert!(!parsed.is_encrypted(), "buffer must be plaintext");
 
@@ -264,8 +264,7 @@ mod tests {
 
         let entry_arc = state.get_document("doc1").expect("get");
         let entry = lock_mutex(&entry_arc).expect("lock");
-        assert!(!entry.encrypted);
-        assert!(entry.password.is_none());
+        assert_eq!(entry.protection, Protection::Plaintext);
         assert!(entry.dirty, "save output changed, doc must be dirty");
     }
 
@@ -282,9 +281,13 @@ mod tests {
 
         let entry_arc = state.get_document("doc1").expect("get");
         let entry = lock_mutex(&entry_arc).expect("lock");
-        assert!(entry.encrypted);
-        assert_eq!(entry.password.as_deref(), Some("new-secret"));
-        assert_eq!(entry.permissions, Some(Permissions::all()));
+        assert_eq!(
+            entry.protection,
+            Protection::Encrypted {
+                password: "new-secret".to_string(),
+                permissions: Permissions::all(),
+            }
+        );
         assert!(entry.dirty, "save output changed, doc must be dirty");
         // The buffer stays plaintext — encryption happens only at Save.
         let parsed = lopdf::Document::load_mem(&entry.buffer).expect("parse buffer");
@@ -302,16 +305,23 @@ mod tests {
         let path = crate::encrypted_fixture_path().to_string_lossy().into_owned();
         let entry = DocEntry::load(pdfium, &path, Some(crate::ENCRYPTED_FIXTURE_PASSWORD))
             .expect("open encrypted");
-        let original_permissions = entry.permissions;
+        let original_permissions = match &entry.protection {
+            Protection::Encrypted { permissions, .. } => *permissions,
+            Protection::Plaintext => panic!("encrypted fixture must load as Encrypted"),
+        };
         state.insert_document("doc1".to_string(), entry).expect("insert");
 
         set_password_impl(&state, "doc1", "different-pw").expect("change password");
 
         let entry_arc = state.get_document("doc1").expect("get");
         let entry = lock_mutex(&entry_arc).expect("lock");
-        assert!(entry.encrypted);
-        assert_eq!(entry.password.as_deref(), Some("different-pw"));
-        assert_eq!(entry.permissions, original_permissions);
+        assert_eq!(
+            entry.protection,
+            Protection::Encrypted {
+                password: "different-pw".to_string(),
+                permissions: original_permissions,
+            }
+        );
         assert!(entry.dirty);
     }
 
@@ -329,7 +339,11 @@ mod tests {
 
         let entry_arc = state.get_document("doc1").expect("get");
         let entry = lock_mutex(&entry_arc).expect("lock");
-        assert!(!entry.encrypted, "a rejected call must not change the entry");
+        assert_eq!(
+            entry.protection,
+            Protection::Plaintext,
+            "a rejected call must not change the entry"
+        );
         assert!(!entry.dirty);
     }
 

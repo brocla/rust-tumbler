@@ -16,24 +16,17 @@ pub struct DocEntry {
     ///
     /// Always **plaintext**: a password-protected file is decrypted into this
     /// buffer at load time (issue #57), so every buffer-model feature works
-    /// on it unchanged. Save re-encrypts with `password` on the way to disk,
+    /// on it unchanged. Save re-encrypts per `protection` on the way to disk,
     /// so for an encrypted document these bytes never byte-match the file —
     /// `dirty` means "there are unsaved changes", not "buffer != disk".
     pub buffer: Vec<u8>,
     /// True once an in-memory edit has been applied and not yet saved.
     pub dirty: bool,
-    /// The password that unlocked this document, kept in memory only (never
-    /// written to disk). Save re-encrypts the buffer with it, and Print's GDI
-    /// path needs it when printing the still-encrypted file on disk. `None`
-    /// for unencrypted documents and after `remove_password`. (issues #12, #57)
-    pub password: Option<String>,
-    /// True while the document is password-protected (i.e. Save will encrypt).
-    /// Mirrored to the frontend for the lock badge and the remove-password
-    /// action. Cleared by `remove_password`. (issues #12, #57)
-    pub encrypted: bool,
-    /// The permission bits of the original file, re-applied when Save
-    /// re-encrypts. `None` when `encrypted` is false.
-    pub permissions: Option<lopdf::Permissions>,
+    /// Whether Save will encrypt, and with what. Mirrored to the frontend
+    /// (as a bool) for the lock badge and the remove-password action; set to
+    /// `Plaintext` by `remove_password`, to `Encrypted` by `set_password`.
+    /// (issues #12, #57, #71)
+    pub protection: Protection,
     /// True while `buffer` carries a linearized ("Fast Web View") structure —
     /// drives the status-bar "Linearized" badge (issue #3). Computed at load
     /// and recomputed by `set_buffer_and_refresh` on every edit; almost every
@@ -41,6 +34,35 @@ pub struct DocEntry {
     /// and pdfium's `save_to_bytes` never produces one), so this generally
     /// flips false the moment the document is touched.
     pub linearized: bool,
+}
+
+/// A document's protection state (issue #71). Encoding this as a sum type
+/// makes "encrypted but no password" unrepresentable, so the Save path's
+/// encrypt-or-not decision (`save.rs::bytes_for_disk`) can be an exhaustive
+/// match with no plaintext fallback arm.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Protection {
+    /// Save writes the buffer as-is.
+    Plaintext,
+    /// Save re-encrypts the buffer (AES-256) on the way to disk.
+    Encrypted {
+        /// The unlock password, kept in memory only (never written to disk).
+        /// Save re-encrypts the buffer with it, and Print's GDI path needs it
+        /// when printing the still-encrypted file on disk. May be `""` for an
+        /// owner-password-only file (opens with no user prompt) — a
+        /// deliberately kept behavior. (issues #12, #57)
+        password: String,
+        /// The permission bits of the original file, re-applied when Save
+        /// re-encrypts.
+        permissions: lopdf::Permissions,
+    },
+}
+
+impl Protection {
+    /// True when Save will encrypt (what the old `encrypted` flag reported).
+    pub fn is_encrypted(&self) -> bool {
+        matches!(self, Protection::Encrypted { .. })
+    }
 }
 
 impl DocEntry {
@@ -103,9 +125,7 @@ impl DocEntry {
                 file_path: path.to_string(),
                 buffer: plaintext,
                 dirty: false,
-                password: Some(pw.to_string()),
-                encrypted: true,
-                permissions: Some(permissions),
+                protection: Protection::Encrypted { password: pw.to_string(), permissions },
                 linearized,
             });
         }
@@ -116,9 +136,7 @@ impl DocEntry {
             file_path: path.to_string(),
             buffer,
             dirty: false,
-            password: None,
-            encrypted: false,
-            permissions: None,
+            protection: Protection::Plaintext,
             linearized,
         })
     }
