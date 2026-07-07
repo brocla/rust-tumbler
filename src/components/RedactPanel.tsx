@@ -18,9 +18,17 @@ interface RedactionResult {
   pagesFlattened: number;
   verified: boolean;
   leaks: RedactRegion[];
+  // Failed structural postconditions (fail-closed check 4) — document-level
+  // leak vectors like a surviving structure tree. Empty when verified.
+  structuralViolations: string[];
   ocrCheckRan: boolean;
   reocrPages: number;
   cancelled: boolean;
+}
+
+/** Sorted unique page numbers of the leaked regions, for the failed banner. */
+function leakPages(leaks: RedactRegion[]): number[] {
+  return [...new Set(leaks.map((l) => l.page))].sort((a, b) => a - b);
 }
 
 export function RedactPanel() {
@@ -178,7 +186,8 @@ export function RedactPanel() {
       <div className="redact-explainer">
         Redaction is permanent: marked areas are removed from a <strong>copy</strong> of
         the document, saved under a new name. Redacted pages are converted to
-        images and re-OCR&#8217;d for search. The original file is never modified.
+        images and re-OCR&#8217;d for search; tags, bookmarks, and metadata are
+        removed from the copy. The original file is never modified.
       </div>
 
       <div className="redact-find">
@@ -336,9 +345,20 @@ export function RedactPanel() {
             </>
           ) : (
             <>
-              ✗ Verification FAILED — recoverable content remains in{" "}
-              {result.leaks.length} region{result.leaks.length === 1 ? "" : "s"}. Saving
-              is blocked.
+              ✗ Verification FAILED — saving is blocked.
+              {result.leaks.length > 0 &&
+                ` Recoverable content remains in ${result.leaks.length} region${
+                  result.leaks.length === 1 ? "" : "s"
+                } (page${leakPages(result.leaks).length === 1 ? "" : "s"} ${leakPages(
+                  result.leaks,
+                ).join(", ")}).`}
+              {result.structuralViolations.length > 0 && (
+                <ul className="redact-violations">
+                  {result.structuralViolations.map((v, i) => (
+                    <li key={i}>{v}</li>
+                  ))}
+                </ul>
+              )}
             </>
           )}
         </div>
