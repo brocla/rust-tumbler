@@ -15,10 +15,9 @@
 
 use crate::error::AppError;
 use crate::state::{lock_mutex, AppState};
-use der::{Decode, Encode};
 use lopdf::{Document, Object};
 use serde::Serialize;
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use std::collections::HashSet;
 use tauri::State;
 
@@ -35,9 +34,10 @@ pub enum SignatureStatus {
     /// A signature's signed bytes were altered (digest mismatch).
     Invalid,
     /// >= 1 signature detected, but its integrity could not be checked in this
-    /// build (e.g. a BER indefinite-length CMS blob or a digest algorithm we
-    /// don't yet support). Honest "we see a signature but can't vouch for it" —
-    /// deliberately distinct from `Invalid`, which means tampering.
+    /// build (e.g. an unparsable CMS blob, a digest algorithm we don't compute,
+    /// or a signature without signed attributes). Honest "we see a signature
+    /// but can't vouch for it" — deliberately distinct from `Invalid`, which
+    /// means tampering.
     Unknown,
 }
 
@@ -259,7 +259,9 @@ fn verify_one(bytes: &[u8], _doc: &Document, sig: &lopdf::Dictionary) -> Signatu
         })
         .unwrap_or_default();
 
-    let integrity = check_integrity(bytes, byte_range.as_deref(), &contents);
+    // One CryptoAPI parse serves both the integrity check and the display name.
+    let cms = parse_cms(&contents);
+    let integrity = check_integrity(bytes, byte_range.as_deref(), cms.as_ref());
 
     // Bytes after a signature's coverage are a post-signing incremental update.
     let modified_after = byte_range
@@ -267,7 +269,9 @@ fn verify_one(bytes: &[u8], _doc: &Document, sig: &lopdf::Dictionary) -> Signatu
         .map(|br| coverage_end(br) < bytes.len())
         .unwrap_or(false);
 
-    let signer_name = cms_signer_cn(&contents).unwrap_or_else(|| dict_text(sig, b"Name"));
+    let signer_name = cms
+        .and_then(|c| c.signer_cn)
+        .unwrap_or_else(|| dict_text(sig, b"Name"));
 
     SignatureEntry {
         signer_name,
@@ -281,26 +285,23 @@ fn verify_one(bytes: &[u8], _doc: &Document, sig: &lopdf::Dictionary) -> Signatu
 
 /// Check one signature's integrity: does the CMS's sealed message digest match
 /// a fresh hash of the `/ByteRange`? Returns `Unknown` (not `Failed`) whenever we
-/// can't perform the check — no byte range, an unparsable CMS (e.g. Adobe's BER
-/// indefinite-length encoding, which the strict-DER parser rejects), or a digest
-/// algorithm this build doesn't compute. Only a real digest mismatch is `Failed`.
-fn check_integrity(bytes: &[u8], byte_range: Option<&[i64]>, contents: &[u8]) -> Integrity {
+/// can't perform the check — no byte range, an unparsable CMS, a digest
+/// algorithm this build doesn't compute, or a signature without signed
+/// attributes (no sealed messageDigest to compare against). Only a real digest
+/// mismatch is `Failed`: a false `Verified` is worse than an honest `Unknown`,
+/// and a false `Invalid` (implying tampering) is worst of all.
+fn check_integrity(bytes: &[u8], byte_range: Option<&[i64]>, cms: Option<&CmsSignerData>) -> Integrity {
     let Some(br) = byte_range else {
         return Integrity::Unknown;
     };
-    let Some(sd) = parse_signed_data(contents) else {
+    let Some(cms) = cms else {
         return Integrity::Unknown;
     };
-    let Some(signer) = sd.signer_infos.0.iter().next() else {
+    let Some(alg) = digest_alg_from_oid(&cms.digest_alg_oid) else {
         return Integrity::Unknown;
     };
-    // Only SHA-256 message digests are computed here; anything else is reported
-    // honestly as unverified rather than guessed at.
-    if signer.digest_alg.oid != SHA256_OID {
-        return Integrity::Unknown;
-    }
     let (Some(sealed), Some(computed)) =
-        (message_digest_attr(signer), digest_byte_range(bytes, br))
+        (cms.message_digest.as_deref(), digest_byte_range(bytes, br, alg))
     else {
         return Integrity::Unknown;
     };
@@ -325,105 +326,302 @@ fn coverage_end(br: &[i64]) -> usize {
     (br[2] + br[3]).max(0) as usize
 }
 
-/// SHA-256 over the two spans a `/ByteRange [a b c d]` covers: `[a, a+b)` and
+/// The digest algorithms this build can recompute over the `/ByteRange`.
+/// Anything else (e.g. MD5) reports honestly as `Unknown`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DigestAlg {
+    Sha1,
+    Sha256,
+    Sha384,
+    Sha512,
+}
+
+/// Map a SignerInfo digestAlgorithm OID to a hash we compute. Some signers put
+/// the *signature* algorithm OID (sha…WithRSAEncryption) in the digest slot, so
+/// those are accepted as aliases for the hash they name.
+fn digest_alg_from_oid(oid: &str) -> Option<DigestAlg> {
+    match oid {
+        "1.3.14.3.2.26" | "1.2.840.113549.1.1.5" => Some(DigestAlg::Sha1),
+        "2.16.840.1.101.3.4.2.1" | "1.2.840.113549.1.1.11" => Some(DigestAlg::Sha256),
+        "2.16.840.1.101.3.4.2.2" | "1.2.840.113549.1.1.12" => Some(DigestAlg::Sha384),
+        "2.16.840.1.101.3.4.2.3" | "1.2.840.113549.1.1.13" => Some(DigestAlg::Sha512),
+        _ => None,
+    }
+}
+
+/// Hash of the two spans a `/ByteRange [a b c d]` covers: `[a, a+b)` and
 /// `[c, c+d)` — everything except the `/Contents` hole.
-fn digest_byte_range(bytes: &[u8], br: &[i64]) -> Option<Vec<u8>> {
+fn digest_byte_range(bytes: &[u8], br: &[i64], alg: DigestAlg) -> Option<Vec<u8>> {
     let (a, b, c, d) = (br[0] as usize, br[1] as usize, br[2] as usize, br[3] as usize);
     let end1 = a.checked_add(b)?;
     let end2 = c.checked_add(d)?;
     if end1 > bytes.len() || end2 > bytes.len() {
         return None;
     }
-    let mut h = Sha256::new();
-    h.update(&bytes[a..end1]);
-    h.update(&bytes[c..end2]);
-    Some(h.finalize().to_vec())
+    fn hash<D: Digest>(s1: &[u8], s2: &[u8]) -> Vec<u8> {
+        let mut h = D::new();
+        h.update(s1);
+        h.update(s2);
+        h.finalize().to_vec()
+    }
+    let (s1, s2) = (&bytes[a..end1], &bytes[c..end2]);
+    Some(match alg {
+        DigestAlg::Sha1 => hash::<sha1::Sha1>(s1, s2),
+        DigestAlg::Sha256 => hash::<sha2::Sha256>(s1, s2),
+        DigestAlg::Sha384 => hash::<sha2::Sha384>(s1, s2),
+        DigestAlg::Sha512 => hash::<sha2::Sha512>(s1, s2),
+    })
 }
 
-const MESSAGE_DIGEST_OID: const_oid::ObjectIdentifier =
-    const_oid::ObjectIdentifier::new_unwrap("1.2.840.113549.1.9.4");
-const COMMON_NAME_OID: const_oid::ObjectIdentifier =
-    const_oid::ObjectIdentifier::new_unwrap("2.5.4.3");
-const SHA256_OID: const_oid::ObjectIdentifier =
-    const_oid::ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.2.1");
+// ── CMS parsing via Windows CryptoAPI (issue #39) ───────────────────────────
+//
+// The CMS/PKCS#7 blob is parsed with CryptMsg* rather than a strict-DER Rust
+// parser because real-world signatures — Adobe's in particular — use BER
+// indefinite-length framing (`30 80 … 00 00`), which strict DER rejects.
+// CryptoAPI decodes BER natively and hands back the SignerInfo (digest
+// algorithm + sealed messageDigest attribute) and the embedded certificates
+// generically, whatever the encoding. Windows-only, like the rest of Tumbler.
 
-/// The total length of the first DER TLV in `b`, so a zero-padded `/Contents`
-/// placeholder (the signature is sized smaller than its reserved space) can be
-/// trimmed to exactly the CMS blob before strict DER parsing.
-fn der_total_len(b: &[u8]) -> Option<usize> {
-    if b.len() < 2 {
+/// What the integrity check needs from a parsed CMS blob.
+struct CmsSignerData {
+    /// The SignerInfo digestAlgorithm, as a dotted OID string.
+    digest_alg_oid: String,
+    /// The sealed `messageDigest` signed attribute — the digest the signer
+    /// computed over the `/ByteRange` bytes. Absent when the signature carries
+    /// no signed attributes.
+    message_digest: Option<Vec<u8>>,
+    /// Display-only common name from the first embedded certificate with one.
+    signer_cn: Option<String>,
+}
+
+use windows::Win32::Security::Cryptography::{
+    CertCreateCertificateContext, CertFreeCertificateContext, CertGetNameStringW,
+    CryptMsgClose, CryptMsgGetParam, CryptMsgOpenToDecode, CryptMsgUpdate,
+    CERT_NAME_ATTR_TYPE, CERT_QUERY_ENCODING_TYPE, CMSG_CERT_COUNT_PARAM, CMSG_CERT_PARAM,
+    CMSG_SIGNER_INFO, CMSG_SIGNER_INFO_PARAM, PKCS_7_ASN_ENCODING, X509_ASN_ENCODING,
+};
+
+const ENCODING: u32 = PKCS_7_ASN_ENCODING.0 | X509_ASN_ENCODING.0;
+const MESSAGE_DIGEST_OID: &str = "1.2.840.113549.1.9.4";
+
+/// Closes the CryptMsg handle on drop, so every early `?` return still frees it.
+struct MsgGuard(*mut core::ffi::c_void);
+
+impl Drop for MsgGuard {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = CryptMsgClose(Some(self.0));
+        }
+    }
+}
+
+/// Parse the `/Contents` CMS blob (DER or BER) and extract the SignerInfo
+/// facts the integrity check needs. Returns `None` for anything unparsable —
+/// the caller degrades that to `Integrity::Unknown`, never `Failed`.
+fn parse_cms(contents: &[u8]) -> Option<CmsSignerData> {
+    // Trim the zero padding after the blob (the signature is written smaller
+    // than its reserved /Contents space) to exactly one BER/DER TLV.
+    let total = ber_total_len(contents)?;
+    let blob = contents.get(..total)?;
+    unsafe {
+        let msg = CryptMsgOpenToDecode(ENCODING, 0, 0, None, None, None);
+        if msg.is_null() {
+            return None;
+        }
+        let _guard = MsgGuard(msg);
+        CryptMsgUpdate(msg, Some(blob), true).ok()?;
+
+        let signer_buf = get_msg_param(msg, CMSG_SIGNER_INFO_PARAM, 0)?;
+        // The buffer is a CMSG_SIGNER_INFO whose internal pointers point back
+        // into the same allocation; get_msg_param over-aligns it for this.
+        let info = &*(signer_buf.as_ptr() as *const CMSG_SIGNER_INFO);
+        let digest_alg_oid = pstr_to_string(info.HashAlgorithm.pszObjId)?;
+        let message_digest =
+            find_auth_attr(info, MESSAGE_DIGEST_OID).and_then(|v| der_octet_string(&v));
+        let signer_cn = first_cert_cn(msg);
+
+        Some(CmsSignerData {
+            digest_alg_oid,
+            message_digest,
+            signer_cn,
+        })
+    }
+}
+
+/// Two-call CryptMsgGetParam (size, then data). The buffer is backed by a
+/// `u64` allocation so structured params (CMSG_SIGNER_INFO) are properly
+/// aligned when the caller casts into them.
+unsafe fn get_msg_param(
+    msg: *const core::ffi::c_void,
+    param: u32,
+    index: u32,
+) -> Option<Vec<u64>> {
+    let mut size = 0u32;
+    CryptMsgGetParam(msg, param, index, None, &mut size).ok()?;
+    let mut buf = vec![0u64; (size as usize).div_ceil(8)];
+    CryptMsgGetParam(
+        msg,
+        param,
+        index,
+        Some(buf.as_mut_ptr() as *mut core::ffi::c_void),
+        &mut size,
+    )
+    .ok()?;
+    Some(buf)
+}
+
+/// Bytes-view of a `get_msg_param` buffer (for byte-oriented params).
+unsafe fn param_bytes(buf: &[u64], size: usize) -> &[u8] {
+    std::slice::from_raw_parts(buf.as_ptr() as *const u8, size.min(buf.len() * 8))
+}
+
+fn pstr_to_string(p: windows::core::PSTR) -> Option<String> {
+    if p.is_null() {
         return None;
     }
-    let len_byte = b[1];
+    unsafe { std::ffi::CStr::from_ptr(p.0 as *const i8) }
+        .to_str()
+        .ok()
+        .map(String::from)
+}
+
+/// The raw (DER-encoded) value of the first authenticated attribute with the
+/// given OID, if present.
+unsafe fn find_auth_attr(info: &CMSG_SIGNER_INFO, oid: &str) -> Option<Vec<u8>> {
+    if info.AuthAttrs.rgAttr.is_null() {
+        return None;
+    }
+    let attrs = std::slice::from_raw_parts(info.AuthAttrs.rgAttr, info.AuthAttrs.cAttr as usize);
+    for attr in attrs {
+        if pstr_to_string(attr.pszObjId).as_deref() == Some(oid)
+            && attr.cValue > 0
+            && !attr.rgValue.is_null()
+        {
+            let blob = &*attr.rgValue;
+            if blob.pbData.is_null() {
+                return None;
+            }
+            return Some(std::slice::from_raw_parts(blob.pbData, blob.cbData as usize).to_vec());
+        }
+    }
+    None
+}
+
+/// Display-only signer common name: the CN of the first embedded certificate
+/// that has one (parity with the previous RustCrypto behaviour). Trust and
+/// identity validation remain out of scope.
+unsafe fn first_cert_cn(msg: *const core::ffi::c_void) -> Option<String> {
+    let count_buf = get_msg_param(msg, CMSG_CERT_COUNT_PARAM, 0)?;
+    let count_bytes = param_bytes(&count_buf, 4);
+    let count = u32::from_le_bytes(count_bytes.try_into().ok()?);
+    for i in 0..count {
+        let Some(cert_buf) = get_msg_param(msg, CMSG_CERT_PARAM, i) else {
+            continue;
+        };
+        // CryptMsgGetParam wrote `size` bytes; the u64 buffer may be up to 7
+        // bytes longer, but CertCreateCertificateContext reads the encoded
+        // length from the DER itself, so the tail padding is ignored.
+        let encoded = param_bytes(&cert_buf, cert_buf.len() * 8);
+        let ctx = CertCreateCertificateContext(CERT_QUERY_ENCODING_TYPE(ENCODING), encoded);
+        if ctx.is_null() {
+            continue;
+        }
+        let cn = cert_common_name(ctx);
+        let _ = CertFreeCertificateContext(Some(ctx));
+        if cn.is_some() {
+            return cn;
+        }
+    }
+    None
+}
+
+unsafe fn cert_common_name(
+    ctx: *const windows::Win32::Security::Cryptography::CERT_CONTEXT,
+) -> Option<String> {
+    let cn_oid = c"2.5.4.3"; // szOID_COMMON_NAME
+    let type_para = Some(cn_oid.as_ptr() as *const core::ffi::c_void);
+    // Two-call pattern: length (incl. NUL), then the string itself.
+    let len = CertGetNameStringW(ctx, CERT_NAME_ATTR_TYPE, 0, type_para, None);
+    if len <= 1 {
+        return None; // no CN attribute (CertGetNameStringW returns "" as 1)
+    }
+    let mut buf = vec![0u16; len as usize];
+    let written = CertGetNameStringW(ctx, CERT_NAME_ATTR_TYPE, 0, type_para, Some(&mut buf));
+    if written <= 1 {
+        return None;
+    }
+    Some(String::from_utf16_lossy(&buf[..written as usize - 1]))
+}
+
+/// The total length of the first BER/DER TLV in `b` — including BER
+/// indefinite-length framing (constructed, length byte `0x80`, terminated by a
+/// `00 00` end-of-contents pair), which Adobe emits. Used to trim a zero-padded
+/// `/Contents` placeholder to exactly the CMS blob.
+fn ber_total_len(b: &[u8]) -> Option<usize> {
+    ber_tlv_end(b, 0, 0)
+}
+
+/// Offset just past the TLV starting at `at`. Recurses only into
+/// indefinite-length values (whose end is where their children's EOC is);
+/// definite lengths are skipped without descending.
+fn ber_tlv_end(b: &[u8], at: usize, depth: u32) -> Option<usize> {
+    if depth > 64 {
+        return None;
+    }
+    let tag = *b.get(at)?;
+    let mut i = at + 1;
+    if tag & 0x1f == 0x1f {
+        // High-tag-number form: continue while the continuation bit is set.
+        while *b.get(i)? & 0x80 != 0 {
+            i += 1;
+        }
+        i += 1;
+    }
+    let len_byte = *b.get(i)?;
+    i += 1;
     if len_byte < 0x80 {
-        Some(2 + len_byte as usize)
+        return i.checked_add(len_byte as usize);
+    }
+    if len_byte == 0x80 {
+        // Indefinite length: children until an end-of-contents (00 00) pair.
+        loop {
+            if *b.get(i)? == 0x00 && *b.get(i + 1)? == 0x00 {
+                return Some(i + 2);
+            }
+            i = ber_tlv_end(b, i, depth + 1)?;
+        }
+    }
+    let n = (len_byte & 0x7f) as usize;
+    if n > 8 {
+        return None;
+    }
+    let mut len = 0usize;
+    for &byte in b.get(i..i + n)? {
+        len = len.checked_mul(256)?.checked_add(byte as usize)?;
+    }
+    i.checked_add(n)?.checked_add(len)
+}
+
+/// Decode a DER OCTET STRING (tag 0x04), returning its contents.
+fn der_octet_string(b: &[u8]) -> Option<Vec<u8>> {
+    if *b.first()? != 0x04 {
+        return None;
+    }
+    let len_byte = *b.get(1)?;
+    let (start, len) = if len_byte < 0x80 {
+        (2, len_byte as usize)
     } else {
         let n = (len_byte & 0x7f) as usize;
-        if n == 0 || n > 4 || b.len() < 2 + n {
+        if n == 0 || n > 4 {
             return None;
         }
         let mut len = 0usize;
-        for &byte in &b[2..2 + n] {
+        for &byte in b.get(2..2 + n)? {
             len = (len << 8) | byte as usize;
         }
-        Some(2 + n + len)
-    }
-}
-
-fn parse_signed_data(contents: &[u8]) -> Option<cms::signed_data::SignedData> {
-    let total = der_total_len(contents)?;
-    let der = contents.get(..total)?;
-    let ci = cms::content_info::ContentInfo::from_der(der).ok()?;
-    ci.content.decode_as::<cms::signed_data::SignedData>().ok()
-}
-
-/// The `messageDigest` signed attribute of a SignerInfo — the digest the signer
-/// sealed over the document's signed bytes.
-fn message_digest_attr(signer: &cms::signed_data::SignerInfo) -> Option<Vec<u8>> {
-    let attrs = signer.signed_attrs.as_ref()?;
-    for attr in attrs.iter() {
-        if attr.oid == MESSAGE_DIGEST_OID {
-            let value = attr.values.iter().next()?;
-            let octet = value.decode_as::<der::asn1::OctetString>().ok()?;
-            return Some(octet.as_bytes().to_vec());
-        }
-    }
-    None
-}
-
-/// Best-effort signer common name: the CN of the first certificate in the CMS.
-/// (Trust/identity validation is out of scope; this is for display only.)
-fn cms_signer_cn(contents: &[u8]) -> Option<String> {
-    let sd = parse_signed_data(contents)?;
-    let certs = sd.certificates.as_ref()?;
-    for choice in certs.0.iter() {
-        if let cms::cert::CertificateChoices::Certificate(cert) = choice {
-            if let Some(cn) = first_common_name(&cert.tbs_certificate.subject) {
-                return Some(cn);
-            }
-        }
-    }
-    None
-}
-
-fn first_common_name(name: &x509_cert::name::Name) -> Option<String> {
-    for rdn in name.0.iter() {
-        for atv in rdn.0.iter() {
-            if atv.oid == COMMON_NAME_OID {
-                if let Ok(der) = atv.value.to_der() {
-                    // The value is a DirectoryString (UTF8String/PrintableString…);
-                    // decode generically and keep the printable tail.
-                    if let Ok(s) = der::asn1::Utf8StringRef::from_der(&der) {
-                        return Some(s.as_str().to_string());
-                    }
-                    if let Ok(s) = der::asn1::PrintableStringRef::from_der(&der) {
-                        return Some(s.as_str().to_string());
-                    }
-                }
-            }
-        }
-    }
-    None
+        (2 + n, len)
+    };
+    b.get(start..start + len).map(|s| s.to_vec())
 }
 
 fn dict_text(dict: &lopdf::Dictionary, key: &[u8]) -> String {
@@ -489,17 +687,84 @@ mod tests {
 
     /// A real-world Adobe Reader-enabled form (IRS f8946): the signature is
     /// nested under a parent field's /Kids and lives in the Catalog /Perms /UR3,
-    /// and its CMS uses BER indefinite-length encoding the strict-DER parser
-    /// can't read. We must still DETECT it (so the badge shows) and report it
-    /// honestly as Unknown — signed but not verifiable here — never Unsigned and
-    /// never Invalid (which would falsely imply tampering).
+    /// and its CMS uses BER indefinite-length encoding. With CryptoAPI parsing
+    /// (issue #39) this now fully VERIFIES — the headline acceptance criterion:
+    /// integrity Ok, status Verified, not the old honest-but-unhelpful Unknown.
     #[test]
-    fn adobe_ur3_form_is_detected_but_unknown() {
+    fn adobe_ur3_ber_form_verifies() {
         let path = format!("{}/tests/fixtures/forms/f8946.pdf", env!("CARGO_MANIFEST_DIR"));
         let info = verify_signatures_from_path(&path);
         assert_eq!(info.count, 1, "signature should be detected");
-        assert_eq!(info.status, SignatureStatus::Unknown);
-        assert_eq!(info.signatures[0].integrity, Integrity::Unknown);
+        assert_eq!(info.signatures[0].integrity, Integrity::Ok);
+        assert_eq!(info.status, SignatureStatus::Verified);
+    }
+
+    /// SHA-1, SHA-384 and SHA-512 signatures verify (issue #39) — previously
+    /// anything but SHA-256 was honestly Unknown.
+    #[test]
+    fn non_sha256_digests_verify() {
+        for name in ["signed-sha1.pdf", "signed-sha384.pdf", "signed-sha512.pdf"] {
+            let info = verify_signatures_from_path(&fixture(name));
+            assert_eq!(info.count, 1, "{name}: signature should be detected");
+            assert_eq!(info.status, SignatureStatus::Verified, "{name}");
+            assert_eq!(info.signatures[0].integrity, Integrity::Ok, "{name}");
+            assert_eq!(info.signatures[0].signer_name, "Tumbler Test Signer", "{name}");
+        }
+    }
+
+    /// A BER indefinite-length CMS (openssl -indef, the framing Adobe uses)
+    /// verifies like its DER twin.
+    #[test]
+    fn ber_indefinite_length_cms_verifies() {
+        let info = verify_signatures_from_path(&fixture("signed-ber.pdf"));
+        assert_eq!(info.count, 1);
+        assert_eq!(info.status, SignatureStatus::Verified);
+        assert_eq!(info.signatures[0].integrity, Integrity::Ok);
+    }
+
+    /// The most important test in this change: a genuinely tampered BER
+    /// signature must report Invalid — BER support must not have widened
+    /// "parses now" into "verifies always".
+    #[test]
+    fn tampered_ber_signature_reports_invalid() {
+        let info = verify_signatures_from_path(&fixture("signed-ber-tampered.pdf"));
+        assert_eq!(info.count, 1);
+        assert_eq!(info.status, SignatureStatus::Invalid);
+        assert_eq!(info.signatures[0].integrity, Integrity::Failed);
+    }
+
+    /// Unparsable CMS bytes still degrade to Unknown, never a false Invalid.
+    #[test]
+    fn unparsable_cms_degrades_to_unknown() {
+        assert!(parse_cms(b"not a CMS blob at all").is_none());
+        assert!(parse_cms(&[]).is_none());
+        // A syntactically-valid TLV that isn't a CMS message.
+        assert!(parse_cms(&[0x30, 0x03, 0x02, 0x01, 0x01]).is_none());
+        let integrity = check_integrity(b"irrelevant", Some(&[0, 4, 6, 4]), None);
+        assert_eq!(integrity, Integrity::Unknown);
+    }
+
+    /// An unsupported digest algorithm OID degrades to Unknown.
+    #[test]
+    fn unsupported_digest_algorithm_is_unknown() {
+        let cms = CmsSignerData {
+            digest_alg_oid: "1.2.840.113549.2.5".to_string(), // MD5
+            message_digest: Some(vec![0; 16]),
+            signer_cn: None,
+        };
+        let integrity = check_integrity(b"0123456789", Some(&[0, 4, 6, 4]), Some(&cms));
+        assert_eq!(integrity, Integrity::Unknown);
+    }
+
+    #[test]
+    fn digest_alg_oid_mapping_covers_hash_and_rsa_forms() {
+        assert_eq!(digest_alg_from_oid("1.3.14.3.2.26"), Some(DigestAlg::Sha1));
+        assert_eq!(digest_alg_from_oid("2.16.840.1.101.3.4.2.1"), Some(DigestAlg::Sha256));
+        assert_eq!(digest_alg_from_oid("2.16.840.1.101.3.4.2.2"), Some(DigestAlg::Sha384));
+        assert_eq!(digest_alg_from_oid("2.16.840.1.101.3.4.2.3"), Some(DigestAlg::Sha512));
+        // sha…WithRSAEncryption aliases seen in the digest slot in the wild.
+        assert_eq!(digest_alg_from_oid("1.2.840.113549.1.1.11"), Some(DigestAlg::Sha256));
+        assert_eq!(digest_alg_from_oid("1.2.840.113549.2.5"), None); // MD5
     }
 
     /// The plain unsigned fixture has no signature fields.
@@ -539,12 +804,31 @@ mod tests {
     }
 
     #[test]
-    fn der_total_len_short_and_long_form() {
+    fn ber_total_len_short_long_and_indefinite_forms() {
         // Short form: SEQUENCE, length 3 -> total 5.
-        assert_eq!(der_total_len(&[0x30, 0x03, 1, 2, 3]), Some(5));
+        assert_eq!(ber_total_len(&[0x30, 0x03, 1, 2, 3]), Some(5));
         // Long form: length encoded in 2 bytes (0x0102 = 258) -> total 4 + 258.
-        assert_eq!(der_total_len(&[0x30, 0x82, 0x01, 0x02]), Some(4 + 258));
-        assert_eq!(der_total_len(&[0x30]), None);
+        assert_eq!(ber_total_len(&[0x30, 0x82, 0x01, 0x02]), Some(4 + 258));
+        assert_eq!(ber_total_len(&[0x30]), None);
+        // Indefinite form (BER): SEQUENCE containing one definite child, then
+        // EOC (00 00). Trailing zero padding beyond the EOC is not counted.
+        let ber = [0x30, 0x80, 0x04, 0x02, 0xAA, 0xBB, 0x00, 0x00, 0x00, 0x00];
+        assert_eq!(ber_total_len(&ber), Some(8));
+        // Nested indefinite inside indefinite.
+        let nested = [0x30, 0x80, 0x30, 0x80, 0x00, 0x00, 0x00, 0x00];
+        assert_eq!(ber_total_len(&nested), Some(8));
+        // Unterminated indefinite -> None, not a panic or a bogus length.
+        assert_eq!(ber_total_len(&[0x30, 0x80, 0x04, 0x01, 0xAA]), None);
+    }
+
+    #[test]
+    fn der_octet_string_decodes_short_and_long_form() {
+        assert_eq!(der_octet_string(&[0x04, 0x02, 0xAA, 0xBB]), Some(vec![0xAA, 0xBB]));
+        let mut long = vec![0x04, 0x81, 0x03];
+        long.extend_from_slice(&[1, 2, 3]);
+        assert_eq!(der_octet_string(&long), Some(vec![1, 2, 3]));
+        assert_eq!(der_octet_string(&[0x30, 0x01, 0x00]), None); // not an OCTET STRING
+        assert_eq!(der_octet_string(&[0x04, 0x05, 1, 2]), None); // truncated
     }
 
     #[test]

@@ -63,7 +63,7 @@ rust-tumbler/
 | `optimize.rs` | five-step compression pipeline (lopdf) |
 | `text_layer.rs` | embed an invisible OCR text layer into the document buffer (lopdf; issue #4) |
 | `forms.rs` | AcroForm field discovery + inline value writes (lopdf on the buffer; issue #2) |
-| `signature.rs` | digital-signature integrity verification, read-only (lopdf `/ByteRange` parse; issue #17) |
+| `signature.rs` | digital-signature integrity verification, read-only (lopdf `/ByteRange` parse; CMS parsed via Windows CryptoAPI `CryptMsg*`, which handles Adobe's BER encoding; issues #17, #39) |
 | `conformance.rs` | declared ISO sub-format detection — PDF/A, PDF/X, PDF/E, PDF/UA — from the XMP packet (lopdf) |
 | `print.rs` | native GDI printing with progress and cancellation |
 | `startup.rs` | read the file-association path passed on the command line |
