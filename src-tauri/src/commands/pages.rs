@@ -58,7 +58,12 @@ fn rotation_add_turns(
 /// Emits the pair of events every buffer-model page edit ends with: the page
 /// content/layout changed for this document, and the document now has unsaved
 /// changes. Also used by the compression pipeline, which rewrites every page.
-pub(crate) fn emit_pages_edited(app: &tauri::AppHandle, doc_id: String, info: &PageInfo) {
+pub(crate) fn emit_pages_edited(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    doc_id: String,
+    info: &PageInfo,
+) {
     let _ = app.emit(
         "document-pages-changed",
         PagesChangedPayload {
@@ -69,7 +74,7 @@ pub(crate) fn emit_pages_edited(app: &tauri::AppHandle, doc_id: String, info: &P
     );
     let _ = app.emit(
         "document-dirty-changed",
-        crate::commands::save::DirtyChangedPayload { doc_id, dirty: true },
+        crate::commands::save::dirty_changed_payload(state, doc_id, true),
     );
 }
 
@@ -84,7 +89,7 @@ pub fn delete_pages(
 ) -> Result<PageInfo, String> {
     let info =
         delete_pages_impl(&state, doc_id.clone(), page_numbers).map_err(String::from)?;
-    emit_pages_edited(&app, doc_id, &info);
+    emit_pages_edited(&app, &state, doc_id, &info);
     Ok(info)
 }
 
@@ -155,7 +160,7 @@ pub fn rotate_pages(
 ) -> Result<PageInfo, String> {
     let info = rotate_pages_impl(&state, doc_id.clone(), page_numbers, clockwise_turns)
         .map_err(String::from)?;
-    emit_pages_edited(&app, doc_id, &info);
+    emit_pages_edited(&app, &state, doc_id, &info);
     Ok(info)
 }
 
@@ -218,7 +223,7 @@ pub fn reorder_pages(
     new_order: Vec<u32>,
 ) -> Result<PageInfo, String> {
     let info = reorder_pages_impl(&state, doc_id.clone(), new_order).map_err(String::from)?;
-    emit_pages_edited(&app, doc_id, &info);
+    emit_pages_edited(&app, &state, doc_id, &info);
     Ok(info)
 }
 
@@ -302,7 +307,7 @@ pub fn merge_document(
 ) -> Result<PageInfo, String> {
     let info = merge_document_impl(&state, doc_id.clone(), source_path, insert_after_page)
         .map_err(String::from)?;
-    emit_pages_edited(&app, doc_id, &info);
+    emit_pages_edited(&app, &state, doc_id, &info);
     Ok(info)
 }
 
@@ -459,6 +464,7 @@ mod tests {
                     password: None,
                     encrypted: false,
                     permissions: None,
+                    linearized: false,
                 },
             )
             .expect("insert document");

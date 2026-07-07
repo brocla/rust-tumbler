@@ -73,7 +73,7 @@ async function clickAddTextLayer() {
 
 async function clickSaveLinearized() {
   await act(async () => {
-    fireEvent.click(screen.getByTitle("Save Web-Optimized Copy..."));
+    fireEvent.click(screen.getByTitle("Save Linearized Copy..."));
     await new Promise((r) => setTimeout(r, 0));
   });
 }
@@ -398,7 +398,7 @@ describe("Toolbar add text layer", () => {
   });
 });
 
-describe("Toolbar Save Web-Optimized Copy (issue #3)", () => {
+describe("Toolbar Save Linearized Copy (issue #3)", () => {
   beforeEach(() => {
     vi.mocked(invoke).mockReset();
     vi.mocked(save).mockReset();
@@ -407,23 +407,23 @@ describe("Toolbar Save Web-Optimized Copy (issue #3)", () => {
     usePdfStore.setState({ linearizeProgress: false });
   });
 
-  it("prompts for a destination with a -web suggested name and exports", async () => {
-    vi.mocked(save).mockResolvedValue("C:\\Users\\test\\test-web.pdf");
-    vi.mocked(invoke).mockResolvedValue({ originalSize: 1000, linearizedSize: 1100 });
+  it("prompts for a destination with a -linearized suggested name and exports", async () => {
+    vi.mocked(save).mockResolvedValue("C:\\Users\\test\\test-linearized.pdf");
+    vi.mocked(invoke).mockResolvedValue(undefined);
 
     renderToolbar();
     await clickSaveLinearized();
 
     expect(save).toHaveBeenCalledWith(
-      expect.objectContaining({ defaultPath: "C:\\Users\\test/test-web.pdf" }),
+      expect.objectContaining({ defaultPath: "C:\\Users\\test/test-linearized.pdf" }),
     );
     expect(invoke).toHaveBeenCalledWith("export_linearized_copy", {
       docId: "doc-1",
-      destPath: "C:\\Users\\test\\test-web.pdf",
+      destPath: "C:\\Users\\test\\test-linearized.pdf",
     });
     expect(message).toHaveBeenCalledWith(
-      expect.stringContaining("Saved web-optimized copy (1.1 KB, was 1000 B)."),
-      expect.objectContaining({ title: "Save Web-Optimized Copy" }),
+      "Saved linearized copy.",
+      expect.objectContaining({ title: "Save Linearized Copy" }),
     );
   });
 
@@ -440,10 +440,9 @@ describe("Toolbar Save Web-Optimized Copy (issue #3)", () => {
   });
 
   it("notes the copy is unencrypted for a password-protected document", async () => {
-    vi.mocked(save).mockResolvedValue("C:\\Users\\test\\test-web.pdf");
+    vi.mocked(save).mockResolvedValue("C:\\Users\\test\\test-linearized.pdf");
     vi.mocked(invoke).mockImplementation((cmd: string) => {
-      if (cmd === "export_linearized_copy")
-        return Promise.resolve({ originalSize: 1000, linearizedSize: 1000 });
+      if (cmd === "export_linearized_copy") return Promise.resolve(undefined);
       return Promise.resolve(false);
     });
     usePdfStore.setState({
@@ -457,12 +456,12 @@ describe("Toolbar Save Web-Optimized Copy (issue #3)", () => {
 
     expect(message).toHaveBeenCalledWith(
       expect.stringContaining("The copy is unencrypted"),
-      expect.objectContaining({ title: "Save Web-Optimized Copy" }),
+      expect.objectContaining({ title: "Save Linearized Copy" }),
     );
   });
 
   it("reports a failed export", async () => {
-    vi.mocked(save).mockResolvedValue("C:\\Users\\test\\test-web.pdf");
+    vi.mocked(save).mockResolvedValue("C:\\Users\\test\\test-linearized.pdf");
     vi.mocked(invoke).mockRejectedValue("qpdf.dll failed to load");
 
     renderToolbar();
@@ -470,12 +469,12 @@ describe("Toolbar Save Web-Optimized Copy (issue #3)", () => {
 
     expect(message).toHaveBeenCalledWith(
       "qpdf.dll failed to load",
-      expect.objectContaining({ title: "Save Web-Optimized Copy", kind: "error" }),
+      expect.objectContaining({ title: "Save Linearized Copy", kind: "error" }),
     );
   });
 
   it("sets linearizeProgress while the export is in flight and clears it after", async () => {
-    vi.mocked(save).mockResolvedValue("C:\\Users\\test\\test-web.pdf");
+    vi.mocked(save).mockResolvedValue("C:\\Users\\test\\test-linearized.pdf");
     let resolveInvoke!: (v: unknown) => void;
     vi.mocked(invoke).mockImplementation(
       () => new Promise((resolve) => (resolveInvoke = resolve)),
@@ -483,7 +482,7 @@ describe("Toolbar Save Web-Optimized Copy (issue #3)", () => {
 
     renderToolbar();
     await act(async () => {
-      fireEvent.click(screen.getByTitle("Save Web-Optimized Copy..."));
+      fireEvent.click(screen.getByTitle("Save Linearized Copy..."));
       // Let the save() dialog promise and the invoke() call kick off.
       await Promise.resolve();
       await Promise.resolve();
@@ -492,7 +491,7 @@ describe("Toolbar Save Web-Optimized Copy (issue #3)", () => {
     expect(usePdfStore.getState().linearizeProgress).toBe(true);
 
     await act(async () => {
-      resolveInvoke({ originalSize: 500, linearizedSize: 500 });
+      resolveInvoke(undefined);
       await new Promise((r) => setTimeout(r, 0));
     });
 

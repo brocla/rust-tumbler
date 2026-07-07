@@ -20,6 +20,12 @@ pub struct DocInfo {
     /// password. The frontend shows a lock badge and the remove-password
     /// action for these.
     pub encrypted: bool,
+    /// True when the opened file is linearized ("Fast Web View") — drives the
+    /// status-bar "Linearized" badge (issue #3). Any edit is expected to turn
+    /// this off (mirrored via `DirtyChangedPayload`), since rewriting the
+    /// buffer through lopdf or pdfium never preserves the linearization
+    /// structure.
+    pub linearized: bool,
 }
 
 /// `password` is `None`/absent on the first attempt. If the file is
@@ -42,6 +48,7 @@ fn open_document_impl(
 ) -> Result<DocInfo, AppError> {
     let entry = DocEntry::load(state.pdfium, &path, password.as_deref())?;
     let encrypted = entry.encrypted;
+    let linearized = entry.linearized;
 
     let page_count = entry.document.pages().len() as u32;
     let mut page_dimensions = Vec::with_capacity(page_count as usize);
@@ -66,6 +73,7 @@ fn open_document_impl(
         page_count,
         page_dimensions,
         encrypted,
+        linearized,
     })
 }
 

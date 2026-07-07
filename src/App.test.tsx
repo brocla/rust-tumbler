@@ -133,9 +133,9 @@ describe("App single-instance-per-file open guard", () => {
     expect(invoke).not.toHaveBeenCalledWith("open_document", expect.anything());
   });
 
-  it("mirrors document-dirty-changed events into the tab's isDirty flag", async () => {
+  it("mirrors document-dirty-changed events into the tab's isDirty and linearized flags", async () => {
     let dirtyHandler:
-      | ((event: { payload: { docId: string; dirty: boolean } }) => void)
+      | ((event: { payload: { docId: string; dirty: boolean; linearized: boolean } }) => void)
       | undefined;
     vi.mocked(listen).mockImplementation(async (event, handler) => {
       if (event === "document-dirty-changed") dirtyHandler = handler as unknown as typeof dirtyHandler;
@@ -146,15 +146,17 @@ describe("App single-instance-per-file open guard", () => {
       render(<App />);
       await new Promise((r) => setTimeout(r, 0));
     });
-    usePdfStore.setState({ tabs: [makeTab()], activeTabId: "tab-1" });
+    usePdfStore.setState({ tabs: [makeTab({ linearized: true })], activeTabId: "tab-1" });
 
     await act(async () => {
-      dirtyHandler!({ payload: { docId: "doc-1", dirty: true } });
+      dirtyHandler!({ payload: { docId: "doc-1", dirty: true, linearized: false } });
     });
     expect(usePdfStore.getState().tabs[0].isDirty).toBe(true);
+    // An edit rewrote the buffer — the badge turns off. (issue #3)
+    expect(usePdfStore.getState().tabs[0].linearized).toBe(false);
 
     await act(async () => {
-      dirtyHandler!({ payload: { docId: "doc-1", dirty: false } });
+      dirtyHandler!({ payload: { docId: "doc-1", dirty: false, linearized: false } });
     });
     expect(usePdfStore.getState().tabs[0].isDirty).toBe(false);
   });

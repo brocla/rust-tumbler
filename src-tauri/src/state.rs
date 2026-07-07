@@ -34,6 +34,13 @@ pub struct DocEntry {
     /// The permission bits of the original file, re-applied when Save
     /// re-encrypts. `None` when `encrypted` is false.
     pub permissions: Option<lopdf::Permissions>,
+    /// True while `buffer` carries a linearized ("Fast Web View") structure —
+    /// drives the status-bar "Linearized" badge (issue #3). Computed at load
+    /// and recomputed by `set_buffer_and_refresh` on every edit; almost every
+    /// edit unlinearizes the bytes (lopdf's writer strips the marker object,
+    /// and pdfium's `save_to_bytes` never produces one), so this generally
+    /// flips false the moment the document is touched.
+    pub linearized: bool,
 }
 
 impl DocEntry {
@@ -90,6 +97,7 @@ impl DocEntry {
             let document = pdfium
                 .load_pdf_from_byte_vec(plaintext.clone(), None)
                 .map_err(|e| AppError::pdfium("Failed to reload decrypted PDF", e))?;
+            let linearized = crate::commands::linearize::buffer_is_linearized(&plaintext);
             return Ok(Self {
                 document,
                 file_path: path.to_string(),
@@ -98,9 +106,11 @@ impl DocEntry {
                 password: Some(pw.to_string()),
                 encrypted: true,
                 permissions: Some(permissions),
+                linearized,
             });
         }
 
+        let linearized = crate::commands::linearize::buffer_is_linearized(&buffer);
         Ok(Self {
             document,
             file_path: path.to_string(),
@@ -109,6 +119,7 @@ impl DocEntry {
             password: None,
             encrypted: false,
             permissions: None,
+            linearized,
         })
     }
 }
@@ -350,6 +361,7 @@ impl AppState {
             .map_err(|e| AppError::pdfium("Failed to reload PDF from edited bytes", e))?;
         {
             let mut e = lock_mutex(&entry)?;
+            e.linearized = crate::commands::linearize::buffer_is_linearized(&bytes);
             e.document = document;
             e.buffer = bytes;
             e.dirty = true;
@@ -387,6 +399,18 @@ impl AppState {
         let entry = self.get_document(doc_id)?;
         let e = lock_mutex(&entry)?;
         Ok(e.dirty)
+    }
+
+    /// Current linearized-badge state for a document. Used when building
+    /// `DirtyChangedPayload` so every edit's existing "something changed"
+    /// broadcast carries the freshly recomputed flag — `false` (rather than
+    /// erroring) if the document can't be found, since this only ever feeds
+    /// a cosmetic badge.
+    pub fn is_linearized(&self, doc_id: &str) -> bool {
+        self.get_document(doc_id)
+            .ok()
+            .and_then(|e| lock_mutex(&e).ok().map(|g| g.linearized))
+            .unwrap_or(false)
     }
 }
 

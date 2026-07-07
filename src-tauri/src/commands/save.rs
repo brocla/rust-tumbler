@@ -14,6 +14,21 @@ use tauri::{Emitter, State};
 pub struct DirtyChangedPayload {
     pub doc_id: String,
     pub dirty: bool,
+    /// Mirrors `DocEntry.linearized` (issue #3) so the frontend's existing
+    /// "something about this doc changed" listener also drives the
+    /// status-bar "Linearized" badge, without a separate event/round-trip.
+    pub linearized: bool,
+}
+
+/// Builds a `DirtyChangedPayload` with the document's current linearized
+/// state, so every call site doesn't have to look it up by hand.
+pub(crate) fn dirty_changed_payload(
+    state: &AppState,
+    doc_id: String,
+    dirty: bool,
+) -> DirtyChangedPayload {
+    let linearized = state.is_linearized(&doc_id);
+    DirtyChangedPayload { doc_id, dirty, linearized }
 }
 
 /// The bytes Save writes to disk: the buffer as-is for an ordinary document,
@@ -57,7 +72,7 @@ pub fn save_document(
     save_document_impl(&state, &doc_id).map_err(String::from)?;
     let _ = app.emit(
         "document-dirty-changed",
-        DirtyChangedPayload { doc_id, dirty: false },
+        dirty_changed_payload(&state, doc_id, false),
     );
     Ok(())
 }
@@ -85,7 +100,7 @@ pub fn save_document_as(
     let canonical = save_document_as_impl(&state, &doc_id, &dest_path).map_err(String::from)?;
     let _ = app.emit(
         "document-dirty-changed",
-        DirtyChangedPayload { doc_id, dirty: false },
+        dirty_changed_payload(&state, doc_id, false),
     );
     Ok(canonical)
 }

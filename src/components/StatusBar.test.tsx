@@ -58,6 +58,37 @@ describe("StatusBar", () => {
     expect(screen.queryByText("Encrypted")).toBeNull();
   });
 
+  it("shows the Linearized badge for a linearized active tab (issue #3)", () => {
+    usePdfStore.setState({
+      tabs: [makeTab({ linearized: true })],
+      activeTabId: "tab-1",
+    });
+    render(<StatusBar />);
+    expect(screen.getByText("Linearized")).toBeTruthy();
+  });
+
+  it("shows no Linearized badge for a non-linearized active tab", () => {
+    usePdfStore.setState({
+      tabs: [makeTab({ linearized: false })],
+      activeTabId: "tab-1",
+    });
+    render(<StatusBar />);
+    expect(screen.queryByText("Linearized")).toBeNull();
+  });
+
+  it("turns off the Linearized badge once the tab reports the file is no longer linearized", () => {
+    usePdfStore.setState({
+      tabs: [makeTab({ linearized: true })],
+      activeTabId: "tab-1",
+    });
+    const { rerender } = render(<StatusBar />);
+    expect(screen.getByText("Linearized")).toBeTruthy();
+
+    usePdfStore.setState({ tabs: [makeTab({ linearized: false })], activeTabId: "tab-1" });
+    rerender(<StatusBar />);
+    expect(screen.queryByText("Linearized")).toBeNull();
+  });
+
   it("shows 'Verified Signed Document' for a verified active tab", () => {
     usePdfStore.setState({
       tabs: [makeTab({ signatureStatus: "verified" })],

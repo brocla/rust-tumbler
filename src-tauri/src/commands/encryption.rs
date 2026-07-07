@@ -112,10 +112,7 @@ pub fn remove_password(
     remove_password_impl(&state, &doc_id).map_err(String::from)?;
     let _ = app.emit(
         "document-dirty-changed",
-        crate::commands::save::DirtyChangedPayload {
-            doc_id,
-            dirty: true,
-        },
+        crate::commands::save::dirty_changed_payload(&state, doc_id, true),
     );
     Ok(())
 }
@@ -151,10 +148,7 @@ pub fn set_password(
     set_password_impl(&state, &doc_id, &password).map_err(String::from)?;
     let _ = app.emit(
         "document-dirty-changed",
-        crate::commands::save::DirtyChangedPayload {
-            doc_id,
-            dirty: true,
-        },
+        crate::commands::save::dirty_changed_payload(&state, doc_id, true),
     );
     Ok(())
 }

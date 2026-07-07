@@ -223,7 +223,7 @@ pub fn set_form_field_value(
     set_form_field_value_impl(&state, doc_id.clone(), field_id, value).map_err(String::from)?;
     let _ = app.emit(
         "document-dirty-changed",
-        crate::commands::save::DirtyChangedPayload { doc_id, dirty: true },
+        crate::commands::save::dirty_changed_payload(&state, doc_id, true),
     );
     Ok(())
 }
@@ -246,7 +246,7 @@ pub fn clear_form(
     reset_scope_impl(&state, doc_id.clone(), ResetScope::All).map_err(String::from)?;
     let _ = app.emit(
         "document-dirty-changed",
-        crate::commands::save::DirtyChangedPayload { doc_id, dirty: true },
+        crate::commands::save::dirty_changed_payload(&state, doc_id, true),
     );
     Ok(())
 }
@@ -264,7 +264,7 @@ pub fn reset_form_via_button(
     reset_scope_impl(&state, doc_id.clone(), scope).map_err(String::from)?;
     let _ = app.emit(
         "document-dirty-changed",
-        crate::commands::save::DirtyChangedPayload { doc_id, dirty: true },
+        crate::commands::save::dirty_changed_payload(&state, doc_id, true),
     );
     Ok(())
 }
@@ -284,7 +284,7 @@ pub fn set_signature_strokes(
         .map_err(String::from)?;
     let _ = app.emit(
         "document-dirty-changed",
-        crate::commands::save::DirtyChangedPayload { doc_id, dirty: true },
+        crate::commands::save::dirty_changed_payload(&state, doc_id, true),
     );
     Ok(())
 }
@@ -1348,6 +1348,7 @@ mod tests {
                     password: None,
                     encrypted: false,
                     permissions: None,
+                    linearized: false,
                 },
             )
             .expect("insert");

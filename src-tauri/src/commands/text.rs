@@ -755,6 +755,7 @@ mod tests {
                     password: None,
                     encrypted: false,
                     permissions: None,
+                    linearized: false,
                 },
             )
             .expect("insert");
@@ -808,6 +809,7 @@ mod tests {
                     password: None,
                     encrypted: false,
                     permissions: None,
+                    linearized: false,
                 },
             )
             .expect("insert");

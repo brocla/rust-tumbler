@@ -181,6 +181,20 @@ body {
   background: var(--color-bg-tertiary);
 }
 
+/* Linearized badge (issue #3) — same neutral pill as the lock badge; turns
+   off the moment an edit rewrites the buffer, since no edit path preserves
+   the linearized structure. */
+.linearized-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  background: var(--color-bg-tertiary);
+}
+
 /* App version — always rightmost, in the theme accent color. */
 .status-version {
   color: var(--color-accent);

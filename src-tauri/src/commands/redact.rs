@@ -575,6 +575,7 @@ pub(crate) fn apply_redactions_impl(
             password: None,
             encrypted: false,
             permissions: None,
+            linearized: false,
         }));
         let temp_cache: OcrCache = Arc::new(Mutex::new(HashMap::new()));
         let flattened_pages: HashSet<u32> = by_page.keys().copied().collect();
@@ -932,6 +933,7 @@ mod tests {
                     password: None,
                     encrypted: false,
                     permissions: None,
+                    linearized: false,
                 },
             )
             .expect("insert");

@@ -1,4 +1,4 @@
-//! "Save Web-Optimized Copy" — writes a linearized ("Fast Web View") copy of
+//! "Save Linearized Copy" — writes a linearized ("Fast Web View") copy of
 //! the open document via qpdf (issue #3).
 //!
 //! This is an export-only feature: it never touches `DocEntry.buffer` or the
@@ -25,6 +25,24 @@ use std::ffi::{c_void, CStr, CString};
 use std::os::raw::{c_char, c_int};
 use std::path::Path;
 use tauri::State;
+
+/// Whether `buffer` starts with a linearized PDF's marker dictionary — the
+/// same fact `qpdf --check`/pdfium's `FPDFAvail_IsLinearized` surface, and
+/// what the status-bar "Linearized" badge (issue #3) reflects.
+///
+/// A linearized file's first indirect object is a small dictionary carrying
+/// `/Linearized 1` (plus `/L`, `/H`, `/O`, `/E`, `/N`), and qpdf's own docs
+/// note it's discoverable from the first ~1KB (`FPDFAvail_IsLinearized`
+/// needs just that much to answer). So this scans a small prefix for the
+/// literal marker rather than fully parsing the document with lopdf — cheap
+/// enough to call on every open and after every edit, matching how a
+/// streaming viewer checks it before the rest of the file has even arrived.
+pub fn buffer_is_linearized(buffer: &[u8]) -> bool {
+    const SCAN_LEN: usize = 2048;
+    const MARKER: &[u8] = b"/Linearized";
+    let scan = &buffer[..buffer.len().min(SCAN_LEN)];
+    scan.windows(MARKER.len()).any(|w| w == MARKER)
+}
 
 /// Sizes before/after linearizing, for an honest confirmation message.
 /// Deliberately not a "percent reduction" like Compress's report — unlike
@@ -382,6 +400,28 @@ mod tests {
         std::fs::remove_file(&path_b).ok();
     }
 
+    #[test]
+    fn buffer_is_linearized_detects_the_marker_dictionary() {
+        let linearized = b"%PDF-1.5\n1 0 obj\n<< /Linearized 1 /L 1298 >>\nendobj\n";
+        assert!(buffer_is_linearized(linearized));
+    }
+
+    #[test]
+    fn buffer_is_linearized_is_false_for_an_ordinary_pdf() {
+        let bytes = std::fs::read(crate::fixture_path()).expect("read fixture");
+        assert!(!buffer_is_linearized(&bytes));
+    }
+
+    #[test]
+    fn buffer_is_linearized_is_false_for_a_marker_beyond_the_scan_window() {
+        // The marker exists in the file, but far past where a streaming
+        // viewer (or this scan) would have looked — must not false-positive
+        // by scanning the whole buffer.
+        let mut bytes = vec![b'x'; 4096];
+        bytes.extend_from_slice(b"/Linearized");
+        assert!(!buffer_is_linearized(&bytes));
+    }
+
     /// Real qpdf — ignored in CI (no DLL there). Exercises the actual FFI
     /// call sequence and verifies the output is genuinely linearized.
     #[test]
@@ -413,6 +453,9 @@ mod tests {
             .values()
             .any(|obj| obj.as_dict().is_ok_and(|d| d.has(b"Linearized")));
         assert!(has_linearization_dict, "output should carry a /Linearized dictionary");
+        // The cheap prefix-scan used for the status-bar badge should agree
+        // with the full lopdf-based check above.
+        assert!(buffer_is_linearized(&bytes), "prefix scan should also detect it");
 
         // pdfium must still be able to load the linearized output.
         let reopened = pdfium.load_pdf_from_file(&dest, None).expect("pdfium should load linearized output");

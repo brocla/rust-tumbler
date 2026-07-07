@@ -58,6 +58,12 @@ export interface TabState {
   // button, which clears it. Optional so existing tab construction sites
   // don't need updating. (issues #12, #57)
   encrypted?: boolean;
+  // True while the open file is linearized ("Fast Web View"). Populated on
+  // open and mirrored from the backend's DocEntry.linearized via the
+  // "document-dirty-changed" event — any edit turns this off, since no edit
+  // path preserves the linearized structure. Drives the status-bar badge.
+  // Optional so existing tab construction sites don't need updating. (issue #3)
+  linearized?: boolean;
   // Regions marked for redaction but not yet applied (issue #1). Drawn as
   // black boxes by RedactLayer; sent to apply_redactions by the Redact panel.
   redactRegions?: RedactRegion[];

@@ -1,19 +1,21 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Lock } from "lucide-react";
+import { Lock, Zap } from "lucide-react";
 import { usePdfStore } from "../store/usePdfStore";
 import { signatureBadge } from "../utils/signature";
 
 /**
  * Thin bottom border strip, right-justified. Shows (right to left): the app
  * version number (always, in the theme accent color), then the digital-signature
- * badge and, for a password-protected document (issues #12/#57), a lock badge —
- * both for the **active tab only** (issue #17). The version stays rightmost.
+ * badge, a lock badge for a password-protected document (issues #12/#57), and a
+ * "Linearized" badge (issue #3) when the open file carries that structure —
+ * all for the **active tab only** (issue #17). The version stays rightmost.
  */
 export function StatusBar() {
   const tab = usePdfStore((s) => s.tabs.find((t) => t.id === s.activeTabId));
   const status = tab?.signatureStatus;
   const encrypted = !!tab?.encrypted;
+  const linearized = !!tab?.linearized;
 
   const badge = signatureBadge(status);
 
@@ -38,6 +40,15 @@ export function StatusBar() {
       {badge && (
         <span className={`signature-badge signature-badge-${badge.kind}`}>
           {badge.text}
+        </span>
+      )}
+      {linearized && (
+        <span
+          className="linearized-badge"
+          title="This file is linearized (Fast Web View) — a viewer streaming it over the web can render page 1 before the rest downloads. Any edit turns this off until you save a new linearized copy."
+        >
+          <Zap size={12} />
+          Linearized
         </span>
       )}
       {version && <span className="status-version">v{version}</span>}
