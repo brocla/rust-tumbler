@@ -1732,6 +1732,18 @@ mod tests {
         haystack.windows(needle.len()).filter(|w| *w == needle).count()
     }
 
+    /// Manual-testing helper, not a test: writes the all-leak-vectors fixture
+    /// to `C:\tmp\leaky-fixture.pdf` for live testing in the app. Run with:
+    /// `cargo test dump_leaky_fixture -- --ignored --test-threads=1`
+    #[test]
+    #[ignore = "writes a fixture file for manual live testing"]
+    fn dump_leaky_fixture() {
+        let dest = std::path::Path::new(r"C:\tmp\leaky-fixture.pdf");
+        std::fs::create_dir_all(dest.parent().unwrap()).expect("create C:\\tmp");
+        std::fs::write(dest, leaky_pdf_bytes("ZANZIBAR")).expect("write fixture");
+        println!("wrote {}", dest.display());
+    }
+
     /// The headline guarantee, end to end: redact the page carrying the
     /// secret, and NO copy of it — page text, metadata, structure tree,
     /// bookmarks, annotations, form value, scripts, attachments — survives
