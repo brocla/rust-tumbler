@@ -287,10 +287,13 @@ pub(crate) fn export_linearized_copy_impl(
 
     // The buffer is authoritative (unsaved edits included, plaintext even for
     // an encrypted document — issue #57/#31) and is handed to qpdf's
-    // path-based API via a temp file, following the same handoff shape as
-    // the print feature. The document lock is released before the (slow)
-    // linearize call so other tabs aren't blocked while qpdf runs.
+    // path-based API via a temp file. Because that copy can hold decrypted
+    // bytes, its removal is a Drop guard rather than a happy-path statement:
+    // it must survive every early return and panic between the write and the
+    // end of the linearize call. The document lock is released before the
+    // (slow) linearize call so other tabs aren't blocked while qpdf runs.
     let tmp = std::env::temp_dir().join(format!("tumbler-linearize-{}.pdf", uuid::Uuid::new_v4()));
+    let _tmp_guard = TempFileGuard(tmp.clone());
     let original_size = {
         let entry = lock_mutex(&entry_arc)?;
         std::fs::write(&tmp, &entry.buffer)
@@ -298,9 +301,7 @@ pub(crate) fn export_linearized_copy_impl(
         entry.buffer.len() as u64
     };
 
-    let result = state.linearizer.linearize(&tmp, Path::new(dest_path));
-    let _ = std::fs::remove_file(&tmp);
-    result?;
+    state.linearizer.linearize(&tmp, Path::new(dest_path))?;
 
     let linearized_size = std::fs::metadata(dest_path)
         .map_err(|e| AppError::io("Failed to read linearized output size", e))?
@@ -310,6 +311,18 @@ pub(crate) fn export_linearized_copy_impl(
         original_size,
         linearized_size,
     })
+}
+
+/// Removes the file at the held path on drop. Temp copies of the document
+/// buffer can contain the decrypted contents of a password-protected file
+/// (issue #57), so cleanup must run on every exit — early `?` returns and
+/// panics included — not just the happy path.
+struct TempFileGuard(std::path::PathBuf);
+
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
 }
 
 /// True if `dest_path` refers to the same file as `open_path`, comparing
@@ -398,6 +411,77 @@ mod tests {
 
         std::fs::remove_file(&path_a).ok();
         std::fs::remove_file(&path_b).ok();
+    }
+
+    /// Records the temp handoff path it was given, then fails. Lets the
+    /// cleanup tests below observe whether the plaintext temp copy (issue
+    /// #57) is gone after the failure.
+    struct FailingLinearizer {
+        src_seen: std::sync::Mutex<Option<std::path::PathBuf>>,
+        panic: bool,
+    }
+
+    impl Linearizer for FailingLinearizer {
+        fn linearize(&self, src: &Path, _dest: &Path) -> Result<(), AppError> {
+            *self.src_seen.lock().unwrap() = Some(src.to_path_buf());
+            assert!(src.exists(), "temp handoff copy should exist during the call");
+            if self.panic {
+                panic!("simulated qpdf crash");
+            }
+            Err(AppError::Other("simulated qpdf failure".to_string()))
+        }
+    }
+
+    fn state_with_failing_linearizer(
+        panic: bool,
+    ) -> (AppState, std::sync::Arc<FailingLinearizer>) {
+        let pdfium = crate::test_pdfium();
+        let linearizer = std::sync::Arc::new(FailingLinearizer {
+            src_seen: std::sync::Mutex::new(None),
+            panic,
+        });
+        let state = AppState::new(pdfium, None).with_linearizer(linearizer.clone());
+        (state, linearizer)
+    }
+
+    /// The temp handoff copy — plaintext buffer bytes, possibly of a
+    /// password-protected document (issue #57) — must be removed when qpdf
+    /// reports an error.
+    #[test]
+    fn temp_copy_is_removed_when_linearize_fails() {
+        let _guard = crate::test_pdfium_guard();
+        let (state, linearizer) = state_with_failing_linearizer(false);
+        let entry = DocEntry::load(state.pdfium, &crate::fixture_path().to_string_lossy(), None)
+            .expect("load");
+        state.insert_document("doc1".to_string(), entry).expect("insert");
+
+        let dest = tmp_path("tumbler_linearize_fail_out.pdf");
+        let err = export_linearized_copy_impl(&state, "doc1", &dest).expect_err("must fail");
+        assert!(err.to_string().contains("simulated qpdf failure"));
+
+        let src = linearizer.src_seen.lock().unwrap().clone().expect("linearizer was called");
+        assert!(!src.exists(), "temp handoff copy must be removed after a failure");
+    }
+
+    /// Same guarantee across a panic: the `TempFileGuard` drops during
+    /// unwinding, so even a crash inside the qpdf call can't leave the
+    /// plaintext copy behind.
+    #[test]
+    fn temp_copy_is_removed_when_linearize_panics() {
+        let _guard = crate::test_pdfium_guard();
+        let (state, linearizer) = state_with_failing_linearizer(true);
+        let entry = DocEntry::load(state.pdfium, &crate::fixture_path().to_string_lossy(), None)
+            .expect("load");
+        state.insert_document("doc1".to_string(), entry).expect("insert");
+
+        let dest = tmp_path("tumbler_linearize_panic_out.pdf");
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = export_linearized_copy_impl(&state, "doc1", &dest);
+        }));
+        assert!(panicked.is_err(), "linearizer should have panicked");
+
+        let src = linearizer.src_seen.lock().unwrap().clone().expect("linearizer was called");
+        assert!(!src.exists(), "temp handoff copy must be removed after a panic");
     }
 
     #[test]
