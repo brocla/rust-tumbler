@@ -11,11 +11,13 @@
 //! outlines — tagged-PDF `/ActualText`/`/Alt` and bookmark titles duplicate
 //! visible text — page `/Metadata`/`/PieceInfo`, PDF 2.0 Associated Files
 //! (`/AF`, catalog and page level — a second attachment mechanism independent
-//! of `/Names`), and AcroForm fields left without a widget by the flatten),
-//! the flattened pages are re-OCR'd into an invisible text layer (reusing
-//! issue #4's machinery — the burned rectangles read as blank, so search
-//! comes back for everything *except* the redacted spots), and then
-//! verification runs on the **final bytes, reloaded fresh**:
+//! of `/Names`), the catalog's `/OCProperties` optional-content ("layers")
+//! registry — an OCG's `/Name` label can itself echo something sensitive and
+//! stays catalog-reachable independent of any page — and AcroForm fields left
+//! without a widget by the flatten), the flattened pages are re-OCR'd into an
+//! invisible text layer (reusing issue #4's machinery — the burned rectangles
+//! read as blank, so search comes back for everything *except* the redacted
+//! spots), and then verification runs on the **final bytes, reloaded fresh**:
 //!
 //! 1. text extraction on every redacted page — no character box may intersect a
 //!    redaction region;
@@ -23,9 +25,9 @@
 //!    and reported as skipped, when no Windows OCR language pack is installed);
 //! 3. a search for every "find & redact all" query — zero hits;
 //! 4. structural postconditions (fail-closed): the leak vectors the text-based
-//!    checks cannot see — structure tree, outlines, metadata, associated files,
-//!    widget-less form fields — must be absent, so a scrub regression can
-//!    never certify.
+//!    checks cannot see — structure tree, outlines, metadata, associated
+//!    files, optional-content layers, widget-less form fields — must be
+//!    absent, so a scrub regression can never certify.
 //!
 //! Any failure populates `RedactionResult.leaks`, `verified` stays false, and
 //! `save_redacted_copy` refuses to write. The staged bytes never enter
@@ -458,6 +460,14 @@ fn scrub_acroform(doc: &mut Document) {
 /// file to the document or a page — distinct from `/Names//EmbeddedFiles`,
 /// which `step_strip_extras` already clears — so it needs its own removal at
 /// both the catalog level (here) and the page level (`replace_page_with_image`).
+///
+/// `/OCProperties` (Optional Content / "layers") is the catalog's own registry
+/// of every OCG object in the document — reachable independently of any page,
+/// so it survives even after every page referencing those OCGs is flattened.
+/// The hidden *content* itself is already gone (a redacted page's `BDC`/`EMC`-
+/// tagged operators are removed along with everything else in its old content
+/// stream), but an OCG's `/Name` — a human label like "SSN — internal only" —
+/// can itself echo something sensitive, and nothing else scrubs it.
 fn scrub_leak_vectors(doc: &mut Document) {
     crate::commands::optimize::step_strip_extras(doc);
     doc.trailer.remove(b"Info");
@@ -466,6 +476,7 @@ fn scrub_leak_vectors(doc: &mut Document) {
         catalog.remove(b"MarkInfo");
         catalog.remove(b"Outlines");
         catalog.remove(b"AF");
+        catalog.remove(b"OCProperties");
     }
     scrub_acroform(doc);
     doc.prune_objects();
@@ -487,7 +498,15 @@ fn verify_scrub_postconditions(
         violations.push("document Info dictionary present".to_string());
     }
     if let Ok(catalog) = doc.catalog() {
-        for key in ["Metadata", "StructTreeRoot", "MarkInfo", "Outlines", "OpenAction", "AF"] {
+        for key in [
+            "Metadata",
+            "StructTreeRoot",
+            "MarkInfo",
+            "Outlines",
+            "OpenAction",
+            "AF",
+            "OCProperties",
+        ] {
             if catalog.get(key.as_bytes()).is_ok() {
                 violations.push(format!("catalog /{key} present"));
             }
@@ -1763,6 +1782,21 @@ mod tests {
             "EF" => dictionary! { "F" => Object::Reference(af_page_file) },
         });
 
+        // Optional Content ("layers"): an OCG whose /Name label echoes the
+        // secret, registered in the catalog's /OCProperties — reachable
+        // independent of any page, so it survives page flattening on its own.
+        let ocg = doc.add_object(dictionary! {
+            "Type" => "OCG",
+            "Name" => Object::string_literal(format!("{secret} hidden layer")),
+        });
+        let oc_properties = Object::Dictionary(dictionary! {
+            "OCGs" => vec![Object::Reference(ocg)],
+            "D" => dictionary! {
+                "Name" => Object::string_literal(format!("{secret} config")),
+                "OFF" => vec![Object::Reference(ocg)],
+            },
+        });
+
         {
             let catalog = doc.get_dictionary_mut(catalog_id).expect("catalog");
             catalog.set("Metadata", Object::Reference(xmp_id));
@@ -1772,6 +1806,7 @@ mod tests {
             catalog.set("AcroForm", Object::Reference(acroform_id));
             catalog.set("Names", Object::Reference(names_id));
             catalog.set("AF", vec![Object::Reference(af_catalog_filespec)]);
+            catalog.set("OCProperties", oc_properties);
         }
         {
             let page = doc.get_dictionary_mut(page1).expect("page 1");
@@ -1859,8 +1894,8 @@ mod tests {
             "visible text, and hidden in the Info dictionary, XMP metadata,",
             "the structure tree, a bookmark title, page metadata, PieceInfo,",
             "a sticky-note comment, a form field value, a JavaScript action,",
-            "an embedded file, and two PDF 2.0 Associated Files (catalog and",
-            "page level).",
+            "an embedded file, two PDF 2.0 Associated Files (catalog and page",
+            "level), and an Optional Content (\"layer\") name.",
             "",
             "How to live test:",
             "1. Open this file in Tumbler and open the Redact panel.",
@@ -1916,9 +1951,9 @@ mod tests {
     /// The headline guarantee, end to end: redact the page carrying the
     /// secret, and NO copy of it — page text, metadata, structure tree,
     /// bookmarks, annotations, form value, scripts, attachments (both via
-    /// /Names and via PDF 2.0 /AF) — survives anywhere in the saved bytes.
-    /// The fixture seeds ~13 copies; a sanity precondition proves they are
-    /// really there before the run.
+    /// /Names and via PDF 2.0 /AF), optional-content layer labels — survives
+    /// anywhere in the saved bytes. The fixture seeds ~15 copies; a sanity
+    /// precondition proves they are really there before the run.
     #[test]
     fn redaction_removes_the_secret_from_every_known_leak_vector() {
         let _guard = crate::test_pdfium_guard();
@@ -1928,7 +1963,7 @@ mod tests {
 
         // Fixture sanity: the secret is seeded broadly (guards fixture rot).
         assert!(
-            count_occurrences(&bytes, SECRET) >= 13,
+            count_occurrences(&bytes, SECRET) >= 15,
             "fixture must seed the secret into every vector, found {}",
             count_occurrences(&bytes, SECRET)
         );
@@ -2039,6 +2074,7 @@ mod tests {
             "/MarkInfo",
             "/Outlines",
             "catalog /AF",
+            "catalog /OCProperties",
             "/JavaScript",     // name tree
             "/EmbeddedFiles",  // name tree
             "page 1: /Annots",
