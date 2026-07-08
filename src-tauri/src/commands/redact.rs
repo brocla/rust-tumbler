@@ -9,12 +9,13 @@
 //! After the flatten, document-level leak vectors are scrubbed (Info dictionary,
 //! XMP metadata, JavaScript/EmbeddedFiles name trees, the structure tree and
 //! outlines — tagged-PDF `/ActualText`/`/Alt` and bookmark titles duplicate
-//! visible text — page `/Metadata`/`/PieceInfo`, and AcroForm fields left
-//! without a widget by the flatten), the flattened pages are re-OCR'd
-//! into an invisible text layer (reusing issue #4's machinery — the burned
-//! rectangles read as blank, so search comes back for everything *except* the
-//! redacted spots), and then verification runs on the **final bytes, reloaded
-//! fresh**:
+//! visible text — page `/Metadata`/`/PieceInfo`, PDF 2.0 Associated Files
+//! (`/AF`, catalog and page level — a second attachment mechanism independent
+//! of `/Names`), and AcroForm fields left without a widget by the flatten),
+//! the flattened pages are re-OCR'd into an invisible text layer (reusing
+//! issue #4's machinery — the burned rectangles read as blank, so search
+//! comes back for everything *except* the redacted spots), and then
+//! verification runs on the **final bytes, reloaded fresh**:
 //!
 //! 1. text extraction on every redacted page — no character box may intersect a
 //!    redaction region;
@@ -22,14 +23,30 @@
 //!    and reported as skipped, when no Windows OCR language pack is installed);
 //! 3. a search for every "find & redact all" query — zero hits;
 //! 4. structural postconditions (fail-closed): the leak vectors the text-based
-//!    checks cannot see — structure tree, outlines, metadata, widget-less form
-//!    fields — must be absent, so a scrub regression can never certify.
+//!    checks cannot see — structure tree, outlines, metadata, associated files,
+//!    widget-less form fields — must be absent, so a scrub regression can
+//!    never certify.
 //!
 //! Any failure populates `RedactionResult.leaks`, `verified` stays false, and
 //! `save_redacted_copy` refuses to write. The staged bytes never enter
 //! `DocEntry.buffer`; they live in `AppState.pending_redactions` (previewed via
 //! `render_redacted_page`) until Save As writes them or Discard drops them —
 //! structurally, redacted output has no path to the original file.
+//!
+//! **Incremental-update revisions.** A PDF can carry multiple revisions —
+//! each an appended `xref`/`trailer` pointing back to the previous one via
+//! `/Prev` — where an unredacted revision survives physically in the file
+//! even after a later revision "covers" it, recoverable by truncating the
+//! file at an earlier `%%EOF`. This pipeline is not susceptible: `lopdf`
+//! parses the whole `/Prev` chain but keeps only the newest entry per object
+//! id (`Xref::merge` is fill-gaps-only — see its doc comment), so a
+//! superseded revision's objects never enter the in-memory `Document` to
+//! begin with; and `apply_redactions_impl` always calls `Document::save_to`
+//! (a full fresh rewrite: one header, one xref, one trailer, no `/Prev` —
+//! `lopdf`'s plain `Document`, never its separate `IncrementalDocument`
+//! type), so the output cannot carry a revision history even if the input
+//! had one. See `input_with_incremental_update_revision_is_fully_redacted`
+//! and `redaction_output_is_a_single_pdf_revision`.
 
 use crate::commands::ocr::{OcrCache, OcrEngine, OCR_UNAVAILABLE_MESSAGE};
 use crate::commands::text::{page_origin, search_document_impl, TextRect};
@@ -262,6 +279,9 @@ fn replace_page_with_image(
         // hold an authoring app's own copy of the original page content).
         b"Metadata",
         b"PieceInfo",
+        // PDF 2.0 Associated Files can attach a file directly to a page,
+        // bypassing /Names//EmbeddedFiles entirely.
+        b"AF",
     ] {
         page.remove(key);
     }
@@ -423,9 +443,9 @@ fn scrub_acroform(doc: &mut Document) {
 /// Scrubs the document-level leak vectors: the Info dictionary; the catalog's
 /// XMP `/Metadata` and `/OpenAction`, the `/JavaScript` and `/EmbeddedFiles`
 /// name trees, page thumbnails (all via `step_strip_extras`); the structure
-/// tree and outlines; and AcroForm fields orphaned by the flatten. Ends with
-/// a prune so the scrubbed objects don't survive as unreferenced garbage
-/// still containing the text.
+/// tree, outlines, and catalog-level Associated Files; and AcroForm fields
+/// orphaned by the flatten. Ends with a prune so the scrubbed objects don't
+/// survive as unreferenced garbage still containing the text.
 ///
 /// The structure tree (`/StructTreeRoot`) and bookmarks (`/Outlines`) are
 /// dropped wholesale: a tagged PDF's `/ActualText`/`/Alt` strings and bookmark
@@ -433,6 +453,11 @@ fn scrub_acroform(doc: &mut Document) {
 /// can read them (pdfium's text APIs cover page content only), and there is
 /// no provable way to keep just the "safe" parts. The redacted copy loses
 /// accessibility tagging and bookmarks — the standard redaction trade-off.
+///
+/// `/AF` (PDF 2.0 Associated Files) is a second, independent way to attach a
+/// file to the document or a page — distinct from `/Names//EmbeddedFiles`,
+/// which `step_strip_extras` already clears — so it needs its own removal at
+/// both the catalog level (here) and the page level (`replace_page_with_image`).
 fn scrub_leak_vectors(doc: &mut Document) {
     crate::commands::optimize::step_strip_extras(doc);
     doc.trailer.remove(b"Info");
@@ -440,6 +465,7 @@ fn scrub_leak_vectors(doc: &mut Document) {
         catalog.remove(b"StructTreeRoot");
         catalog.remove(b"MarkInfo");
         catalog.remove(b"Outlines");
+        catalog.remove(b"AF");
     }
     scrub_acroform(doc);
     doc.prune_objects();
@@ -461,7 +487,7 @@ fn verify_scrub_postconditions(
         violations.push("document Info dictionary present".to_string());
     }
     if let Ok(catalog) = doc.catalog() {
-        for key in ["Metadata", "StructTreeRoot", "MarkInfo", "Outlines", "OpenAction"] {
+        for key in ["Metadata", "StructTreeRoot", "MarkInfo", "Outlines", "OpenAction", "AF"] {
             if catalog.get(key.as_bytes()).is_ok() {
                 violations.push(format!("catalog /{key} present"));
             }
@@ -488,7 +514,7 @@ fn verify_scrub_postconditions(
             continue;
         }
         if let Ok(page) = doc.get_dictionary(page_id) {
-            for key in ["Annots", "Metadata", "PieceInfo", "Thumb"] {
+            for key in ["Annots", "Metadata", "PieceInfo", "Thumb", "AF"] {
                 if page.get(key.as_bytes()).is_ok() {
                     violations.push(format!("flattened page {page_num}: /{key} present"));
                 }
@@ -1715,6 +1741,28 @@ mod tests {
             },
         });
 
+        // PDF 2.0 Associated Files: a second, independent attachment
+        // mechanism (catalog- or page-level /AF) that bypasses /Names
+        // entirely — its own Filespec/EmbeddedFile pair, at both levels.
+        let af_catalog_file = doc.add_object(Stream::new(
+            dictionary! { "Type" => "EmbeddedFile" },
+            format!("{secret} af catalog payload").into_bytes(),
+        ));
+        let af_catalog_filespec = doc.add_object(dictionary! {
+            "Type" => "Filespec",
+            "F" => Object::string_literal("af-catalog.txt"),
+            "EF" => dictionary! { "F" => Object::Reference(af_catalog_file) },
+        });
+        let af_page_file = doc.add_object(Stream::new(
+            dictionary! { "Type" => "EmbeddedFile" },
+            format!("{secret} af page payload").into_bytes(),
+        ));
+        let af_page_filespec = doc.add_object(dictionary! {
+            "Type" => "Filespec",
+            "F" => Object::string_literal("af-page.txt"),
+            "EF" => dictionary! { "F" => Object::Reference(af_page_file) },
+        });
+
         {
             let catalog = doc.get_dictionary_mut(catalog_id).expect("catalog");
             catalog.set("Metadata", Object::Reference(xmp_id));
@@ -1723,6 +1771,7 @@ mod tests {
             catalog.set("Outlines", Object::Reference(outlines_id));
             catalog.set("AcroForm", Object::Reference(acroform_id));
             catalog.set("Names", Object::Reference(names_id));
+            catalog.set("AF", vec![Object::Reference(af_catalog_filespec)]);
         }
         {
             let page = doc.get_dictionary_mut(page1).expect("page 1");
@@ -1739,6 +1788,7 @@ mod tests {
                 "Annots",
                 vec![Object::Reference(annot), Object::Reference(widget)],
             );
+            page.set("AF", vec![Object::Reference(af_page_filespec)]);
         }
     }
 
@@ -1809,7 +1859,8 @@ mod tests {
             "visible text, and hidden in the Info dictionary, XMP metadata,",
             "the structure tree, a bookmark title, page metadata, PieceInfo,",
             "a sticky-note comment, a form field value, a JavaScript action,",
-            "and an embedded file.",
+            "an embedded file, and two PDF 2.0 Associated Files (catalog and",
+            "page level).",
             "",
             "How to live test:",
             "1. Open this file in Tumbler and open the Redact panel.",
@@ -1864,9 +1915,10 @@ mod tests {
 
     /// The headline guarantee, end to end: redact the page carrying the
     /// secret, and NO copy of it — page text, metadata, structure tree,
-    /// bookmarks, annotations, form value, scripts, attachments — survives
-    /// anywhere in the saved bytes. The fixture seeds ~12 copies; a sanity
-    /// precondition proves they are really there before the run.
+    /// bookmarks, annotations, form value, scripts, attachments (both via
+    /// /Names and via PDF 2.0 /AF) — survives anywhere in the saved bytes.
+    /// The fixture seeds ~13 copies; a sanity precondition proves they are
+    /// really there before the run.
     #[test]
     fn redaction_removes_the_secret_from_every_known_leak_vector() {
         let _guard = crate::test_pdfium_guard();
@@ -1876,7 +1928,7 @@ mod tests {
 
         // Fixture sanity: the secret is seeded broadly (guards fixture rot).
         assert!(
-            count_occurrences(&bytes, SECRET) >= 11,
+            count_occurrences(&bytes, SECRET) >= 13,
             "fixture must seed the secret into every vector, found {}",
             count_occurrences(&bytes, SECRET)
         );
@@ -1986,17 +2038,202 @@ mod tests {
             "/StructTreeRoot",
             "/MarkInfo",
             "/Outlines",
+            "catalog /AF",
             "/JavaScript",     // name tree
             "/EmbeddedFiles",  // name tree
             "page 1: /Annots",
             "page 1: /Metadata",
             "page 1: /PieceInfo",
+            "page 1: /AF",
         ] {
             assert!(
                 violations.iter().any(|v| v.contains(expected)),
                 "the verifier must flag {expected}; got: {violations:?}"
             );
         }
+    }
+
+    // ── Incremental-update revisions ────────────────────────────────────────
+    //
+    // A PDF can be saved as an "incremental update": a new xref/trailer is
+    // appended pointing back at the previous one via /Prev, and the previous
+    // revision's bytes are left physically in the file. A naive redaction
+    // tool that saves this way can leave the pre-redaction revision fully
+    // intact and recoverable — an attacker just truncates the file at the
+    // earlier revision's %%EOF (or a PDF library that stops at the first
+    // trailer it finds) to see the "current" object graph roll back to the
+    // unredacted one. This is a real, documented class of redaction bypass.
+
+    /// Any two-revision PDF, built the same way `Document::save` normally
+    /// stacks incremental updates on top of an existing file. Revision 1 is
+    /// `base_bytes` (must be pre-existing, standalone-valid PDF bytes; the
+    /// caller typically builds this once via `text_pdf_bytes`/`leaky_pdf_bytes`
+    /// and parses it with `Document::load_mem`). Revision 2 redefines the
+    /// page's `/Contents` to point at a brand-new object carrying
+    /// `new_page_text`, while `base_bytes`' original content-stream object is
+    /// left untouched — the classic "cover, don't remove" incremental
+    /// redaction that a naive tool might produce. Returns the full two-
+    /// revision bytes plus the byte offset where revision 1 ends (so a test
+    /// can literally truncate there to perform the attack).
+    fn stack_incremental_revision(base_bytes: &[u8], new_page_text: &str) -> (Vec<u8>, usize) {
+        let base_doc = Document::load_mem(base_bytes).expect("parse base revision");
+        let page_id = *base_doc.get_pages().get(&1).expect("page 1");
+
+        let mut incremental = lopdf::IncrementalDocument::create_from(base_bytes.to_vec(), base_doc);
+        incremental
+            .opt_clone_object_to_new_document(page_id)
+            .expect("clone page into new revision");
+
+        let new_content_id = incremental
+            .new_document
+            .add_object(Stream::new(
+                Dictionary::new(),
+                format!("BT /F1 24 Tf 20 150 Td ({new_page_text}) Tj ET").into_bytes(),
+            ));
+        let page = incremental
+            .new_document
+            .get_object_mut(page_id)
+            .expect("page in new revision")
+            .as_dict_mut()
+            .expect("page dict");
+        page.set("Contents", Object::Reference(new_content_id));
+
+        let mut out = Vec::new();
+        incremental.save_to(&mut out).expect("save incremental");
+        (out, base_bytes.len())
+    }
+
+    /// Establishes the attack is real against a naively-incremental "redaction"
+    /// (not specific to Tumbler): stacking a covering revision on top of a
+    /// secret-bearing base leaves the secret (a) still physically present in
+    /// the raw bytes of the "redacted" two-revision file, and (b) fully
+    /// recoverable by truncating the file back to the first revision's byte
+    /// length — the literal "attacker removes the incremental update" move.
+    #[test]
+    fn naive_incremental_cover_leaves_original_revision_recoverable() {
+        let pdfium = crate::test_pdfium();
+        let base = text_pdf_bytes(&["ZANZIBAR original"]);
+        let (two_revision, split_at) = stack_incremental_revision(&base, "[REDACTED]");
+
+        // The secret's raw bytes are still in the file...
+        assert!(
+            count_occurrences(&two_revision, b"ZANZIBAR") > 0,
+            "the naive construction should leave the secret's bytes in the file"
+        );
+        // ...and a normal parse (following /Prev, newest wins) hides it...
+        let normal_view = pdfium
+            .load_pdf_from_byte_vec(two_revision.clone(), None)
+            .expect("load two-revision file");
+        let shown = normal_view.pages().get(0).expect("page").text().expect("text").all();
+        assert!(shown.contains("REDACTED") && !shown.contains("ZANZIBAR"), "got: {shown:?}");
+        drop(normal_view);
+        // ...but truncating to the first revision's boundary reveals it.
+        let truncated = &two_revision[..split_at];
+        let rolled_back = pdfium
+            .load_pdf_from_byte_vec(truncated.to_vec(), None)
+            .expect("truncated bytes must still be a standalone-valid PDF");
+        let revealed = rolled_back.pages().get(0).expect("page").text().expect("text").all();
+        assert!(
+            revealed.contains("ZANZIBAR"),
+            "truncating to the earlier revision must reveal the secret, got: {revealed:?}"
+        );
+    }
+
+    /// The actual product guarantee: a user opens an already multi-revision
+    /// file (of exactly the kind the previous test shows is exploitable
+    /// against a naive tool) and redacts it in Tumbler. The output must (a)
+    /// contain the secret nowhere, regardless of which revision it lived in,
+    /// and (b) itself be a single, non-incremental revision, so the
+    /// "attacker truncates an earlier %%EOF" move has nothing to peel back.
+    #[test]
+    fn input_with_incremental_update_revision_is_fully_redacted() {
+        let _guard = crate::test_pdfium_guard();
+        let pdfium = crate::test_pdfium();
+        let base = leaky_pdf_bytes("ZANZIBAR"); // secret seeded into every vector
+        // Short cover text: the fixture page is 200pt wide at 24pt Helvetica,
+        // and pdfium's text extraction clips to the page bounds — a longer
+        // string (e.g. "REDACTED-STAMP") would overflow and read back
+        // truncated, which is a rendering artifact unrelated to what this
+        // test checks.
+        let (two_revision, _split_at) = stack_incremental_revision(&base, "REDACTED");
+
+        // Sanity: as in the previous test, a normal parse of the multi-
+        // revision input shows the covering text, not the secret — proving
+        // find-&-redact against the CURRENT view has nothing to mark; the
+        // secret's continued presence in the file is invisible to search.
+        let precheck = pdfium
+            .load_pdf_from_byte_vec(two_revision.clone(), None)
+            .expect("load two-revision input");
+        let shown = precheck.pages().get(0).expect("page").text().expect("text").all();
+        assert!(shown.contains("REDACTED") && !shown.contains("ZANZIBAR"));
+        drop(precheck);
+
+        // Redact the (only visibly-present) covering text — a stand-in for
+        // whatever the user actually marks; the point is the ORIGINAL
+        // secret's fate, which no amount of marking touches directly.
+        let region = RedactRegion {
+            page: 1,
+            rect: TextRect { x: 15.0, y: 130.0, width: 200.0, height: 40.0 },
+        };
+        let (result, output) = apply_redactions_impl(
+            &no_progress,
+            pdfium,
+            &two_revision,
+            &[region],
+            &[],
+            150.0,
+            &empty_engine(),
+            &not_cancelled(),
+        )
+        .expect("apply");
+        assert!(
+            result.verified,
+            "leaks: {:?}, violations: {:?}",
+            result.leaks, result.structural_violations
+        );
+
+        let out = output.expect("output bytes");
+        assert_eq!(
+            count_occurrences(&out, b"ZANZIBAR"),
+            0,
+            "the secret must not survive anywhere in the output, regardless of which \
+             revision of the input it lived in"
+        );
+        // And the output itself gives an attacker nothing to truncate back to.
+        assert_eq!(count_occurrences(&out, b"startxref"), 1, "output must be a single revision");
+        assert!(
+            Document::load_mem(&out).expect("parse output").trailer.get(b"Prev").is_err(),
+            "output trailer must not chain to a previous revision"
+        );
+    }
+
+    /// Structural invariant, independent of any multi-revision input: the
+    /// pipeline's own output is always exactly one PDF revision. Pins the
+    /// property the two tests above rely on `apply_redactions_impl` having.
+    #[test]
+    fn redaction_output_is_a_single_pdf_revision() {
+        let _guard = crate::test_pdfium_guard();
+        let pdfium = crate::test_pdfium();
+        let bytes = text_pdf_bytes(&["Top Secret"]);
+
+        let (_result, output) = apply_redactions_impl(
+            &no_progress,
+            pdfium,
+            &bytes,
+            &[full_page_region(1)],
+            &[],
+            150.0,
+            &empty_engine(),
+            &not_cancelled(),
+        )
+        .expect("apply");
+        let out = output.expect("output bytes");
+
+        assert_eq!(count_occurrences(&out, b"%PDF-"), 1, "exactly one PDF header");
+        assert_eq!(count_occurrences(&out, b"startxref"), 1, "exactly one xref pointer");
+        assert_eq!(count_occurrences(&out, b"%%EOF"), 1, "exactly one end-of-file marker");
+        let doc = Document::load_mem(&out).expect("parse output");
+        assert!(doc.trailer.get(b"Prev").is_err(), "trailer must not chain to a previous revision");
     }
 
     /// Check 4 fails closed: if a text-bearing structure the text checks can't
