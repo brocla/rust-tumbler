@@ -26,6 +26,7 @@ use crate::commands::ocr::{
     cache_get, ocr_page_into_cache, ocr_words_to_lines, OcrCache, OcrEngine, OcrLine, OcrProgress,
     OcrWord,
 };
+use crate::commands::text::page_text_in_document_order;
 use crate::error::AppError;
 use crate::state::{lock_mutex, AppState, DocEntry};
 use lopdf::content::{Content, Operation};
@@ -506,7 +507,7 @@ pub(crate) fn add_text_layer_impl_filtered(
                 .get(i as i32)
                 .map_err(|e| AppError::pdfium(format!("Failed to get page {page_num}"), e))?;
             page.text()
-                .map(|t| t.all())
+                .map(|t| page_text_in_document_order(&t))
                 .unwrap_or_default()
                 .trim()
                 .is_empty()

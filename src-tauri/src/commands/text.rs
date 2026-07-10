@@ -61,6 +61,24 @@ pub(crate) fn page_origin(page: &PdfPage) -> (f32, f32) {
     }
 }
 
+/// Returns a page's full text by walking its characters in document order and
+/// concatenating their Unicode values.
+///
+/// Prefer this over `PdfPageText::all()` for anything that consumes the text
+/// content. `all()` routes through pdfium's `FPDFText_GetBoundedText`, which
+/// reconstructs reading order from glyph geometry; that reconstruction is
+/// unreliable on rotated / absolutely-positioned multi-column layouts and can
+/// silently drop or scramble whole regions of a page (issue #80). Walking
+/// characters in the order they are defined in the content stream avoids the
+/// geometric sort entirely — it is the correct reading order for well-authored
+/// documents and preserves any line breaks encoded into the glyph stream.
+pub(crate) fn page_text_in_document_order(text: &PdfPageText) -> String {
+    text.chars()
+        .iter()
+        .filter_map(|ch| ch.unicode_char())
+        .collect()
+}
+
 #[tauri::command]
 pub fn extract_page_text(
     state: State<'_, AppState>,
@@ -267,7 +285,7 @@ pub(crate) fn search_document_impl(
             // Deduplication prevents calling text.search() N times for the
             // same string, which would return all page-wide occurrences each
             // time and produce duplicate rects.
-            let full_text = text.all();
+            let full_text = page_text_in_document_order(&text);
             let unique_matches: std::collections::HashSet<&str> =
                 re.find_iter(&full_text).map(|m| m.as_str()).collect();
             // Use match_case(true): matched_str is the exact string the regex
@@ -437,7 +455,10 @@ fn count_pages_without_text_impl(
             .pages()
             .get(i)
             .map_err(|e| AppError::pdfium(format!("Failed to get page {page_num}"), e))?;
-        let content = page.text().map(|t| t.all()).unwrap_or_default();
+        let content = page
+            .text()
+            .map(|t| page_text_in_document_order(&t))
+            .unwrap_or_default();
         // A page already OCR'd (cached) is "covered" even though its native
         // text layer is still empty.
         if content.trim().is_empty() && cache_get(&cache, &doc_id, page_num).is_none() {
@@ -515,7 +536,9 @@ fn export_text_impl(
                 .pages()
                 .get(i as i32)
                 .map_err(|e| AppError::pdfium(format!("Failed to get page {page_num}"), e))?;
-            page.text().map(|t| t.all()).unwrap_or_default()
+            page.text()
+                .map(|t| page_text_in_document_order(&t))
+                .unwrap_or_default()
         }; // lock released here
 
         let page_text = if !native.trim().is_empty() {
@@ -604,6 +627,25 @@ mod tests {
         assert!((item.y - 78.28).abs() < 0.5, "unexpected y: {}", item.y);
         assert!(item.width > 100.0, "unexpected width: {}", item.width);
         assert!(item.height > 0.0, "unexpected height: {}", item.height);
+    }
+
+    /// `page_text_in_document_order` (the `.all()` replacement introduced for
+    /// issue #80) must return a page's text by walking characters in document
+    /// order. On the simple fixture this equals the run text; the point of the
+    /// helper is that it never routes through `FPDFText_GetBoundedText`, whose
+    /// geometric reading-order reconstruction corrupts rotated / multi-column
+    /// layouts. (The document that reproduces that corruption contains private
+    /// data and cannot be checked in; this pins the helper's basic contract.)
+    #[test]
+    fn page_text_in_document_order_reads_fixture_text() {
+        let _guard = crate::test_pdfium_guard();
+        let pdfium = crate::test_pdfium();
+        let src = crate::fixture_path();
+        let entry = DocEntry::load(pdfium, &src.to_string_lossy(), None).expect("load pdf");
+        let page = entry.document.pages().get(0).expect("page 1");
+        let text = page.text().expect("text");
+
+        assert_eq!(page_text_in_document_order(&text), "Test Fixture");
     }
 
     #[test]
