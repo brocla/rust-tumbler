@@ -40,6 +40,12 @@ dunce = "1"
 # password-protected document (commands/encryption.rs). Already in the tree
 # transitively (uuid).
 getrandom = "0.3"
+# Local date/time for the `/ModDate`/`/CreationDate` stamps Save writes into the
+# Info dict (issue #74). chrono over the `time` crate because `time` refuses to
+# read the local UTC offset in a multithreaded process; chrono handles it.
+# Already resolved (0.4.x) in the tree via lopdf's `chrono` feature, so this
+# adds no new copy.
+chrono = "0.4"
 
 # time is not used directly; it comes in transitively via cookie (Tauri).
 # It was formerly pinned to =0.3.41 to dodge a blanket-impl conflict with

@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { usePdfStore } from "../store/usePdfStore";
 import { confirmBreakingEdit } from "../utils/confirmBreakingEdit";
+import { formatPdfDate } from "../utils/pdfDate";
 import {
   isSigned,
   SIGNATURE_EDIT_WARNING,
@@ -206,8 +207,9 @@ export function MetadataPanel() {
 
   const readOnlyFields = [
     { label: "Producer", value: metadata.producer },
-    { label: "Created", value: metadata.creationDate },
-    { label: "Modified", value: metadata.modDate },
+    // Dates are formatted for display only; the stored PDF value is untouched.
+    { label: "Created", value: formatPdfDate(metadata.creationDate) },
+    { label: "Modified", value: formatPdfDate(metadata.modDate) },
     // Honest wording: we report only what the file declares, not validated
     // compliance. Joined claims read e.g. "Declares PDF/A-2b, PDF/UA-1".
     {

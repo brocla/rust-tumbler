@@ -4429,6 +4429,7 @@ checksum = "d2df906b07856748fa3f6e0ad0cbaa047052d4a7dd609e231c4f72cee8c36f31"
 name = "tumbler"
 version = "2.10.7"
 dependencies = [
+ "chrono",
  "dunce",
  "flate2",
  "getrandom 0.3.4",
