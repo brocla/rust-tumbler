@@ -52,7 +52,8 @@ fn get_metadata_impl(state: &AppState, doc_id: String) -> Result<DocumentMetadat
         creator: read_meta_tag(&meta, PdfDocumentMetadataTagType::Creator),
         producer: read_meta_tag(&meta, PdfDocumentMetadataTagType::Producer),
         creation_date: read_meta_tag(&meta, PdfDocumentMetadataTagType::CreationDate),
-        mod_date: read_meta_tag(&meta, PdfDocumentMetadataTagType::ModificationDate),
+        // Read /ModDate via lopdf — pdfium-render can't (wrong Info key).
+        mod_date: read_info_text(&entry.buffer, b"ModDate"),
     })
 }
 
@@ -60,6 +61,48 @@ fn read_meta_tag(meta: &PdfMetadata, tag: PdfDocumentMetadataTagType) -> String 
     meta.get(tag)
         .map(|t| t.value().to_string())
         .unwrap_or_default()
+}
+
+/// Reads a PDF text string from the Info dict of `bytes` by `key`, decoding a
+/// UTF-16BE (BOM-prefixed) or a Latin-1/ASCII literal. Empty when absent or on
+/// any parse failure.
+///
+/// Used for `/ModDate`: pdfium-render 0.9 queries the modification date under
+/// the wrong Info key ("ModificationDate" instead of "ModDate"), so it can
+/// never surface a real document's modification date (issue #74). lopdf reads
+/// it correctly from the buffer.
+fn read_info_text(bytes: &[u8], key: &[u8]) -> String {
+    let Ok(doc) = lopdf::Document::load_mem(bytes) else {
+        return String::new();
+    };
+    let info = doc
+        .trailer
+        .get(b"Info")
+        .ok()
+        .and_then(|o| o.as_reference().ok())
+        .and_then(|id| doc.get_object(id).ok());
+    let Some(Object::Dictionary(dict)) = info else {
+        return String::new();
+    };
+    match dict.get(key).ok().and_then(|o| o.as_str().ok()) {
+        Some(raw) => decode_pdf_text_string(raw),
+        None => String::new(),
+    }
+}
+
+/// Decodes the raw bytes of a PDF string object into a Rust `String`: UTF-16BE
+/// when byte-order-marked, otherwise byte-for-byte as Latin-1 (the ASCII path
+/// `pdf_text_string` writes for dates falls out of this unchanged).
+fn decode_pdf_text_string(raw: &[u8]) -> String {
+    if raw.len() >= 2 && raw[0] == 0xFE && raw[1] == 0xFF {
+        let units: Vec<u16> = raw[2..]
+            .chunks_exact(2)
+            .map(|c| u16::from_be_bytes([c[0], c[1]]))
+            .collect();
+        String::from_utf16_lossy(&units)
+    } else {
+        raw.iter().map(|&b| b as char).collect()
+    }
 }
 
 /// Writes Title, Author, Subject, Keywords, and Creator into the document's
@@ -96,7 +139,8 @@ fn set_metadata_impl(
             entry.buffer.clone(),
             read_meta_tag(&meta, PdfDocumentMetadataTagType::Producer),
             read_meta_tag(&meta, PdfDocumentMetadataTagType::CreationDate),
-            read_meta_tag(&meta, PdfDocumentMetadataTagType::ModificationDate),
+            // /ModDate via lopdf — pdfium-render can't read it (wrong Info key).
+            read_info_text(&entry.buffer, b"ModDate"),
         )
     };
 
@@ -163,6 +207,78 @@ fn write_metadata(bytes: &[u8], metadata: &MetadataUpdate) -> Result<Vec<u8>, Ap
     lopdf_doc
         .save_to(&mut out)
         .map_err(|e| AppError::io("Failed to serialize PDF after metadata update", e))?;
+    Ok(out)
+}
+
+/// The current local time as a PDF date string, e.g. `D:20260710143005-04'00'`
+/// (PDF 32000-1 §7.9.4). chrono's `%z` gives `-0400`; PDF wants the apostrophes.
+fn pdf_date_now() -> String {
+    let now = chrono::Local::now();
+    let stamp = now.format("D:%Y%m%d%H%M%S%z").to_string();
+    // Turn the trailing `±HHMM` into `±HH'mm'`. Any well-formed `%z` output ends
+    // in five chars (sign + four digits); leave anything unexpected untouched.
+    let bytes = stamp.as_bytes();
+    if bytes.len() >= 5 {
+        let (head, off) = stamp.split_at(stamp.len() - 5);
+        if matches!(off.as_bytes()[0], b'+' | b'-') && off[1..].bytes().all(|b| b.is_ascii_digit()) {
+            return format!("{head}{}{}'{}'", &off[..1], &off[1..3], &off[3..5]);
+        }
+    }
+    stamp
+}
+
+/// Stamps the Info-dict fields Save should own (issue #74) into the PDF given
+/// as `bytes`, returning the edited bytes:
+/// - `/ModDate` → now (the file is being written to disk).
+/// - `/Producer` → `Tumbler <version>` (the last application to write the file).
+///
+/// Deliberately never touches `/CreationDate` — Tumbler views and edits PDFs
+/// but does not author them, so a document's creation date is not Tumbler's to
+/// set, even when it's absent.
+///
+/// Tauri-free so Save can call it while holding the document lock, and so it's
+/// unit-testable without `AppState`.
+pub(crate) fn stamp_save_metadata(bytes: &[u8]) -> Result<Vec<u8>, AppError> {
+    let mut lopdf_doc = lopdf::Document::load_mem(bytes)
+        .map_err(|e| AppError::lopdf("Failed to parse PDF for metadata stamp", e))?;
+
+    let info_id = lopdf_doc
+        .trailer
+        .get(b"Info")
+        .ok()
+        .and_then(|obj| obj.as_reference().ok());
+
+    let mut info_dict = match info_id.and_then(|id| lopdf_doc.get_object(id).ok()) {
+        Some(Object::Dictionary(dict)) => dict.clone(),
+        _ => Dictionary::new(),
+    };
+
+    info_dict.set("ModDate", pdf_text_string(&pdf_date_now()));
+    info_dict.set(
+        "Producer",
+        pdf_text_string(&format!("Tumbler {}", env!("CARGO_PKG_VERSION"))),
+    );
+
+    match info_id {
+        Some(id) => {
+            lopdf_doc.objects.insert(id, Object::Dictionary(info_dict));
+        }
+        None => {
+            let new_id = lopdf_doc.add_object(Object::Dictionary(info_dict));
+            lopdf_doc.trailer.set("Info", Object::Reference(new_id));
+        }
+    }
+
+    // Same stale-xref caveat as `write_metadata`: `save_to` writes one fresh
+    // cross-reference table, so the trailer's `/Prev`/`/XRefStm` pointers into
+    // the original file must go or the next `load_mem` rejects them.
+    lopdf_doc.trailer.remove(b"Prev");
+    lopdf_doc.trailer.remove(b"XRefStm");
+
+    let mut out = Vec::new();
+    lopdf_doc
+        .save_to(&mut out)
+        .map_err(|e| AppError::io("Failed to serialize PDF after metadata stamp", e))?;
     Ok(out)
 }
 
@@ -291,6 +407,119 @@ mod tests {
         );
 
         std::fs::remove_file(&tmp).ok();
+    }
+
+    /// `pdf_date_now` produces a well-formed PDF date string:
+    /// `D:YYYYMMDDHHmmSS` followed by `Z`-style or `±HH'mm'` offset.
+    #[test]
+    fn pdf_date_now_is_well_formed() {
+        let s = pdf_date_now();
+        assert!(s.starts_with("D:"), "must start with D:, got {s}");
+        // D: + 14 digits = 16 chars, then a `±HH'mm'` (7 chars) offset.
+        assert!(s.len() >= 16, "too short: {s}");
+        assert!(s[2..16].bytes().all(|b| b.is_ascii_digit()), "non-digit date: {s}");
+        let off = &s[16..];
+        assert!(
+            matches!(off.as_bytes().first(), Some(b'+') | Some(b'-')),
+            "offset must be signed: {s}"
+        );
+        assert!(off.ends_with('\''), "offset must end with an apostrophe: {s}");
+    }
+
+    /// Save's stamp sets `/ModDate` and `/Producer` but never adds a
+    /// `/CreationDate` — Tumbler doesn't author documents, so a blank creation
+    /// date stays blank. The result still opens in pdfium.
+    #[test]
+    fn stamp_save_metadata_sets_moddate_and_producer_without_adding_creationdate() {
+        let bytes = std::fs::read(crate::fixture_path()).expect("read fixture");
+
+        let stamped = stamp_save_metadata(&bytes).expect("stamp");
+
+        // /ModDate must be read via lopdf — pdfium-render uses the wrong key.
+        let mod_date = read_info_text(&stamped, b"ModDate");
+        assert!(mod_date.starts_with("D:"), "ModDate not stamped: {mod_date}");
+
+        let pdfium = crate::test_pdfium();
+        let doc = pdfium
+            .load_pdf_from_byte_vec(stamped, None)
+            .expect("pdfium reload");
+        let meta = doc.metadata();
+
+        assert_eq!(
+            read_meta_tag(&meta, PdfDocumentMetadataTagType::Producer),
+            format!("Tumbler {}", env!("CARGO_PKG_VERSION"))
+        );
+        // The fixture carries no CreationDate; the stamp must not invent one.
+        assert_eq!(
+            read_meta_tag(&meta, PdfDocumentMetadataTagType::CreationDate),
+            "",
+            "stamp must not add a CreationDate"
+        );
+    }
+
+    /// An existing `/CreationDate` is left exactly as-is — Tumbler never writes
+    /// the creation date, whether the document has one or not.
+    #[test]
+    fn stamp_save_metadata_preserves_existing_creationdate() {
+        let bytes = std::fs::read(crate::fixture_path()).expect("read fixture");
+        // Seed a known CreationDate first.
+        let mut doc = lopdf::Document::load_mem(&bytes).expect("load");
+        let info_id = doc
+            .trailer
+            .get(b"Info")
+            .ok()
+            .and_then(|o| o.as_reference().ok());
+        let mut info = match info_id.and_then(|id| doc.get_object(id).ok()) {
+            Some(Object::Dictionary(d)) => d.clone(),
+            _ => Dictionary::new(),
+        };
+        info.set("CreationDate", pdf_text_string("D:20200101000000Z"));
+        match info_id {
+            Some(id) => {
+                doc.objects.insert(id, Object::Dictionary(info));
+            }
+            None => {
+                let id = doc.add_object(Object::Dictionary(info));
+                doc.trailer.set("Info", Object::Reference(id));
+            }
+        }
+        doc.trailer.remove(b"Prev");
+        doc.trailer.remove(b"XRefStm");
+        let mut seeded = Vec::new();
+        doc.save_to(&mut seeded).expect("serialize seeded");
+
+        let stamped = stamp_save_metadata(&seeded).expect("stamp");
+
+        let pdfium = crate::test_pdfium();
+        let reloaded = pdfium
+            .load_pdf_from_byte_vec(stamped, None)
+            .expect("pdfium reload");
+        assert_eq!(
+            read_meta_tag(&reloaded.metadata(), PdfDocumentMetadataTagType::CreationDate),
+            "D:20200101000000Z",
+            "existing CreationDate must be preserved"
+        );
+    }
+
+    /// The stamp survives a second reparse on a `/Prev`-chained PDF, same as
+    /// `write_metadata` (the stale-xref caveat applies to both).
+    #[test]
+    fn stamp_save_metadata_survives_reparse_on_pdf_with_prev_xref() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/forms/f8946.pdf");
+        let bytes = std::fs::read(&path).expect("read f8946");
+
+        let once = stamp_save_metadata(&bytes).expect("first stamp");
+        let twice = stamp_save_metadata(&once).expect("second stamp must reparse");
+
+        let pdfium = crate::test_pdfium();
+        let doc = pdfium
+            .load_pdf_from_byte_vec(twice, None)
+            .expect("pdfium reload");
+        assert_eq!(
+            read_meta_tag(&doc.metadata(), PdfDocumentMetadataTagType::Producer),
+            format!("Tumbler {}", env!("CARGO_PKG_VERSION"))
+        );
     }
 
     /// Regression: incrementally-updated real-world PDFs (e.g. the IRS form

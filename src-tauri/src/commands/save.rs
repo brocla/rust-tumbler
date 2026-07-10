@@ -49,6 +49,27 @@ fn bytes_for_disk(entry: &crate::state::DocEntry) -> Result<std::borrow::Cow<'_,
     }
 }
 
+/// Stamps `/ModDate`, `/Producer`, and (if missing) `/CreationDate` into the
+/// document's plaintext buffer and rebuilds the pdfium view from the result
+/// (issue #74), so the disk file, the in-memory buffer, and the metadata panel
+/// all agree after a save. Called while holding the entry lock mid-save, so it
+/// updates the fields directly instead of going through
+/// `set_buffer_and_refresh` (which would re-dirty the doc and fire events —
+/// wrong here, since Save is about to clear dirty).
+fn stamp_and_refresh_buffer(
+    state: &AppState,
+    entry: &mut crate::state::DocEntry,
+) -> Result<(), AppError> {
+    let stamped = crate::commands::metadata::stamp_save_metadata(&entry.buffer)?;
+    let document = state
+        .pdfium
+        .load_pdf_from_byte_vec(stamped.clone(), None)
+        .map_err(|e| AppError::pdfium("Failed to reload PDF after metadata stamp", e))?;
+    entry.document = document;
+    entry.buffer = stamped;
+    Ok(())
+}
+
 /// Atomically writes `bytes` to `dest_path` (temp file in the same directory,
 /// then rename), so a crash or disk-full error can't leave a truncated file.
 pub(crate) fn atomic_write(dest_path: &str, bytes: &[u8]) -> Result<(), AppError> {
@@ -72,6 +93,10 @@ pub fn save_document(
     doc_id: String,
 ) -> Result<(), String> {
     save_document_impl(&state, &doc_id).map_err(String::from)?;
+    // Save stamps /ModDate, /Producer, and (if missing) /CreationDate into the
+    // buffer (issue #74); tell any open metadata panel to refresh so those
+    // fields reflect the just-saved values.
+    let _ = app.emit("document-metadata-changed", vec![doc_id.clone()]);
     let _ = app.emit(
         "document-dirty-changed",
         dirty_changed_payload(&state, doc_id, false),
@@ -82,6 +107,7 @@ pub fn save_document(
 pub(crate) fn save_document_impl(state: &AppState, doc_id: &str) -> Result<(), AppError> {
     let entry_arc = state.get_document(doc_id)?;
     let mut entry = lock_mutex(&entry_arc)?;
+    stamp_and_refresh_buffer(state, &mut entry)?;
     let bytes = bytes_for_disk(&entry)?;
     atomic_write(&entry.file_path, &bytes)?;
     entry.dirty = false;
@@ -100,6 +126,8 @@ pub fn save_document_as(
     dest_path: String,
 ) -> Result<String, String> {
     let canonical = save_document_as_impl(&state, &doc_id, &dest_path).map_err(String::from)?;
+    // See save_document: Save As stamps the same Info fields (issue #74).
+    let _ = app.emit("document-metadata-changed", vec![doc_id.clone()]);
     let _ = app.emit(
         "document-dirty-changed",
         dirty_changed_payload(&state, doc_id, false),
@@ -129,6 +157,7 @@ pub(crate) fn save_document_as_impl(
 
     let entry_arc = state.get_document(doc_id)?;
     let mut entry = lock_mutex(&entry_arc)?;
+    stamp_and_refresh_buffer(state, &mut entry)?;
     let bytes = bytes_for_disk(&entry)?;
     atomic_write(dest_path, &bytes)?;
 
@@ -375,6 +404,64 @@ mod tests {
             bytes.windows(b"/Encrypt".len()).any(|w| w == b"/Encrypt"),
             "owner-only save must still carry /Encrypt"
         );
+    }
+
+    /// Save stamps `/ModDate` and `/Producer` into the file on disk (issue #74),
+    /// and the in-memory buffer reflects the same values afterward, so the
+    /// metadata panel is correct without a reload. `/ModDate` is checked via
+    /// lopdf — pdfium-render reads it under the wrong Info key.
+    #[test]
+    fn save_stamps_moddate_and_producer_on_disk_and_in_buffer() {
+        use pdfium_render::prelude::PdfDocumentMetadataTagType as Tag;
+        let _guard = crate::test_pdfium_guard();
+        let pdfium = crate::test_pdfium();
+        let state = AppState::new(pdfium, None);
+        let path = open_fixture_copy(&state, "doc1", "tumbler_stamp_test.pdf");
+
+        // Dirty the doc so Save actually runs.
+        crate::commands::pages::rotate_pages_impl(&state, "doc1".to_string(), vec![1], 1)
+            .expect("rotate");
+        save_document_impl(&state, "doc1").expect("save");
+
+        let expected_producer = format!("Tumbler {}", env!("CARGO_PKG_VERSION"));
+
+        // /ModDate on disk (via lopdf).
+        let disk = std::fs::read(&path).expect("read disk");
+        let disk_doc = lopdf::Document::load_mem(&disk).expect("parse disk");
+        let disk_mod = disk_doc
+            .trailer
+            .get(b"Info")
+            .ok()
+            .and_then(|o| o.as_reference().ok())
+            .and_then(|id| disk_doc.get_object(id).ok())
+            .and_then(|o| o.as_dict().ok())
+            .and_then(|d| d.get(b"ModDate").ok())
+            .and_then(|o| o.as_str().ok())
+            .map(|b| String::from_utf8_lossy(b).into_owned())
+            .unwrap_or_default();
+        assert!(disk_mod.starts_with("D:"), "disk ModDate not stamped: {disk_mod}");
+
+        // /Producer on disk (via pdfium — its key is correct).
+        let reopened = pdfium.load_pdf_from_file(&path, None).expect("reopen");
+        assert_eq!(
+            reopened
+                .metadata()
+                .get(Tag::Producer)
+                .map(|v| v.value().to_string())
+                .unwrap_or_default(),
+            expected_producer,
+            "disk Producer not stamped"
+        );
+
+        // The in-memory buffer carries the same stamp (what get_metadata reads),
+        // and the doc is clean after save.
+        let entry_arc = state.get_document("doc1").expect("get");
+        let entry = lock_mutex(&entry_arc).expect("lock");
+        assert_eq!(entry.buffer, disk, "buffer must match the stamped disk bytes");
+        assert!(!entry.dirty, "doc must be clean after save");
+        drop(entry);
+
+        std::fs::remove_file(&path).ok();
     }
 
     /// Saving to the document's *own* path via Save As is allowed (it's just
