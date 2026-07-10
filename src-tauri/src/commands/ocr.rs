@@ -1,6 +1,6 @@
 use crate::error::AppError;
 use crate::state::{lock_mutex, AppState, DocEntry};
-use crate::commands::text::TextRect;
+use crate::commands::text::{page_text_in_document_order, TextRect};
 use pdfium_render::prelude::*;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -361,7 +361,7 @@ fn ocr_document_impl(
                 .get(i as i32)
                 .map_err(|e| AppError::pdfium(format!("Failed to get page {page_num}"), e))?;
             page.text()
-                .map(|t| t.all())
+                .map(|t| page_text_in_document_order(&t))
                 .unwrap_or_default()
                 .trim()
                 .is_empty()
