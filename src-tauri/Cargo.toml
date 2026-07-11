@@ -3,7 +3,7 @@ members = [".", "thumbnailer"]
 
 [package]
 name = "tumbler"
-version = "2.10.11"
+version = "2.10.12"
 edition = "2021"
 
 [lib]
