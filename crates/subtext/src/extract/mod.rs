@@ -7,17 +7,109 @@
 //! drift from the set of implemented extractors.
 
 use crate::query::Query;
-use crate::report::{Finding, Vector};
+use crate::report::{Finding, Signal, Vector};
 use pdfium_render::prelude::PdfDocument;
 
+pub mod annotations;
+pub mod article_threads;
+pub mod attachments;
+pub mod destinations;
+pub mod forms;
+pub mod marked_content;
+pub mod metadata;
+pub mod optional_content;
+pub mod outlines;
+pub mod page_labels;
 pub mod page_text;
+pub mod redaction;
+pub mod scripts;
+pub mod signatures;
+pub mod structure;
+pub mod uris;
+pub mod xfa;
 
-/// What one check saw. `Ran` means the check executed (empty ⇒ clean);
+/// What one check saw. `Ran` means the check executed (no findings ⇒ clean);
 /// `Skipped` means it could not run and says why — never silently dropped
-/// (spec §1 honesty rule 2).
+/// (spec §1 honesty rule 2). `signals` carries query-independent suspicions
+/// (§3.4) alongside any findings.
 pub enum CheckOutcome {
-    Ran(Vec<Finding>),
+    Ran {
+        findings: Vec<Finding>,
+        signals: Vec<Signal>,
+    },
     Skipped(String),
+}
+
+impl CheckOutcome {
+    /// A completed run with findings only (the common case).
+    pub fn ran(findings: Vec<Finding>) -> Self {
+        CheckOutcome::Ran {
+            findings,
+            signals: Vec::new(),
+        }
+    }
+}
+
+/// Runs `query` against one decoded string and materializes a finding per
+/// match under `vector` at `location` — the single matching path every
+/// string-source extractor shares, so the query modes can never diverge
+/// between vectors.
+pub(crate) fn findings_in(
+    haystack: &str,
+    query: &Query,
+    vector: Vector,
+    location: &str,
+    page: Option<u32>,
+    out: &mut Vec<Finding>,
+) {
+    for span in query.find_all(haystack) {
+        out.push(Finding {
+            vector,
+            location: location.to_string(),
+            matched_text: span.text.clone(),
+            context: snippet(haystack, span.start, span.end),
+            page,
+            revision: None,
+            container: None,
+        });
+    }
+}
+
+/// A trimmed one-line snippet of `haystack` around `[start, end)`, with up to
+/// `PAD` chars of context on each side and ellipses when truncated. Operates on
+/// char boundaries so multi-byte text is never split mid-codepoint.
+pub(crate) fn snippet(haystack: &str, start: usize, end: usize) -> String {
+    const PAD: usize = 40;
+    let lo = floor_char_boundary(haystack, start.saturating_sub(PAD));
+    let hi = ceil_char_boundary(haystack, (end + PAD).min(haystack.len()));
+    let mut out = String::new();
+    if lo > 0 {
+        out.push('…');
+    }
+    out.push_str(haystack[lo..hi].trim());
+    if hi < haystack.len() {
+        out.push('…');
+    }
+    // Collapse any embedded newlines/tabs so the snippet stays one line.
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Largest char boundary `<= i` (std's `floor_char_boundary` is still nightly).
+fn floor_char_boundary(s: &str, i: usize) -> usize {
+    let mut i = i.min(s.len());
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+/// Smallest char boundary `>= i`.
+fn ceil_char_boundary(s: &str, i: usize) -> usize {
+    let mut i = i.min(s.len());
+    while i < s.len() && !s.is_char_boundary(i) {
+        i += 1;
+    }
+    i
 }
 
 /// Everything a check needs to inspect one document. The two parser views are
@@ -95,118 +187,22 @@ pub static REGISTRY: &[&dyn VectorCheck] = &[
         method: "OCR engine (feature \"ocr\")",
         phase: "Phase 3, opt-in --ocr",
     },
-    &Pending {
-        id: "metadata",
-        label: "Document metadata",
-        vector: Vector::Metadata,
-        method: "Info + all /Metadata XMP",
-        phase: "Phase 2",
-    },
-    &Pending {
-        id: "structure_tree",
-        label: "Structure tree",
-        vector: Vector::StructureTree,
-        method: "/StructTreeRoot walk",
-        phase: "Phase 2",
-    },
-    &Pending {
-        id: "marked_content",
-        label: "Marked content",
-        vector: Vector::MarkedContent,
-        method: "content-stream /ActualText",
-        phase: "Phase 2",
-    },
-    &Pending {
-        id: "outlines",
-        label: "Bookmarks",
-        vector: Vector::Outlines,
-        method: "/Outlines walk",
-        phase: "Phase 2",
-    },
-    &Pending {
-        id: "page_labels",
-        label: "Page labels",
-        vector: Vector::PageLabels,
-        method: "/PageLabels number tree",
-        phase: "Phase 2",
-    },
-    &Pending {
-        id: "destinations",
-        label: "Named destinations",
-        vector: Vector::Destinations,
-        method: "/Names/Dests name tree",
-        phase: "Phase 2",
-    },
-    &Pending {
-        id: "article_threads",
-        label: "Article threads",
-        vector: Vector::ArticleThreads,
-        method: "/Threads bead /I",
-        phase: "Phase 2",
-    },
-    &Pending {
-        id: "annotations",
-        label: "Annotations",
-        vector: Vector::Annotations,
-        method: "/Annots + /AP appearance streams",
-        phase: "Phase 2",
-    },
-    &Pending {
-        id: "redaction_annotations",
-        label: "Redaction annotations",
-        vector: Vector::RedactionAnnotations,
-        method: "/Redact annotation scan",
-        phase: "Phase 2",
-    },
-    &Pending {
-        id: "forms",
-        label: "Form fields",
-        vector: Vector::Forms,
-        method: "AcroForm /Fields walk",
-        phase: "Phase 2",
-    },
-    &Pending {
-        id: "xfa",
-        label: "XFA forms",
-        vector: Vector::Xfa,
-        method: "/XFA datasets + template",
-        phase: "Phase 2",
-    },
-    &Pending {
-        id: "attachments",
-        label: "Attachments",
-        vector: Vector::Attachments,
-        method: "/EmbeddedFiles + /AF",
-        phase: "Phase 2",
-    },
-    &Pending {
-        id: "scripts",
-        label: "Scripts & actions",
-        vector: Vector::Scripts,
-        method: "/JavaScript, /OpenAction, /AA",
-        phase: "Phase 2",
-    },
-    &Pending {
-        id: "uris",
-        label: "URIs & web capture",
-        vector: Vector::Uris,
-        method: "URI actions + /SpiderInfo",
-        phase: "Phase 2",
-    },
-    &Pending {
-        id: "optional_content",
-        label: "Optional content",
-        vector: Vector::OptionalContent,
-        method: "OCG /Name labels",
-        phase: "Phase 2",
-    },
-    &Pending {
-        id: "signatures",
-        label: "Signatures",
-        vector: Vector::Signatures,
-        method: "/Contents hex → DER scan",
-        phase: "Phase 2",
-    },
+    &metadata::Metadata,
+    &structure::StructureTree,
+    &marked_content::MarkedContent,
+    &outlines::Outlines,
+    &page_labels::PageLabels,
+    &destinations::Destinations,
+    &article_threads::ArticleThreads,
+    &annotations::Annotations,
+    &redaction::RedactionAnnotations,
+    &forms::Forms,
+    &xfa::Xfa,
+    &attachments::Attachments,
+    &scripts::Scripts,
+    &uris::Uris,
+    &optional_content::OptionalContent,
+    &signatures::Signatures,
     &Pending {
         id: "revisions",
         label: "Superseded revisions",

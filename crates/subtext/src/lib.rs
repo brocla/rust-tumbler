@@ -16,15 +16,17 @@
 //! [`Report`]. The CLI (`bin/subtext.rs`) is a thin wrapper around it.
 
 pub mod extract;
+pub mod pdf;
 pub mod query;
 pub mod report;
+pub mod xml;
 
 pub use query::{Query, QueryMode};
 pub use report::{Report, RiskScore, RiskTone};
 
 use extract::{CheckOutcome, DocContext, REGISTRY};
 use pdfium_render::prelude::Pdfium;
-use report::{Check, CheckStatus, CheckTone, Finding, QueryReport};
+use report::{Check, CheckStatus, CheckTone, Finding, QueryReport, Signal};
 
 /// Runs the full vector inventory against one PDF and returns its report.
 ///
@@ -52,7 +54,7 @@ pub fn check_pdf(pdfium: &Pdfium, bytes: &[u8], file_name: &str, query: &Query) 
     // Run every registered check in an inner scope, so the borrows the context
     // holds on the two doc handles end before those handles drop (a
     // `PdfDocument` borrows the `Pdfium` binding, so drop order is load-bearing).
-    let (checks, findings) = {
+    let (checks, findings, signals) = {
         let ctx = DocContext {
             bytes,
             lopdf: lopdf_doc.as_ref(),
@@ -61,16 +63,34 @@ pub fn check_pdf(pdfium: &Pdfium, bytes: &[u8], file_name: &str, query: &Query) 
 
         let mut checks = Vec::with_capacity(REGISTRY.len());
         let mut findings: Vec<Finding> = Vec::new();
+        let mut signals: Vec<Signal> = Vec::new();
 
         for check in REGISTRY {
             let (tone, status, detail) = match check.run(&ctx, query) {
-                CheckOutcome::Ran(hits) if hits.is_empty() => {
-                    (CheckTone::Passed, CheckStatus::CheckedClean, "No matches".to_string())
-                }
-                CheckOutcome::Ran(mut hits) => {
-                    let detail = summarize_hits(&hits);
-                    findings.append(&mut hits);
-                    (CheckTone::Leak, CheckStatus::Found, detail)
+                CheckOutcome::Ran {
+                    findings: hits,
+                    signals: mut sigs,
+                } => {
+                    let n_sigs = sigs.len();
+                    signals.append(&mut sigs);
+                    if hits.is_empty() {
+                        if n_sigs > 0 {
+                            // Clean for the query, but suspicious — surfaced on
+                            // the check row and in the report's signals.
+                            (
+                                CheckTone::Warning,
+                                CheckStatus::CheckedClean,
+                                format!("No matches, but {n_sigs} suspicious signal(s) — see signals"),
+                            )
+                        } else {
+                            (CheckTone::Passed, CheckStatus::CheckedClean, "No matches".to_string())
+                        }
+                    } else {
+                        let detail = summarize_hits(&hits);
+                        let mut hits = hits;
+                        findings.append(&mut hits);
+                        (CheckTone::Leak, CheckStatus::Found, detail)
+                    }
                 }
                 CheckOutcome::Skipped(reason) => {
                     (CheckTone::Skipped, CheckStatus::Skipped, reason)
@@ -86,7 +106,7 @@ pub fn check_pdf(pdfium: &Pdfium, bytes: &[u8], file_name: &str, query: &Query) 
                 detail,
             });
         }
-        (checks, findings)
+        (checks, findings, signals)
     };
 
     let mut report = Report {
@@ -102,8 +122,7 @@ pub fn check_pdf(pdfium: &Pdfium, bytes: &[u8], file_name: &str, query: &Query) 
         description: String::new(),
         checks,
         findings,
-        // Signals arrive with their producing checks (Phase 2+).
-        signals: Vec::new(),
+        signals,
     };
     report.finalize();
     report

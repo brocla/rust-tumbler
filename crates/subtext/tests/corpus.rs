@@ -6,13 +6,14 @@
 //! attack file must eventually yield ≥ 1 finding, and a clean control must
 //! yield 0.
 //!
-//! Phase 1 implements only the page-text extractor, so this suite asserts:
-//!   - the 11 page-text-reachable attacks are detected NOW;
+//! After Phase 2 (the document-level extractors) this suite asserts:
+//!   - 12 of the 13 attacks are detected NOW — the page-text-reachable ones plus
+//!     the document-level ones (annotation, metadata, structure, outlines, form/
+//!     XFA, attachments, scripts, OCG);
 //!   - a clean control yields 0 findings;
-//!   - the 2 attacks whose secret lives outside page content
-//!     (`annotation-appearance` → Phase 2 annotations; `incremental-update-cover`
-//!     → Phase 3 revisions) are NOT yet detected — pinning the current boundary
-//!     so it visibly flips when those extractors land.
+//!   - only `incremental-update-cover` is NOT yet detected — its sole secret
+//!     lives in a superseded revision the covering update hides, which needs the
+//!     Phase 3 revision pass. Pinning it flips visibly when that lands.
 //!
 //! pdfium can be bound only once per process, so the binding is shared via a
 //! `OnceLock`. Run with `--test-threads=1`: pdfium-render's `thread_safe`
@@ -29,9 +30,13 @@ use subtext::Query;
 
 const SECRET: &str = "Zanzibar";
 
-/// Every attack file page-text extraction reaches in Phase 1: the secret is in
-/// the page content stream (even if visually hidden), so pdfium extracts it.
-const PAGE_TEXT_DETECTABLE: &[&str] = &[
+/// Every attack detected by Phase 1 (page text) or Phase 2 (document-level
+/// vectors). `all-vectors-combined` is here because its document-level vectors
+/// (metadata/struct/outlines/form/XFA/attachments/scripts/OCG) remain reachable
+/// in the newest revision — only its *on-page* copies are hidden under the
+/// covering update — so the doc-level extractors still find it.
+const MUST_DETECT: &[&str] = &[
+    // Page-text reachable (Phase 1).
     "hidden-text-black-box",
     "invisible-render-mode",
     "tiny-white-text",
@@ -40,19 +45,17 @@ const PAGE_TEXT_DETECTABLE: &[&str] = &[
     "tounicode-spoof",
     "masked-image-cover",
     "optional-content-hidden",
-    "embedded-and-document-vectors", // page 1 carries visible "Zanzibar visible"
-    "corrupted-xref",                // pdfium recovers and renders the secret
+    "embedded-and-document-vectors",
+    "corrupted-xref",
+    // Document-level reachable (Phase 2).
+    "annotation-appearance", // /AP appearance stream + /Contents
+    "all-vectors-combined",  // doc-level vectors survive in the newest revision
 ];
 
-/// Attacks whose secret is NOT in current-revision page content, so page-text
-/// extraction alone cannot see them yet. Each names the phase that will detect it.
-const PHASE1_PENDING: &[(&str, &str)] = &[
-    ("annotation-appearance", "Phase 2 — annotations (/AP, /Contents)"),
+/// The one attack still not detectable: its only secret lives in a superseded
+/// revision the covering incremental update hides from a newest-wins parse.
+const PENDING: &[(&str, &str)] = &[
     ("incremental-update-cover", "Phase 3 — superseded revisions"),
-    // Its on-page secrets are all in revision 1, which a second incremental
-    // revision *covers* with innocuous text; the doc-level copies need the
-    // Phase 2 extractors and the on-page ones the Phase 3 revision pass.
-    ("all-vectors-combined", "Phase 2 (doc-level) / Phase 3 (revisions)"),
 ];
 
 fn pdfium() -> &'static Pdfium {
@@ -86,9 +89,9 @@ fn zanzibar_query() -> Query {
 }
 
 #[test]
-fn page_text_attacks_are_detected() {
+fn attacks_are_detected() {
     let query = zanzibar_query();
-    for name in PAGE_TEXT_DETECTABLE {
+    for name in MUST_DETECT {
         let bytes = pentest_bytes(name);
         let report = subtext::check_pdf(pdfium(), &bytes, &format!("{name}.pdf"), &query);
         assert!(
@@ -100,7 +103,6 @@ fn page_text_attacks_are_detected() {
             RiskTone::Leak,
             "[{name}] a detected secret must be a Leak"
         );
-        // Every finding in Phase 1 comes from the page-text vector.
         assert!(
             report.findings.iter().any(|f| f.matched_text.eq_ignore_ascii_case(SECRET)),
             "[{name}] no finding matched the secret text"
@@ -128,17 +130,18 @@ fn clean_control_yields_no_findings() {
 }
 
 #[test]
-fn phase1_pending_attacks_not_yet_detected() {
-    // Pins the current boundary: these need Phase 2/3 extractors. When one lands,
-    // this assertion flips — a visible, intentional signal to update the suite.
+fn pending_attacks_not_yet_detected() {
+    // Pins the current boundary: this needs the Phase 3 revision pass. When it
+    // lands, this assertion flips — a visible, intentional signal to update the
+    // suite (move the entry to MUST_DETECT).
     let query = zanzibar_query();
-    for (name, phase) in PHASE1_PENDING {
+    for (name, phase) in PENDING {
         let bytes = pentest_bytes(name);
         let report = subtext::check_pdf(pdfium(), &bytes, &format!("{name}.pdf"), &query);
         assert!(
             report.findings.is_empty(),
-            "[{name}] unexpectedly detected in Phase 1 — this attack was expected to need {phase}. \
-             If a new extractor now catches it, move it to PAGE_TEXT_DETECTABLE."
+            "[{name}] unexpectedly detected — this attack was expected to need {phase}. \
+             If a new extractor now catches it, move it to MUST_DETECT."
         );
     }
 }

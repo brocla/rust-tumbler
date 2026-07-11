@@ -15,7 +15,7 @@
 //! `search_document_impl` (spec §6): the same walk, reimplemented as a pure
 //! function on a `PdfDocument` with no `AppState` coupling.
 
-use crate::extract::{CheckOutcome, DocContext, VectorCheck};
+use crate::extract::{findings_in, CheckOutcome, DocContext, VectorCheck};
 use crate::query::Query;
 use crate::report::{Finding, Vector};
 use pdfium_render::prelude::{PdfDocument, PdfPageText};
@@ -42,7 +42,7 @@ impl VectorCheck for PageText {
                 "pdfium could not load this document (needed for text extraction)".to_string(),
             );
         };
-        CheckOutcome::Ran(find_in_pages(doc, query))
+        CheckOutcome::ran(find_in_pages(doc, query))
     }
 }
 
@@ -55,17 +55,14 @@ fn find_in_pages(doc: &PdfDocument, query: &Query) -> Vec<Finding> {
         let page_num = (idx + 1) as u32;
         let Ok(text) = page.text() else { continue };
         let full = page_text_in_document_order(&text);
-        for span in query.find_all(&full) {
-            findings.push(Finding {
-                vector: Vector::PageText,
-                location: format!("page {page_num}"),
-                matched_text: span.text.clone(),
-                context: snippet(&full, span.start, span.end),
-                page: Some(page_num),
-                revision: None,
-                container: None,
-            });
-        }
+        findings_in(
+            &full,
+            query,
+            Vector::PageText,
+            &format!("page {page_num}"),
+            Some(page_num),
+            &mut findings,
+        );
     }
     findings
 }
@@ -82,71 +79,3 @@ fn page_text_in_document_order(text: &PdfPageText) -> String {
         .collect()
 }
 
-/// A trimmed one-line snippet of `haystack` around `[start, end)`, with up to
-/// `PAD` chars of context on each side and ellipses when truncated. Operates on
-/// char boundaries so multi-byte text is never split mid-codepoint.
-fn snippet(haystack: &str, start: usize, end: usize) -> String {
-    const PAD: usize = 40;
-    let lo = floor_char_boundary(haystack, start.saturating_sub(PAD));
-    let hi = ceil_char_boundary(haystack, (end + PAD).min(haystack.len()));
-    let mut out = String::new();
-    if lo > 0 {
-        out.push('…');
-    }
-    out.push_str(haystack[lo..hi].trim());
-    if hi < haystack.len() {
-        out.push('…');
-    }
-    // Collapse any embedded newlines/tabs so the snippet stays one line.
-    out.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-/// Largest char boundary `<= i` (std's `floor_char_boundary` is still nightly).
-fn floor_char_boundary(s: &str, i: usize) -> usize {
-    let mut i = i.min(s.len());
-    while i > 0 && !s.is_char_boundary(i) {
-        i -= 1;
-    }
-    i
-}
-
-/// Smallest char boundary `>= i`.
-fn ceil_char_boundary(s: &str, i: usize) -> usize {
-    let mut i = i.min(s.len());
-    while i < s.len() && !s.is_char_boundary(i) {
-        i += 1;
-    }
-    i
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn snippet_trims_and_ellipsizes() {
-        // A match far enough into a long string to be padded on both sides.
-        let prefix = "x".repeat(60);
-        let suffix = "y".repeat(60);
-        let text = format!("{prefix} Zanzibar {suffix}");
-        let start = prefix.len() + 1;
-        let s = snippet(&text, start, start + "Zanzibar".len());
-        assert!(s.contains("Zanzibar"));
-        assert!(s.starts_with('…'), "expected leading ellipsis, got: {s}");
-        assert!(s.ends_with('…'), "expected trailing ellipsis, got: {s}");
-    }
-
-    #[test]
-    fn snippet_no_ellipsis_when_whole_string_fits() {
-        let text = "short Zanzibar text";
-        let s = snippet(text, 6, 14);
-        assert_eq!(s, "short Zanzibar text");
-    }
-
-    #[test]
-    fn snippet_handles_multibyte_without_panicking() {
-        let text = "café Zanzibar café";
-        let s = snippet(text, 5, 13);
-        assert!(s.contains("Zanzibar"));
-    }
-}
