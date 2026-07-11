@@ -1930,6 +1930,31 @@ mod tests {
         let mut doc =
             Document::load_mem(&lines_pdf_bytes(&[page1, page2])).expect("parse base");
         inject_leak_vectors(&mut doc, "ZANZIBAR");
+
+        // Self-documenting Info metadata (issue #73). `inject_leak_vectors`
+        // seeds the secret into Info via /Title; move it to /Subject so /Title
+        // can carry the clean fixture title while the Info dict remains a
+        // secret-bearing leak vector (page 1's "Info dictionary" claim).
+        let info_id = doc
+            .trailer
+            .get(b"Info")
+            .and_then(Object::as_reference)
+            .expect("Info seeded by inject_leak_vectors");
+        if let Ok(info) = doc.get_dictionary_mut(info_id) {
+            info.set("Subject", Object::string_literal("ZANZIBAR report"));
+            info.set("Title", Object::string_literal("Tumbler Test Fixture"));
+            info.set("Author", Object::string_literal("Claude"));
+            info.set(
+                "Keywords",
+                Object::string_literal("redaction, leak-vectors, metadata, test-fixture"),
+            );
+            info.set(
+                "Creator",
+                Object::string_literal("dump_leaky_fixture (src-tauri/src/commands/redact.rs)"),
+            );
+            info.set("CreationDate", Object::string_literal("D:20260710000000Z"));
+        }
+
         let mut out = Vec::new();
         doc.save_to(&mut out).expect("serialize");
         out

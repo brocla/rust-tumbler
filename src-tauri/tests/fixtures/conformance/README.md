@@ -21,3 +21,9 @@ or actually-compliant PDF/A·X·E·UA files. Producing genuinely compliant files
 requires a preflight engine (e.g. veraPDF). They exist to exercise Tumbler's
 declared-conformance *detection*, which by design reads only the claim, never
 verifies it. The UI wording is "Declares PDF/A-2b", never "PDF/A compliant".
+
+## Self-documenting (issue #73)
+
+Each fixture's own page text states how to live-test it and how to regenerate
+it, and its Info dictionary is populated (Title `Tumbler Test Fixture`, Author
+`Claude`, Keywords, Creator = the generator, a fixed CreationDate).

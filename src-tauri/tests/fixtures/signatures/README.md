@@ -21,3 +21,10 @@ The certificate is a throwaway self-signed test cert. A **Verified** result mean
 the signature is cryptographically *intact* (the signed bytes are unchanged) — it
 does **not** mean the signer's identity is trusted. Trust-chain/revocation
 validation is intentionally out of scope for this slice.
+
+## Self-documenting (issue #73)
+
+Every fixture carries a populated Info dictionary (Title `Tumbler Test Fixture`,
+Author `Claude`, Keywords, Creator = the generator, a fixed CreationDate) and a
+page-text regeneration hint; `live-test-verified.pdf` additionally documents the
+expected badge and manual-test steps in its page text.
