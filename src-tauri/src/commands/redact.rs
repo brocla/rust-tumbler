@@ -13,7 +13,9 @@
 //! (`/AF`, catalog and page level — a second attachment mechanism independent
 //! of `/Names`), the catalog's `/OCProperties` optional-content ("layers")
 //! registry — an OCG's `/Name` label can itself echo something sensitive and
-//! stays catalog-reachable independent of any page — and AcroForm fields left
+//! stays catalog-reachable independent of any page — the AcroForm's `/XFA`
+//! packets (issue #68 — XML whose datasets mirror user-entered field values),
+//! and AcroForm fields left
 //! without a widget by the flatten), the flattened pages are re-OCR'd into an
 //! invisible text layer (reusing issue #4's machinery — the burned rectangles
 //! read as blank, so search comes back for everything *except* the redacted
@@ -26,8 +28,8 @@
 //! 3. a search for every "find & redact all" query — zero hits;
 //! 4. structural postconditions (fail-closed): the leak vectors the text-based
 //!    checks cannot see — structure tree, outlines, metadata, associated
-//!    files, optional-content layers, widget-less form fields — must be
-//!    absent, so a scrub regression can never certify.
+//!    files, optional-content layers, XFA packets, widget-less form fields —
+//!    must be absent, so a scrub regression can never certify.
 //!
 //! Any failure populates `RedactionResult.leaks`, `verified` stays false, and
 //! `save_redacted_copy` refuses to write. The staged bytes never enter
@@ -408,7 +410,34 @@ fn acroform_field_ids(doc: &Document) -> Vec<ObjectId> {
 /// removed), so pre-existing orphan fields are cleaned too and the
 /// verification postcondition ("no field without a live widget") holds by
 /// construction.
+///
+/// Also drops the AcroForm's `/XFA` entry wholesale (issue #68): XFA packets
+/// are XML whose `<xfa:datasets>` holds user-entered field values verbatim
+/// (and whose template holds captions) — invisible to every pdfium text API
+/// the other checks use. An XFA dynamic layer is meaningless once pages are
+/// flattened to images, so dropping it is the same trade-off as
+/// `/StructTreeRoot`/`/Outlines`.
 fn scrub_acroform(doc: &mut Document) {
+    // XFA removal must precede the empty-fields early return: a pure-XFA form
+    // can carry an empty (or missing) /Fields array with all of its data in
+    // the /XFA packets.
+    let acroform_loc = doc.catalog().ok().and_then(|c| c.get(b"AcroForm").ok().cloned());
+    match &acroform_loc {
+        Some(Object::Reference(id)) => {
+            if let Ok(d) = doc.get_dictionary_mut(*id) {
+                d.remove(b"XFA");
+            }
+        }
+        Some(Object::Dictionary(_)) => {
+            if let Ok(catalog) = doc.catalog_mut() {
+                if let Ok(Object::Dictionary(d)) = catalog.get_mut(b"AcroForm") {
+                    d.remove(b"XFA");
+                }
+            }
+        }
+        _ => {}
+    }
+
     let field_ids = acroform_field_ids(doc);
     if field_ids.is_empty() {
         return;
@@ -547,6 +576,19 @@ fn verify_scrub_postconditions(
     for id in acroform_field_ids(&doc) {
         if !field_has_live_widget(&doc, id, &live, FIELD_TREE_MAX_DEPTH) {
             violations.push(format!("form field without a widget (object {} {})", id.0, id.1));
+        }
+    }
+
+    // XFA packets (issue #68) carry user-entered values as XML, unreadable by
+    // any pdfium text API — the scrub must have dropped them entirely.
+    let acroform = match doc.catalog().ok().and_then(|c| c.get(b"AcroForm").ok().cloned()) {
+        Some(Object::Reference(id)) => doc.get_dictionary(id).ok().cloned(),
+        Some(Object::Dictionary(d)) => Some(d),
+        _ => None,
+    };
+    if let Some(acroform) = acroform {
+        if acroform.get(b"XFA").is_ok() {
+            violations.push("AcroForm /XFA present".to_string());
         }
     }
 
@@ -1527,8 +1569,19 @@ mod tests {
                 .expect("page dict")
                 .set("Annots", vec![Object::Reference(w)]);
         }
+        // Hybrid AcroForm+XFA (issue #68): the datasets packet echoes the
+        // field value verbatim, the way real XFA forms mirror what the user
+        // typed into the visible fields.
+        let xfa_datasets = doc.add_object(Stream::new(
+            Dictionary::new(),
+            b"<xfa:datasets><ssn>SECRET-123</ssn></xfa:datasets>".to_vec(),
+        ));
         let acroform_id = doc.add_object(dictionary! {
             "Fields" => vec![Object::Reference(parent_id)],
+            "XFA" => vec![
+                Object::string_literal("datasets"),
+                Object::Reference(xfa_datasets),
+            ],
         });
         let catalog_id = doc
             .trailer
@@ -1581,7 +1634,9 @@ mod tests {
 
     /// A field with a surviving widget on an unredacted page keeps its value
     /// (it is visible content the user chose not to redact), but the dead
-    /// widget is pruned from its /Kids.
+    /// widget is pruned from its /Kids — and the /XFA packets are dropped
+    /// even though the form itself survives (issue #68): the datasets echo
+    /// what the user typed, invisibly to every text-based check.
     #[test]
     fn hierarchical_field_with_surviving_widget_is_kept_and_pruned() {
         let _guard = crate::test_pdfium_guard();
@@ -1612,6 +1667,18 @@ mod tests {
         assert!(parent.get(b"V").is_ok(), "the surviving field keeps its value");
         let kids = parent.get(b"Kids").and_then(|o| o.as_array()).expect("kids");
         assert_eq!(kids.len(), 1, "the flattened page's widget must be pruned from /Kids");
+
+        // The form survives, but its XFA packets must not (issue #68). (The
+        // value string itself legitimately remains via the kept /V, so a byte
+        // scan can't distinguish — assert structurally.)
+        let acroform_ref = doc
+            .catalog()
+            .expect("catalog")
+            .get(b"AcroForm")
+            .and_then(Object::as_reference)
+            .expect("acroform ref");
+        let acroform = doc.get_dictionary(acroform_ref).expect("acroform dict");
+        assert!(acroform.get(b"XFA").is_err(), "/XFA must be scrubbed even when the form is kept");
     }
 
     /// Two pages — the secret visible on page 1, a clean page 2 — with the
@@ -1624,7 +1691,10 @@ mod tests {
     /// - page 1 `/Metadata` stream and `/PieceInfo` private data
     /// - a page 1 text annotation's `/Contents`
     /// - a hierarchical AcroForm field `/V` whose only widget is on page 1
+    /// - the AcroForm's `/XFA` datasets packet (issue #68)
     /// - `/Names` `/JavaScript` action source and an `/EmbeddedFiles` payload
+    /// - PDF 2.0 `/AF` Associated Files (catalog and page level)
+    /// - an Optional Content Group's `/Name` label (`/OCProperties`)
     ///
     /// All injected streams are uncompressed, so a raw byte scan of the
     /// redacted output is a sound leak detector for this fixture (nothing in
@@ -1727,8 +1797,18 @@ mod tests {
                 "Kids" => vec![Object::Reference(widget)],
             }),
         );
+        // Hybrid AcroForm+XFA (issue #68): the datasets packet mirrors the
+        // user-entered field value, as real XFA forms do.
+        let xfa_datasets = doc.add_object(Stream::new(
+            Dictionary::new(),
+            format!("<xfa:datasets><ssn>{secret} xfa value</ssn></xfa:datasets>").into_bytes(),
+        ));
         let acroform_id = doc.add_object(dictionary! {
             "Fields" => vec![Object::Reference(parent_id)],
+            "XFA" => vec![
+                Object::string_literal("datasets"),
+                Object::Reference(xfa_datasets),
+            ],
         });
 
         // Name trees: JavaScript action + embedded file payload.
@@ -1895,7 +1975,8 @@ mod tests {
             "the structure tree, a bookmark title, page metadata, PieceInfo,",
             "a sticky-note comment, a form field value, a JavaScript action,",
             "an embedded file, two PDF 2.0 Associated Files (catalog and page",
-            "level), and an Optional Content (\"layer\") name.",
+            "level), an Optional Content (\"layer\") name, and an XFA form",
+            "data packet.",
             "",
             "How to live test:",
             "1. Open this file in Tumbler and open the Redact panel.",
@@ -1976,9 +2057,10 @@ mod tests {
     /// The headline guarantee, end to end: redact the page carrying the
     /// secret, and NO copy of it — page text, metadata, structure tree,
     /// bookmarks, annotations, form value, scripts, attachments (both via
-    /// /Names and via PDF 2.0 /AF), optional-content layer labels — survives
-    /// anywhere in the saved bytes. The fixture seeds ~15 copies; a sanity
-    /// precondition proves they are really there before the run.
+    /// /Names and via PDF 2.0 /AF), optional-content layer labels, XFA
+    /// packets — survives anywhere in the saved bytes. The fixture seeds
+    /// ~16 copies; a sanity precondition proves they are really there
+    /// before the run.
     #[test]
     fn redaction_removes_the_secret_from_every_known_leak_vector() {
         let _guard = crate::test_pdfium_guard();
@@ -1988,7 +2070,7 @@ mod tests {
 
         // Fixture sanity: the secret is seeded broadly (guards fixture rot).
         assert!(
-            count_occurrences(&bytes, SECRET) >= 15,
+            count_occurrences(&bytes, SECRET) >= 16,
             "fixture must seed the secret into every vector, found {}",
             count_occurrences(&bytes, SECRET)
         );
@@ -2100,6 +2182,7 @@ mod tests {
             "/Outlines",
             "catalog /AF",
             "catalog /OCProperties",
+            "AcroForm /XFA",
             "/JavaScript",     // name tree
             "/EmbeddedFiles",  // name tree
             "page 1: /Annots",
