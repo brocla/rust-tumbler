@@ -16,8 +16,29 @@
 //! engine such as veraPDF). They exist solely to exercise the detector, which
 //! itself only reads the declared claim. See the generated README.
 
-use lopdf::{dictionary, Document, Stream};
+use lopdf::{dictionary, Document, Object, Stream};
 use std::path::Path;
+
+/// Baked-in creation date for every fixture, so regenerating produces
+/// deterministic bytes (a wall-clock `now` would churn the checked-in files on
+/// each run). Format: PDF date string (PDF 32000-1 §7.9.4).
+const FIXTURE_DATE: &str = "D:20260710000000Z";
+
+/// Stamps the self-documenting Info-dictionary metadata every Tumbler test
+/// fixture carries (issue #73). `Creator` names the generator so the file
+/// records the tool that made it; `CreationDate` is fixed for determinism.
+/// Never sets a creation date the app would treat as "now" — these are fixtures,
+/// not authored documents.
+fn set_fixture_metadata(doc: &mut Document, keywords: &str) {
+    let info_id = doc.add_object(dictionary! {
+        "Title" => Object::string_literal("Tumbler Test Fixture"),
+        "Author" => Object::string_literal("Claude"),
+        "Keywords" => Object::string_literal(keywords),
+        "Creator" => Object::string_literal("gen_conformance_fixtures.rs (lopdf)"),
+        "CreationDate" => Object::string_literal(FIXTURE_DATE),
+    });
+    doc.trailer.set("Info", info_id);
+}
 
 fn main() {
     // Resolve relative to the crate, not the current working directory, so the
@@ -64,9 +85,12 @@ fn main() {
 
     for (name, heading, id_block) in files {
         let path = out_dir.join(name);
-        build_pdf(heading, &wrap_xmp(&id_block))
-            .save(&path)
-            .unwrap_or_else(|e| panic!("save {name}: {e}"));
+        let mut doc = build_pdf(heading, &wrap_xmp(&id_block));
+        set_fixture_metadata(
+            &mut doc,
+            &format!("conformance, {heading}, XMP, declared, test-fixture"),
+        );
+        doc.save(&path).unwrap_or_else(|e| panic!("save {name}: {e}"));
         println!("wrote {}", path.display());
     }
 
@@ -88,7 +112,11 @@ fn build_pdf(heading: &str, xmp: &str) -> Document {
     let content = format!(
         "BT /F1 20 Tf 36 250 Td ({}) Tj ET\n\
          BT /F1 10 Tf 36 215 Td (Declared-conformance example for Tumbler.) Tj ET\n\
-         BT /F1 10 Tf 36 200 Td (Carries the XMP identifier only - not validated.) Tj ET",
+         BT /F1 10 Tf 36 200 Td (Carries the XMP identifier only - not validated.) Tj ET\n\
+         BT /F1 9 Tf 36 170 Td (Live test: open in Tumbler; the Metadata panel Conformance) Tj ET\n\
+         BT /F1 9 Tf 36 158 Td (row should read \"Declares {}\".) Tj ET\n\
+         BT /F1 9 Tf 36 134 Td (Regenerate: cargo run --example gen_conformance_fixtures) Tj ET",
+        escape_pdf_string(heading),
         escape_pdf_string(heading)
     );
     let content_id = doc.add_object(Stream::new(dictionary! {}, content.into_bytes()));
@@ -221,4 +249,10 @@ or actually-compliant PDF/A·X·E·UA files. Producing genuinely compliant files
 requires a preflight engine (e.g. veraPDF). They exist to exercise Tumbler's
 declared-conformance *detection*, which by design reads only the claim, never
 verifies it. The UI wording is "Declares PDF/A-2b", never "PDF/A compliant".
+
+## Self-documenting (issue #73)
+
+Each fixture's own page text states how to live-test it and how to regenerate
+it, and its Info dictionary is populated (Title `Tumbler Test Fixture`, Author
+`Claude`, Keywords, Creator = the generator, a fixed CreationDate).
 "#;

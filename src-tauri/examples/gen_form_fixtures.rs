@@ -36,6 +36,24 @@ fn text(s: &str) -> Object {
     Object::String(s.as_bytes().to_vec(), StringFormat::Literal)
 }
 
+/// Baked-in creation date for every fixture, so regenerating produces
+/// deterministic bytes. PDF date string (PDF 32000-1 §7.9.4).
+const FIXTURE_DATE: &str = "D:20260710000000Z";
+
+/// Stamps the self-documenting Info-dictionary metadata every Tumbler test
+/// fixture carries (issue #73): `Creator` names the generator so the file
+/// records the tool that made it; `CreationDate` is fixed for determinism.
+fn set_fixture_metadata(doc: &mut Document, keywords: &str) {
+    let info_id = doc.add_object(dictionary! {
+        "Title" => text("Tumbler Test Fixture"),
+        "Author" => text("Claude"),
+        "Keywords" => text(keywords),
+        "Creator" => text("gen_form_fixtures.rs (lopdf)"),
+        "CreationDate" => text(FIXTURE_DATE),
+    });
+    doc.trailer.set("Info", info_id);
+}
+
 fn main() {
     let out_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/forms");
     std::fs::create_dir_all(&out_dir).expect("create output dir");
@@ -63,7 +81,9 @@ fn main() {
         BT /F1 9 Tf 75 563 Td (subscribe: checkbox, on-state Yes) Tj ET\n\
         BT /F1 9 Tf 105 523 Td (color: radio group, options Red / Blue) Tj ET\n\
         BT /F1 9 Tf 210 484 Td (country: dropdown, options USA / Canada / Mexico) Tj ET\n\
-        BT /F1 9 Tf 260 444 Td (ssn: comb text field, /MaxLen 9 - caps input at 9 chars) Tj ET"
+        BT /F1 9 Tf 260 444 Td (ssn: comb text field, /MaxLen 9 - caps input at 9 chars) Tj ET\n\
+        BT /F1 9 Tf 50 90 Td (Live test: open in Tumbler, fill each field, Save, reopen - values persist.) Tj ET\n\
+        BT /F1 8 Tf 50 66 Td (Regenerate: cargo run --example gen_form_fixtures) Tj ET"
         .to_vec();
     let content_id = doc.add_object(Stream::new(dictionary! {}, content));
 
@@ -244,24 +264,34 @@ fn main() {
     });
     doc.trailer.set("Root", catalog_id);
 
+    set_fixture_metadata(
+        &mut doc,
+        "forms, acroform, text, checkbox, radio, combo, comb, test-fixture",
+    );
     let path = out_dir.join("acroform_basic.pdf");
     doc.save(&path).unwrap_or_else(|e| panic!("save fixture: {e}"));
     println!("wrote {}", path.display());
 
+    let mut sig_doc = build_signature_fixture();
+    set_fixture_metadata(&mut sig_doc, "forms, acroform, signature-field, test-fixture");
     let sig_path = out_dir.join("acroform_signature.pdf");
-    build_signature_fixture()
+    sig_doc
         .save(&sig_path)
         .unwrap_or_else(|e| panic!("save signature fixture: {e}"));
     println!("wrote {}", sig_path.display());
 
+    let mut reset_doc = build_reset_fixture();
+    set_fixture_metadata(&mut reset_doc, "forms, acroform, reset, form-actions, test-fixture");
     let reset_path = out_dir.join("acroform_reset.pdf");
-    build_reset_fixture()
+    reset_doc
         .save(&reset_path)
         .unwrap_or_else(|e| panic!("save reset fixture: {e}"));
     println!("wrote {}", reset_path.display());
 
+    let mut styling_doc = build_styling_fixture();
+    set_fixture_metadata(&mut styling_doc, "forms, acroform, text-styling, DA, test-fixture");
     let styling_path = out_dir.join("acroform_styling.pdf");
-    build_styling_fixture()
+    styling_doc
         .save(&styling_path)
         .unwrap_or_else(|e| panic!("save styling fixture: {e}"));
     println!("wrote {}", styling_path.display());
@@ -282,7 +312,8 @@ fn build_styling_fixture() -> Document {
         BT /F1 9 Tf 360 681 Td (center, 12pt, red) Tj ET\n\
         BT /F1 9 Tf 360 646 Td (right, 10pt, blue) Tj ET\n\
         BT /F1 9 Tf 360 606 Td (left, 20pt, black) Tj ET\n\
-        BT /F1 9 Tf 360 561 Td (auto-size: Tf 0 fills the box) Tj ET"
+        BT /F1 9 Tf 360 561 Td (auto-size: Tf 0 fills the box) Tj ET\n\
+        BT /F1 8 Tf 50 66 Td (Regenerate: cargo run --example gen_form_fixtures) Tj ET"
         .to_vec();
     let content_id = doc.add_object(Stream::new(dictionary! {}, content));
 
@@ -365,7 +396,8 @@ fn build_reset_fixture() -> Document {
         BT /F1 9 Tf 260 676 Td (noDefault: no /DV -> Clear/Reset EMPTIES it) Tj ET\n\
         BT /F1 9 Tf 76 642 Td (agree: checkbox /DV Off -> Clear/Reset UNCHECKS it) Tj ET\n\
         BT /F1 9 Tf 160 610 Td (Reset button: /S /ResetForm action -> WORKS, clears the form) Tj ET\n\
-        BT /F1 9 Tf 160 574 Td (Clear button: JavaScript action -> NOT supported, shows a toast only) Tj ET"
+        BT /F1 9 Tf 160 574 Td (Clear button: JavaScript action -> NOT supported, shows a toast only) Tj ET\n\
+        BT /F1 8 Tf 50 66 Td (Regenerate: cargo run --example gen_form_fixtures) Tj ET"
         .to_vec();
     let content_id = doc.add_object(Stream::new(dictionary! {}, content));
 
@@ -470,7 +502,8 @@ fn build_signature_fixture() -> Document {
     let page_id = doc.new_object_id();
     let content = b"\
         BT /F1 14 Tf 50 740 Td (Tumbler signature-field test fixture) Tj ET\n\
-        BT /F1 10 Tf 120 578 Td (Draw your signature in the box below - mouse, pen, touch, or trackpad:) Tj ET"
+        BT /F1 10 Tf 120 578 Td (Draw your signature in the box below - mouse, pen, touch, or trackpad:) Tj ET\n\
+        BT /F1 8 Tf 50 66 Td (Regenerate: cargo run --example gen_form_fixtures) Tj ET"
         .to_vec();
     let content_id = doc.add_object(Stream::new(dictionary! {}, content));
 

@@ -41,6 +41,12 @@ const BYTE_RANGE_PLACEHOLDER: &str = "/ByteRange[0 0000000000 0000000000 0000000
 // A sentinel inside the page text, in the signed region, that the tampered
 // fixtures mutate by one byte.
 const SENTINEL: &str = "SIGNED-DEMO";
+// Baked-in creation date for the self-documenting Info metadata (issue #73);
+// fixed rather than "now" for deterministic bytes (the CMS signature already
+// makes each run differ, but the rest of the file stays stable).
+const FIXTURE_DATE: &str = "D:20260710000000Z";
+const FIXTURE_KEYWORDS: &str =
+    "signature, verification, CMS, PKCS7, digital-signature, test-fixture";
 
 fn main() {
     let out_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/signatures");
@@ -54,6 +60,7 @@ fn main() {
 
     let default_content = page_lines(&[
         ("18", "Tumbler signed-PDF fixture"),
+        ("10", "Regenerate: cargo run --example gen_signature_fixtures"),
         ("11", &format!("Sentinel: {SENTINEL}")),
     ]);
 
@@ -245,7 +252,13 @@ fn assemble_with_placeholders(content: &str) -> Vec<u8> {
         format!("<</Length {}>>\nstream\n{content}\nendstream", content.len() + 1),
         "<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>".to_string(),
         "<</Fields[4 0 R]/SigFlags 3>>".to_string(),
+        // Object 9: self-documenting Info-dictionary metadata (issue #73).
+        format!(
+            "<</Title(Tumbler Test Fixture)/Author(Claude)/Keywords({FIXTURE_KEYWORDS})\
+             /Creator(gen_signature_fixtures.rs + openssl)/CreationDate({FIXTURE_DATE})>>"
+        ),
     ];
+    let info_num = objects.len(); // 9 — the Info object added just above.
 
     let mut out: Vec<u8> = Vec::new();
     out.extend_from_slice(b"%PDF-1.7\n%\xE2\xE3\xCF\xD3\n");
@@ -267,7 +280,8 @@ fn assemble_with_placeholders(content: &str) -> Vec<u8> {
         out.extend_from_slice(format!("{:010} 00000 n \n", offsets[num]).as_bytes());
     }
     out.extend_from_slice(
-        format!("trailer\n<</Size {size}/Root 1 0 R>>\nstartxref\n{xref_at}\n%%EOF").as_bytes(),
+        format!("trailer\n<</Size {size}/Root 1 0 R/Info {info_num} 0 R>>\nstartxref\n{xref_at}\n%%EOF")
+            .as_bytes(),
     );
 
     out
@@ -314,6 +328,13 @@ The certificate is a throwaway self-signed test cert. A **Verified** result mean
 the signature is cryptographically *intact* (the signed bytes are unchanged) — it
 does **not** mean the signer's identity is trusted. Trust-chain/revocation
 validation is intentionally out of scope for this slice.
+
+## Self-documenting (issue #73)
+
+Every fixture carries a populated Info dictionary (Title `Tumbler Test Fixture`,
+Author `Claude`, Keywords, Creator = the generator, a fixed CreationDate) and a
+page-text regeneration hint; `live-test-verified.pdf` additionally documents the
+expected badge and manual-test steps in its page text.
 "#;
     std::fs::write(path, body).expect("write README");
     println!("wrote {}", path.display());
