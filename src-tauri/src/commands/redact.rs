@@ -2799,4 +2799,497 @@ mod tests {
         std::fs::remove_file(&original).ok();
         std::fs::remove_file(&dest).ok();
     }
+
+    // ── Pen-test corpus (issue #78) ─────────────────────────────────────────
+    //
+    // A red-team corpus: each entry is a PDF that hides the secret "Zanzibar"
+    // via a different technique — the nine the issue lists, plus creative
+    // corner cases (off-page text, tiny white-on-white text, a Form XObject, a
+    // ToUnicode CMap spoof where the glyphs render as blanks but text
+    // extraction yields the secret, an annotation appearance stream). The
+    // `pentest_corpus_is_neutralized_or_rejected` test runs every attack
+    // through the real pipeline and asserts the defense holds; `dump_pentest_
+    // corpus` writes the corpus to disk for manual testing. Payload strings are
+    // uncompressed so a raw byte scan of the output is a sound leak detector.
+
+    const SECRET: &str = "Zanzibar";
+
+    /// Expected pipeline outcome for an attack.
+    #[derive(PartialEq)]
+    enum Expect {
+        /// The secret is fully removed and the output verifies clean.
+        Neutralized,
+        /// The input is malformed and redaction is refused (no output).
+        Rejected,
+    }
+
+    struct Attack {
+        /// Filename slug.
+        name: &'static str,
+        /// Which of the issue's vectors (or "corner-case") this exercises.
+        category: &'static str,
+        /// What it does and why it evades a naive redaction tool.
+        description: &'static str,
+        bytes: Vec<u8>,
+        expect: Expect,
+    }
+
+    /// A 200×200 one-page document with a Helvetica `/F1`, whose page content
+    /// stream is `content`. Returns `(doc, catalog_id, page_id, font_id)` so an
+    /// attack can bolt its twist onto the page or catalog before serializing.
+    fn base_doc(content: &[u8]) -> (Document, ObjectId, ObjectId, ObjectId) {
+        let mut doc = Document::with_version("1.7");
+        let pages_id = doc.new_object_id();
+        let font_id = doc.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "Helvetica",
+            "Encoding" => "WinAnsiEncoding",
+        });
+        let cid = doc.add_object(Stream::new(Dictionary::new(), content.to_vec()));
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "Contents" => cid,
+            "MediaBox" => vec![
+                Object::Integer(0), Object::Integer(0),
+                Object::Integer(200), Object::Integer(200),
+            ],
+            "Resources" => dictionary! {
+                "Font" => dictionary! { "F1" => Object::Reference(font_id) },
+            },
+        });
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![Object::Reference(page_id)],
+                "Count" => Object::Integer(1),
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        doc.trailer.set("Root", catalog_id);
+        (doc, catalog_id, page_id, font_id)
+    }
+
+    fn serialize(mut doc: Document) -> Vec<u8> {
+        let mut out = Vec::new();
+        doc.save_to(&mut out).expect("serialize attack");
+        out
+    }
+
+    /// The classic failed redaction: real, selectable text with an opaque black
+    /// rectangle painted over it. Looks redacted; copy/paste or `pdftotext`
+    /// recovers the text verbatim.
+    fn attack_black_box_over_text() -> Vec<u8> {
+        let content = format!(
+            "BT /F1 24 Tf 20 150 Td ({SECRET}) Tj ET\n\
+             0 0 0 rg 15 140 q 170 30 re f Q"
+        );
+        serialize(base_doc(content.as_bytes()).0)
+    }
+
+    /// Text drawn in text rendering mode 3 (invisible) — the "OCR sandwich"
+    /// layer. Never painted, but fully extractable and searchable.
+    fn attack_invisible_render_mode() -> Vec<u8> {
+        let content = format!("BT /F1 24 Tf 3 Tr 20 150 Td ({SECRET}) Tj ET");
+        serialize(base_doc(content.as_bytes()).0)
+    }
+
+    /// White text on the (white) page background at a hair-thin size — visually
+    /// absent, still selectable/extractable.
+    fn attack_tiny_white_text() -> Vec<u8> {
+        let content = format!("BT /F1 0.3 Tf 1 1 1 rg 20 150 Td ({SECRET}) Tj ET");
+        serialize(base_doc(content.as_bytes()).0)
+    }
+
+    /// Text positioned far outside the MediaBox — off the visible page, so a
+    /// human reviewer never sees it, but it is still in the content stream and
+    /// extractable.
+    fn attack_offpage_text() -> Vec<u8> {
+        let content = format!("BT /F1 24 Tf 20 100000 Td ({SECRET}) Tj ET");
+        serialize(base_doc(content.as_bytes()).0)
+    }
+
+    /// The secret drawn inside a Form XObject that the page invokes with `Do` —
+    /// nested content a scrubber that only walks the top-level content stream
+    /// could miss.
+    fn attack_form_xobject() -> Vec<u8> {
+        let (mut doc, _cat, page_id, _font) = base_doc(b"q /Fm0 Do Q");
+        let xobj_content = format!("BT /F1 24 Tf 20 150 Td ({SECRET}) Tj ET");
+        let font_id = doc.add_object(dictionary! {
+            "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
+        });
+        let form = doc.add_object(Stream::new(
+            dictionary! {
+                "Type" => "XObject",
+                "Subtype" => "Form",
+                "BBox" => vec![
+                    Object::Integer(0), Object::Integer(0),
+                    Object::Integer(200), Object::Integer(200),
+                ],
+                "Resources" => dictionary! {
+                    "Font" => dictionary! { "F1" => Object::Reference(font_id) },
+                },
+            },
+            xobj_content.into_bytes(),
+        ));
+        // Give the page an XObject resource pointing at the form.
+        let page = doc.get_object_mut(page_id).unwrap().as_dict_mut().unwrap();
+        if let Ok(Object::Dictionary(res)) = page.get_mut(b"Resources") {
+            res.set("XObject", dictionary! { "Fm0" => Object::Reference(form) });
+        }
+        serialize(doc)
+    }
+
+    /// A ToUnicode CMap spoof (a "latest methods" trick): the page draws byte
+    /// codes 0x01..0x08, which Helvetica renders as blank/.notdef glyphs, but
+    /// the font's `/ToUnicode` maps them to Z,a,n,z,i,b,a,r — so the page looks
+    /// empty while text extraction and copy yield the secret. The literal
+    /// "Zanzibar" never appears in the file; only the extractor reconstructs it.
+    fn attack_tounicode_spoof() -> Vec<u8> {
+        let cmap = b"/CIDInit /ProcSet findresource begin 12 dict begin begincmap \
+            /CMapType 2 def 1 begincodespacerange <01> <08> endcodespacerange \
+            8 beginbfchar <01> <005A> <02> <0061> <03> <006E> <04> <007A> \
+            <05> <0069> <06> <0062> <07> <0061> <08> <0072> endbfchar \
+            endcmap CMapName currentdict /CMap defineresource pop end end";
+        let (mut doc, _cat, page_id, _font) =
+            base_doc(b"BT /F1 24 Tf 20 150 Td <0102030405060708> Tj ET");
+        let tounicode = doc.add_object(Stream::new(Dictionary::new(), cmap.to_vec()));
+        let spoof_font = doc.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "Helvetica",
+            "ToUnicode" => Object::Reference(tounicode),
+        });
+        let page = doc.get_object_mut(page_id).unwrap().as_dict_mut().unwrap();
+        if let Ok(Object::Dictionary(res)) = page.get_mut(b"Resources") {
+            res.set("Font", dictionary! { "F1" => Object::Reference(spoof_font) });
+        }
+        serialize(doc)
+    }
+
+    /// The secret carried in a text annotation's appearance stream (`/AP`),
+    /// drawn on the page by the viewer but living outside the page content —
+    /// and in the annotation's `/Contents` string for good measure.
+    fn attack_annotation_appearance() -> Vec<u8> {
+        let (mut doc, _cat, page_id, font_id) = base_doc(b"q Q");
+        let ap_content = format!("BT /F1 18 Tf 5 10 Td ({SECRET}) Tj ET");
+        let ap = doc.add_object(Stream::new(
+            dictionary! {
+                "Type" => "XObject",
+                "Subtype" => "Form",
+                "BBox" => vec![
+                    Object::Integer(0), Object::Integer(0),
+                    Object::Integer(180), Object::Integer(40),
+                ],
+                "Resources" => dictionary! {
+                    "Font" => dictionary! { "F1" => Object::Reference(font_id) },
+                },
+            },
+            ap_content.into_bytes(),
+        ));
+        let annot = doc.add_object(dictionary! {
+            "Type" => "Annot",
+            "Subtype" => "FreeText",
+            "Rect" => vec![
+                Object::Integer(10), Object::Integer(140),
+                Object::Integer(190), Object::Integer(180),
+            ],
+            "Contents" => Object::string_literal(format!("{SECRET} (annotation)")),
+            "AP" => dictionary! { "N" => Object::Reference(ap) },
+        });
+        let page = doc.get_object_mut(page_id).unwrap().as_dict_mut().unwrap();
+        page.set("Annots", vec![Object::Reference(annot)]);
+        serialize(doc)
+    }
+
+    /// Real text with an image stencil painted over it as the "redaction" — the
+    /// masked-image variant of the black-box trick. The image hides the text
+    /// visually; the text stays in the stream.
+    fn attack_masked_image_cover() -> Vec<u8> {
+        // 1×1 black image scaled over the text; the text underneath survives.
+        let (mut doc, _cat, page_id, _font) = base_doc(
+            format!("BT /F1 24 Tf 20 150 Td ({SECRET}) Tj ET\nq 180 30 1 1 15 145 cm /Im0 Do Q")
+                .as_bytes(),
+        );
+        let img = doc.add_object(Stream::new(
+            dictionary! {
+                "Type" => "XObject",
+                "Subtype" => "Image",
+                "Width" => 1_i64,
+                "Height" => 1_i64,
+                "ColorSpace" => "DeviceGray",
+                "BitsPerComponent" => 8_i64,
+            },
+            vec![0u8], // one black pixel
+        ));
+        let page = doc.get_object_mut(page_id).unwrap().as_dict_mut().unwrap();
+        if let Ok(Object::Dictionary(res)) = page.get_mut(b"Resources") {
+            res.set("XObject", dictionary! { "Im0" => Object::Reference(img) });
+        }
+        serialize(doc)
+    }
+
+    /// The secret inside an optional-content group (a "layer") switched OFF, so
+    /// a viewer honoring the default config never shows it, but the marked
+    /// content and the OCG's `/Name` are both in the file.
+    fn attack_optional_content_hidden() -> Vec<u8> {
+        let (mut doc, catalog_id, page_id, _font) = base_doc(
+            format!("/OC /MC0 BDC BT /F1 24 Tf 20 150 Td ({SECRET}) Tj ET EMC").as_bytes(),
+        );
+        let ocg = doc.add_object(dictionary! {
+            "Type" => "OCG",
+            "Name" => Object::string_literal(format!("{SECRET} layer")),
+        });
+        // Page /Resources /Properties /MC0 -> the OCG.
+        let page = doc.get_object_mut(page_id).unwrap().as_dict_mut().unwrap();
+        if let Ok(Object::Dictionary(res)) = page.get_mut(b"Resources") {
+            res.set("Properties", dictionary! { "MC0" => Object::Reference(ocg) });
+        }
+        let catalog = doc.get_object_mut(catalog_id).unwrap().as_dict_mut().unwrap();
+        catalog.set(
+            "OCProperties",
+            dictionary! {
+                "OCGs" => vec![Object::Reference(ocg)],
+                "D" => dictionary! { "OFF" => vec![Object::Reference(ocg)] },
+            },
+        );
+        serialize(doc)
+    }
+
+    /// Every document-level leak vector at once (reuses the shared injector):
+    /// Info, XMP, structure tree, outlines, page metadata/PieceInfo, an
+    /// annotation, a hierarchical form field + XFA datasets, JavaScript,
+    /// `/EmbeddedFiles`, `/AF` (catalog + page), and an OCG name.
+    fn attack_kitchen_sink() -> Vec<u8> {
+        let mut doc = Document::load_mem(&text_pdf_bytes(&[&format!("{SECRET} visible"), "clean"]))
+            .expect("parse base");
+        inject_leak_vectors(&mut doc, SECRET);
+        serialize(doc)
+    }
+
+    /// The full attack corpus.
+    fn pentest_corpus() -> Vec<Attack> {
+        let base = text_pdf_bytes(&[&format!("{SECRET} original")]);
+        let (incremental, _split) = stack_incremental_revision(&base, "REDACTED");
+        vec![
+            Attack {
+                name: "hidden-text-black-box",
+                category: "hidden text",
+                description: "Selectable text with an opaque black rectangle drawn over it — \
+                    the classic failed redaction; copy/paste recovers it.",
+                bytes: attack_black_box_over_text(),
+                expect: Expect::Neutralized,
+            },
+            Attack {
+                name: "invisible-render-mode",
+                category: "invisible text / OCR layer",
+                description: "Text in rendering mode 3 (invisible) — never painted, fully \
+                    extractable and searchable (the OCR-sandwich mechanism).",
+                bytes: attack_invisible_render_mode(),
+                expect: Expect::Neutralized,
+            },
+            Attack {
+                name: "tiny-white-text",
+                category: "corner-case",
+                description: "0.3pt white-on-white text — visually absent, still extractable.",
+                bytes: attack_tiny_white_text(),
+                expect: Expect::Neutralized,
+            },
+            Attack {
+                name: "offpage-text",
+                category: "corner-case",
+                description: "Text positioned outside the MediaBox — off the visible page, \
+                    still in the content stream and extractable.",
+                bytes: attack_offpage_text(),
+                expect: Expect::Neutralized,
+            },
+            Attack {
+                name: "form-xobject",
+                category: "corner-case",
+                description: "The secret inside a Form XObject invoked with Do — nested \
+                    content a top-level-only scrubber could miss.",
+                bytes: attack_form_xobject(),
+                expect: Expect::Neutralized,
+            },
+            Attack {
+                name: "tounicode-spoof",
+                category: "corner-case (latest methods)",
+                description: "Glyphs render as blanks but the font's /ToUnicode maps them to \
+                    the secret — the page looks empty while extraction/copy yields it. The \
+                    literal never appears in the file.",
+                bytes: attack_tounicode_spoof(),
+                expect: Expect::Neutralized,
+            },
+            Attack {
+                name: "annotation-appearance",
+                category: "form-field / annotation",
+                description: "The secret in a FreeText annotation's /AP appearance stream and \
+                    /Contents — drawn by the viewer, outside the page content.",
+                bytes: attack_annotation_appearance(),
+                expect: Expect::Neutralized,
+            },
+            Attack {
+                name: "masked-image-cover",
+                category: "masked images",
+                description: "Real text with an image painted over it as the 'redaction' — the \
+                    image hides it visually; the text stays in the stream.",
+                bytes: attack_masked_image_cover(),
+                expect: Expect::Neutralized,
+            },
+            Attack {
+                name: "optional-content-hidden",
+                category: "layer-based",
+                description: "The secret in an optional-content group (layer) switched OFF, \
+                    plus the OCG's /Name label.",
+                bytes: attack_optional_content_hidden(),
+                expect: Expect::Neutralized,
+            },
+            Attack {
+                name: "incremental-update-cover",
+                category: "incremental updates",
+                description: "Page text replaced by a later appended revision; the \
+                    pre-redaction original is still physically present, recoverable by \
+                    truncating to the earlier %%EOF.",
+                bytes: incremental,
+                expect: Expect::Neutralized,
+            },
+            Attack {
+                name: "embedded-and-document-vectors",
+                category: "embedded files / metadata / form-field / layers",
+                description: "Kitchen sink: the secret echoed into Info, XMP, structure tree, \
+                    outlines, page metadata, PieceInfo, an annotation, a hierarchical form \
+                    field + XFA datasets, JavaScript, /EmbeddedFiles, /AF, and an OCG name.",
+                bytes: attack_kitchen_sink(),
+                expect: Expect::Neutralized,
+            },
+            Attack {
+                name: "corrupted-xref",
+                category: "corrupted xrefs",
+                description: "A valid secret-bearing PDF whose startxref offset is corrupted. \
+                    pdfium recovers and renders; lopdf refuses. Tumbler treats this as \
+                    unsafe-to-redact and rejects it rather than risk a partial copy.",
+                bytes: corrupt_startxref_offset(&base, 0),
+                expect: Expect::Rejected,
+            },
+        ]
+    }
+
+    /// True if `bytes` leak the secret at all — as literal bytes, or via
+    /// pdfium text extraction (the ToUnicode spoof hides the literal but
+    /// extraction reconstructs it). Used both as an attack precondition (the
+    /// input must really leak) and the output assertion (it must not).
+    fn secret_recoverable(pdfium: &Pdfium, bytes: &[u8]) -> bool {
+        if count_occurrences(bytes, SECRET.as_bytes()) > 0 {
+            return true;
+        }
+        let Ok(doc) = pdfium.load_pdf_from_byte_vec(bytes.to_vec(), None) else {
+            return false;
+        };
+        (0..doc.pages().len()).any(|i| {
+            doc.pages()
+                .get(i)
+                .ok()
+                .and_then(|p| p.text().ok().map(|t| t.all()))
+                .map(|t| t.contains(SECRET))
+                .unwrap_or(false)
+        })
+    }
+
+    /// The headline pen-test: every attack in the corpus is either rejected
+    /// (malformed input) or fully neutralized — the secret is unrecoverable
+    /// from the output by any means AND verification certifies it clean. If a
+    /// future change regresses any defense, the matching attack fails here.
+    #[test]
+    fn pentest_corpus_is_neutralized_or_rejected() {
+        let _guard = crate::test_pdfium_guard();
+        let pdfium = crate::test_pdfium();
+
+        for attack in pentest_corpus() {
+            // Precondition: the attack really plants a recoverable secret
+            // (except the corrupted one, which we still built from a
+            // secret-bearing base).
+            if attack.expect == Expect::Neutralized {
+                assert!(
+                    secret_recoverable(pdfium, &attack.bytes),
+                    "[{}] attack fixture should leak the secret before redaction",
+                    attack.name
+                );
+            }
+
+            let result = apply_redactions_impl(
+                &no_progress,
+                pdfium,
+                &attack.bytes,
+                &[full_page_region(1)],
+                &[SECRET.to_string()],
+                150.0,
+                &empty_engine(),
+                &not_cancelled(),
+            );
+
+            match attack.expect {
+                Expect::Rejected => assert!(
+                    result.is_err(),
+                    "[{}] malformed input must be rejected, got Ok",
+                    attack.name
+                ),
+                Expect::Neutralized => {
+                    let (r, output) = result
+                        .unwrap_or_else(|e| panic!("[{}] apply failed: {e}", attack.name));
+                    assert!(
+                        r.verified,
+                        "[{}] must verify clean; leaks={:?} violations={:?}",
+                        attack.name, r.leaks, r.structural_violations
+                    );
+                    let out = output.expect("neutralized attack must produce output");
+                    assert!(
+                        !secret_recoverable(pdfium, &out),
+                        "[{}] the secret must be unrecoverable from the redacted output",
+                        attack.name
+                    );
+                }
+            }
+        }
+    }
+
+    /// Writes the pen-test corpus to `tests/fixtures/redaction/pentest/` plus a
+    /// README manifest, for manual testing in the app. Run with:
+    /// `cargo test dump_pentest_corpus -- --ignored --test-threads=1`
+    #[test]
+    #[ignore = "writes the pen-test corpus to disk for manual testing"]
+    fn dump_pentest_corpus() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/redaction/pentest");
+        std::fs::create_dir_all(&dir).expect("create pentest dir");
+
+        let mut readme = String::from(
+            "# Redaction pen-test corpus (issue #78)\n\n\
+             Each PDF hides the secret word `Zanzibar` via a different technique. They exist to\n\
+             red-team Tumbler's redaction: open one, redact page 1 (draw a box over it, or use\n\
+             Find \u{2192} `Zanzibar` \u{2192} Redact all where it is visible), Apply, Save As,\n\
+             then run `findstr Zanzibar <saved-copy>.pdf` \u{2014} expect **no** output. For\n\
+             `corrupted-xref`, Tumbler should **refuse** the file (it can't be safely redacted).\n\n\
+             Regenerate with `cargo test dump_pentest_corpus -- --ignored --test-threads=1`.\n\
+             The automated equivalent is the `pentest_corpus_is_neutralized_or_rejected` test.\n\n\
+             | File | Vector | Expected outcome | Technique |\n\
+             |------|--------|------------------|-----------|\n",
+        );
+
+        for attack in pentest_corpus() {
+            let file = format!("{}.pdf", attack.name);
+            std::fs::write(dir.join(&file), &attack.bytes).expect("write attack pdf");
+            let outcome = match attack.expect {
+                Expect::Neutralized => "secret removed, verifies clean",
+                Expect::Rejected => "file refused (unsafe to redact)",
+            };
+            readme.push_str(&format!(
+                "| `{file}` | {} | {outcome} | {} |\n",
+                attack.category, attack.description
+            ));
+        }
+        std::fs::write(dir.join("README.md"), readme).expect("write README");
+        println!("wrote {} attacks to {}", pentest_corpus().len(), dir.display());
+    }
 }
