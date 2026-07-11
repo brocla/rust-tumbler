@@ -3,7 +3,7 @@
 //! visible page text, so a redaction that only touched the page leaves it here
 //! (spec §4-C). Inverts Tumbler's `/StructTreeRoot` scrub.
 
-use crate::extract::{findings_in, CheckOutcome, DocContext, VectorCheck};
+use crate::extract::{scan_dict_keys, CheckOutcome, DocContext, VectorCheck};
 use crate::pdf;
 use crate::query::Query;
 use crate::report::{Finding, Vector};
@@ -30,10 +30,13 @@ impl VectorCheck for StructureTree {
 
     fn run(&self, ctx: &DocContext, query: &Query) -> CheckOutcome {
         let Some(doc) = ctx.lopdf else {
-            return CheckOutcome::Skipped("lopdf could not parse this document".to_string());
+            return CheckOutcome::unavailable("lopdf could not parse this document");
+        };
+        let Some(catalog) = pdf::catalog(doc) else {
+            return CheckOutcome::unavailable("document catalog could not be read");
         };
         let mut findings = Vec::new();
-        if let Some(root) = pdf::catalog(doc).and_then(|c| pdf::get_dict(doc, c, b"StructTreeRoot")) {
+        if let Some(root) = pdf::get_dict(doc, catalog, b"StructTreeRoot") {
             let mut budget = 100_000u32;
             walk(doc, root, query, &mut findings, 0, &mut budget);
         }
@@ -54,12 +57,7 @@ fn walk(
         return;
     }
     *budget -= 1;
-    for key in TEXT_KEYS {
-        if let Some(text) = pdf::get_string(doc, node, key) {
-            let key = String::from_utf8_lossy(key);
-            findings_in(&text, query, Vector::StructureTree, &format!("StructElem /{key}"), None, findings);
-        }
-    }
+    scan_dict_keys(doc, node, TEXT_KEYS, query, Vector::StructureTree, None, |k| format!("StructElem /{k}"), findings);
     // /K is a kid, an array of kids, or a reference; each kid is a StructElem
     // dict, a reference to one, or a marked-content id integer (ignored).
     match node.get(b"K").ok().and_then(|o| pdf::resolve(doc, o)) {
@@ -86,7 +84,7 @@ mod tests {
         let q = Query::literal([term.to_string()], false, false).unwrap();
         match StructureTree.run(&ctx, &q) {
             CheckOutcome::Ran { findings, .. } => findings,
-            CheckOutcome::Skipped(r) => panic!("unexpected skip: {r}"),
+            CheckOutcome::Skipped { reason: r, .. } => panic!("unexpected skip: {r}"),
         }
     }
 

@@ -26,10 +26,13 @@ impl VectorCheck for Outlines {
 
     fn run(&self, ctx: &DocContext, query: &Query) -> CheckOutcome {
         let Some(doc) = ctx.lopdf else {
-            return CheckOutcome::Skipped("lopdf could not parse this document".to_string());
+            return CheckOutcome::unavailable("lopdf could not parse this document");
+        };
+        let Some(catalog) = pdf::catalog(doc) else {
+            return CheckOutcome::unavailable("document catalog could not be read");
         };
         let mut findings = Vec::new();
-        if let Some(root) = pdf::catalog(doc).and_then(|c| pdf::get_dict(doc, c, b"Outlines")) {
+        if let Some(root) = pdf::get_dict(doc, catalog, b"Outlines") {
             // The outline is a doubly-linked tree: descend /First, follow /Next.
             let mut budget = 100_000u32;
             if let Some(first) = pdf::get_dict(doc, root, b"First") {
@@ -89,7 +92,7 @@ mod tests {
         let q = Query::literal(["Zanzibar".to_string()], false, false).unwrap();
         let f = match Outlines.run(&ctx, &q) {
             CheckOutcome::Ran { findings, .. } => findings,
-            CheckOutcome::Skipped(r) => panic!("skip: {r}"),
+            CheckOutcome::Skipped { reason: r, .. } => panic!("skip: {r}"),
         };
         assert_eq!(f.len(), 1);
         assert_eq!(f[0].location, "Bookmark /Title");

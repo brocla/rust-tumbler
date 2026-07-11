@@ -24,10 +24,13 @@ impl VectorCheck for PageLabels {
 
     fn run(&self, ctx: &DocContext, query: &Query) -> CheckOutcome {
         let Some(doc) = ctx.lopdf else {
-            return CheckOutcome::Skipped("lopdf could not parse this document".to_string());
+            return CheckOutcome::unavailable("lopdf could not parse this document");
+        };
+        let Some(catalog) = pdf::catalog(doc) else {
+            return CheckOutcome::unavailable("document catalog could not be read");
         };
         let mut findings: Vec<Finding> = Vec::new();
-        if let Some(tree) = pdf::catalog(doc).and_then(|c| pdf::get_dict(doc, c, b"PageLabels")) {
+        if let Some(tree) = pdf::get_dict(doc, catalog, b"PageLabels") {
             pdf::walk_number_tree(doc, tree, |value| {
                 if let Ok(label_dict) = value.as_dict() {
                     if let Some(prefix) = pdf::get_string(doc, label_dict, b"P") {
@@ -60,7 +63,7 @@ mod tests {
         let q = Query::literal(["Zanzibar".to_string()], false, false).unwrap();
         let f = match PageLabels.run(&ctx, &q) {
             CheckOutcome::Ran { findings, .. } => findings,
-            CheckOutcome::Skipped(r) => panic!("skip: {r}"),
+            CheckOutcome::Skipped { reason: r, .. } => panic!("skip: {r}"),
         };
         assert_eq!(f.len(), 1);
     }

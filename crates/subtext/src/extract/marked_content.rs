@@ -28,7 +28,7 @@ impl VectorCheck for MarkedContent {
 
     fn run(&self, ctx: &DocContext, query: &Query) -> CheckOutcome {
         let Some(doc) = ctx.lopdf else {
-            return CheckOutcome::Skipped("lopdf could not parse this document".to_string());
+            return CheckOutcome::unavailable("lopdf could not parse this document");
         };
         let mut findings: Vec<Finding> = Vec::new();
 
@@ -125,7 +125,7 @@ mod tests {
         let q = Query::literal(["Zanzibar".to_string()], false, false).unwrap();
         let f = match MarkedContent.run(&ctx, &q) {
             CheckOutcome::Ran { findings, .. } => findings,
-            CheckOutcome::Skipped(r) => panic!("skip: {r}"),
+            CheckOutcome::Skipped { reason: r, .. } => panic!("skip: {r}"),
         };
         assert_eq!(f.len(), 1, "{f:?}");
         assert!(f[0].location.contains("/ActualText"));

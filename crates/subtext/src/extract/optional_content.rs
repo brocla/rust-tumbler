@@ -8,7 +8,6 @@ use crate::extract::{findings_in, CheckOutcome, DocContext, VectorCheck};
 use crate::pdf;
 use crate::query::Query;
 use crate::report::Vector;
-use lopdf::Object;
 
 pub struct OptionalContent;
 
@@ -28,24 +27,13 @@ impl VectorCheck for OptionalContent {
 
     fn run(&self, ctx: &DocContext, query: &Query) -> CheckOutcome {
         let Some(doc) = ctx.lopdf else {
-            return CheckOutcome::Skipped("lopdf could not parse this document".to_string());
+            return CheckOutcome::unavailable("lopdf could not parse this document");
         };
         let mut findings = Vec::new();
 
         // Every optional-content group / membership dict carries a /Name.
-        for (id, obj) in &doc.objects {
-            let dict = match obj {
-                Object::Dictionary(d) => d,
-                Object::Stream(s) => &s.dict,
-                _ => continue,
-            };
-            let is_oc = dict
-                .get(b"Type")
-                .ok()
-                .and_then(|o| o.as_name().ok())
-                .map(|n| n == b"OCG" || n == b"OCMD")
-                .unwrap_or(false);
-            if is_oc {
+        for (id, dict) in pdf::iter_dicts(doc) {
+            if pdf::name_is(dict, b"Type", &[b"OCG", b"OCMD"]) {
                 if let Some(name) = pdf::get_string(doc, dict, b"Name") {
                     findings_in(&name, query, Vector::OptionalContent, &format!("OCG /Name (object {} {})", id.0, id.1), None, &mut findings);
                 }
@@ -68,7 +56,7 @@ impl VectorCheck for OptionalContent {
 mod tests {
     use super::*;
     use crate::extract::CheckOutcome;
-    use lopdf::{dictionary, Document};
+    use lopdf::{dictionary, Document, Object};
 
     #[test]
     fn finds_secret_in_ocg_name() {
@@ -81,7 +69,7 @@ mod tests {
         let q = Query::literal(["Zanzibar".to_string()], false, false).unwrap();
         let f = match OptionalContent.run(&ctx, &q) {
             CheckOutcome::Ran { findings, .. } => findings,
-            CheckOutcome::Skipped(r) => panic!("skip: {r}"),
+            CheckOutcome::Skipped { reason: r, .. } => panic!("skip: {r}"),
         };
         assert_eq!(f.len(), 1, "{f:?}");
     }

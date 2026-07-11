@@ -28,9 +28,13 @@ impl VectorCheck for Xfa {
 
     fn run(&self, ctx: &DocContext, query: &Query) -> CheckOutcome {
         let Some(doc) = ctx.lopdf else {
-            return CheckOutcome::Skipped("lopdf could not parse this document".to_string());
+            return CheckOutcome::unavailable("lopdf could not parse this document");
         };
-        let Some(acroform) = pdf::catalog(doc).and_then(|c| pdf::get_dict(doc, c, b"AcroForm")) else {
+        let Some(catalog) = pdf::catalog(doc) else {
+            return CheckOutcome::unavailable("document catalog could not be read");
+        };
+        // No AcroForm / no /XFA is legitimately "no XFA present" — clean.
+        let Some(acroform) = pdf::get_dict(doc, catalog, b"AcroForm") else {
             return CheckOutcome::ran(Vec::new());
         };
         let Some(xfa) = acroform.get(b"XFA").ok().and_then(|o| pdf::resolve(doc, o)) else {
@@ -93,7 +97,7 @@ mod tests {
         let q = Query::literal(["Zanzibar".to_string()], false, false).unwrap();
         let f = match Xfa.run(&ctx, &q) {
             CheckOutcome::Ran { findings, .. } => findings,
-            CheckOutcome::Skipped(r) => panic!("skip: {r}"),
+            CheckOutcome::Skipped { reason: r, .. } => panic!("skip: {r}"),
         };
         assert_eq!(f.len(), 1, "{f:?}");
         assert!(f[0].location.contains("datasets"));

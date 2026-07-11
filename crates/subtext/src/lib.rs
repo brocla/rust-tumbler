@@ -66,7 +66,7 @@ pub fn check_pdf(pdfium: &Pdfium, bytes: &[u8], file_name: &str, query: &Query) 
         let mut signals: Vec<Signal> = Vec::new();
 
         for check in REGISTRY {
-            let (tone, status, detail) = match check.run(&ctx, query) {
+            let (tone, status, detail, skip_kind) = match check.run(&ctx, query) {
                 CheckOutcome::Ran {
                     findings: hits,
                     signals: mut sigs,
@@ -81,19 +81,20 @@ pub fn check_pdf(pdfium: &Pdfium, bytes: &[u8], file_name: &str, query: &Query) 
                                 CheckTone::Warning,
                                 CheckStatus::CheckedClean,
                                 format!("No matches, but {n_sigs} suspicious signal(s) — see signals"),
+                                None,
                             )
                         } else {
-                            (CheckTone::Passed, CheckStatus::CheckedClean, "No matches".to_string())
+                            (CheckTone::Passed, CheckStatus::CheckedClean, "No matches".to_string(), None)
                         }
                     } else {
                         let detail = summarize_hits(&hits);
                         let mut hits = hits;
                         findings.append(&mut hits);
-                        (CheckTone::Leak, CheckStatus::Found, detail)
+                        (CheckTone::Leak, CheckStatus::Found, detail, None)
                     }
                 }
-                CheckOutcome::Skipped(reason) => {
-                    (CheckTone::Skipped, CheckStatus::Skipped, reason)
+                CheckOutcome::Skipped { reason, kind } => {
+                    (CheckTone::Skipped, CheckStatus::Skipped, reason, Some(kind))
                 }
             };
             checks.push(Check {
@@ -104,6 +105,7 @@ pub fn check_pdf(pdfium: &Pdfium, bytes: &[u8], file_name: &str, query: &Query) 
                 tone,
                 status,
                 detail,
+                skip_kind,
             });
         }
         (checks, findings, signals)

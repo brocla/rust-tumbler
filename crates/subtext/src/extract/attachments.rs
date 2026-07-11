@@ -4,7 +4,7 @@
 //! Tumbler's `/EmbeddedFiles` + `/AF` scrub. Embedded stream bytes are scanned
 //! as text (recursion into embedded *PDFs* is `--recurse-embedded`, Phase 3+).
 
-use crate::extract::{findings_in, CheckOutcome, DocContext, VectorCheck};
+use crate::extract::{findings_in, scan_dict_keys, CheckOutcome, DocContext, VectorCheck};
 use crate::pdf;
 use crate::query::Query;
 use crate::report::{Finding, Vector};
@@ -30,11 +30,11 @@ impl VectorCheck for Attachments {
 
     fn run(&self, ctx: &DocContext, query: &Query) -> CheckOutcome {
         let Some(doc) = ctx.lopdf else {
-            return CheckOutcome::Skipped("lopdf could not parse this document".to_string());
+            return CheckOutcome::unavailable("lopdf could not parse this document");
         };
         let mut findings = Vec::new();
         let Some(catalog) = pdf::catalog(doc) else {
-            return CheckOutcome::ran(findings);
+            return CheckOutcome::unavailable("document catalog could not be read");
         };
 
         // /Names /EmbeddedFiles name tree → filespecs.
@@ -75,17 +75,14 @@ fn scan_af_array(doc: &Document, dict: &Dictionary, query: &Query, where_: &str,
 /// Scans one filespec: its `/F` `/UF` `/Desc` strings and the bytes of its
 /// embedded file stream(s) under `/EF`.
 fn scan_filespec(doc: &Document, fs: &Dictionary, query: &Query, where_: &str, findings: &mut Vec<Finding>) {
-    for key in FILESPEC_KEYS {
-        if let Some(text) = pdf::get_string(doc, fs, key) {
-            let key = String::from_utf8_lossy(key);
-            findings_in(&text, query, Vector::Attachments, &format!("{where_} filespec /{key}"), None, findings);
-        }
-    }
+    scan_dict_keys(doc, fs, FILESPEC_KEYS, query, Vector::Attachments, None, |k| format!("{where_} filespec /{k}"), findings);
     if let Some(ef) = pdf::get_dict(doc, fs, b"EF") {
         for stream_key in [b"F".as_slice(), b"UF"] {
             if let Some(id) = ef.get(stream_key).ok().and_then(|o| o.as_reference().ok()) {
                 if let Some(bytes) = pdf::stream_bytes(doc, id) {
-                    let text = String::from_utf8_lossy(&bytes);
+                    // BOM-aware decode so a UTF-16 embedded text file is scanned,
+                    // not turned into NUL-interleaved noise by a lossy UTF-8 read.
+                    let text = pdf::decode_pdf_text(&bytes);
                     findings_in(&text, query, Vector::Attachments, &format!("{where_} embedded file contents"), None, findings);
                 }
             }
@@ -117,7 +114,7 @@ mod tests {
         let q = Query::literal(["Zanzibar".to_string()], false, false).unwrap();
         let f = match Attachments.run(&ctx, &q) {
             CheckOutcome::Ran { findings, .. } => findings,
-            CheckOutcome::Skipped(r) => panic!("skip: {r}"),
+            CheckOutcome::Skipped { reason: r, .. } => panic!("skip: {r}"),
         };
         assert!(f.iter().any(|x| x.location.contains("embedded file contents")), "{f:?}");
     }

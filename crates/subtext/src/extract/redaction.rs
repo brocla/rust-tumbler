@@ -5,7 +5,7 @@
 //! +audit). Emits the query-independent `UnappliedRedactAnnotation` signal
 //! (§3.4) for every such annotation, whether or not the query matches.
 
-use crate::extract::{findings_in, CheckOutcome, DocContext, VectorCheck};
+use crate::extract::{scan_dict_keys, CheckOutcome, DocContext, VectorCheck};
 use crate::pdf;
 use crate::query::Query;
 use crate::report::{Finding, Signal, SignalKind, Vector};
@@ -30,7 +30,7 @@ impl VectorCheck for RedactionAnnotations {
 
     fn run(&self, ctx: &DocContext, query: &Query) -> CheckOutcome {
         let Some(doc) = ctx.lopdf else {
-            return CheckOutcome::Skipped("lopdf could not parse this document".to_string());
+            return CheckOutcome::unavailable("lopdf could not parse this document");
         };
         let mut findings: Vec<Finding> = Vec::new();
         let mut signals: Vec<Signal> = Vec::new();
@@ -56,12 +56,7 @@ impl VectorCheck for RedactionAnnotations {
                     location: format!("page {page_num}"),
                     detail: "A /Redact annotation is present but its content was never applied — the text beneath it is likely still recoverable.".to_string(),
                 });
-                for key in TEXT_KEYS {
-                    if let Some(text) = pdf::get_string(doc, annot, key) {
-                        let key = String::from_utf8_lossy(key);
-                        findings_in(&text, query, Vector::RedactionAnnotations, &format!("/Redact /{key} (page {page_num})"), Some(page_num), &mut findings);
-                    }
-                }
+                scan_dict_keys(doc, annot, TEXT_KEYS, query, Vector::RedactionAnnotations, Some(page_num), |k| format!("/Redact /{k} (page {page_num})"), &mut findings);
             }
         }
         CheckOutcome::Ran { findings, signals }
@@ -105,7 +100,7 @@ mod tests {
                 assert!(matches!(signals[0].kind, SignalKind::UnappliedRedactAnnotation));
                 assert!(findings.iter().any(|f| f.location.contains("/OverlayText")));
             }
-            CheckOutcome::Skipped(r) => panic!("skip: {r}"),
+            CheckOutcome::Skipped { reason: r, .. } => panic!("skip: {r}"),
         }
     }
 
@@ -119,7 +114,7 @@ mod tests {
                 assert!(findings.is_empty());
                 assert_eq!(signals.len(), 1, "signal is query-independent");
             }
-            CheckOutcome::Skipped(r) => panic!("skip: {r}"),
+            CheckOutcome::Skipped { reason: r, .. } => panic!("skip: {r}"),
         }
     }
 }

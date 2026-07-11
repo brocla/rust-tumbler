@@ -54,6 +54,19 @@ impl QueryReport {
     }
 }
 
+/// Why a check was skipped — the two categories are scored differently by the
+/// risk rubric (§3.3). `Unavailable` is a *per-file* blind spot (encryption, an
+/// unsupported filter, an unreadable catalog): it caps a no-match report at
+/// warning, because the term could be hiding in a place this file prevented us
+/// from inspecting. `NotImplemented` is a *tool-phase* limitation (an extractor
+/// that has not shipped yet): disclosed honestly, but it does not imply the file
+/// is suspicious, so it must not force every clean file to warning/medium.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkipKind {
+    Unavailable,
+    NotImplemented,
+}
+
 /// One row of the "everything we checked" list.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -66,6 +79,11 @@ pub struct Check {
     pub status: CheckStatus,
     /// "1 match on page 4" / "No matches" / a skip reason.
     pub detail: String,
+    /// Why this check was skipped, when it was. Internal to risk scoring — not
+    /// serialized (the `status`/`tone`/`detail` fields carry the skip to the
+    /// JSON; this only steers the §3.3 rubric).
+    #[serde(skip)]
+    pub skip_kind: Option<SkipKind>,
 }
 
 /// One place the term was found.
@@ -165,26 +183,23 @@ pub enum Vector {
     RawDecompressed,
 }
 
-impl Vector {
-    /// The OCR family — checks whose skip is *not* a structural blind spot,
-    /// because the content was still fully reachable by extraction (§3.3).
-    fn is_ocr_family(self) -> bool {
-        matches!(self, Vector::RenderedOcr)
-    }
-}
-
 impl Report {
     /// Applies the §3.3 rubric to already-populated `checks` / `findings` /
     /// `signals`, filling in `risk_tone`, `risk_score`, `title`, and
     /// `description`. Deterministic — no judgement beyond counting.
     pub fn finalize(&mut self) {
         let total = self.checks.len();
-        let skipped = self
-            .checks
-            .iter()
-            .filter(|c| c.status == CheckStatus::Skipped);
-        let structural_skips = skipped.clone().filter(|c| !c.vector.is_ocr_family()).count();
-        let ocr_skips = skipped.filter(|c| c.vector.is_ocr_family()).count();
+        let skipped = || self.checks.iter().filter(|c| c.status == CheckStatus::Skipped);
+        // A per-file blind spot: the term could hide in a place THIS file
+        // prevented us from inspecting → caps a no-match report at warning.
+        let unavailable_skips = skipped()
+            .filter(|c| c.skip_kind == Some(SkipKind::Unavailable))
+            .count();
+        // Tool-phase limitations: an extractor not yet shipped (incl. the opt-in
+        // OCR pass). Disclosed, but not evidence the file is suspicious.
+        let unbuilt_skips = skipped()
+            .filter(|c| c.skip_kind == Some(SkipKind::NotImplemented))
+            .count();
         let signals = self.signals.len();
         let terms = terms_phrase(&self.query.terms);
 
@@ -198,10 +213,12 @@ impl Report {
                     "Found {terms} across {vectors_hit} of {total} inspected vectors. The redacted term is recoverable."
                 ),
             )
-        } else if structural_skips > 0 || signals > 0 {
+        } else if unavailable_skips > 0 || signals > 0 {
+            // The file itself blocked inspection of some vector, or a
+            // query-independent signal fired: cannot certify.
             let mut reasons = Vec::new();
-            if structural_skips > 0 {
-                reasons.push(format!("{structural_skips} vector(s) could not be fully inspected"));
+            if unavailable_skips > 0 {
+                reasons.push(format!("{unavailable_skips} vector(s) could not be inspected in this file"));
             }
             if signals > 0 {
                 reasons.push(format!("{signals} suspicious signal(s) fired"));
@@ -215,13 +232,15 @@ impl Report {
                     "No matches for {terms} in the vectors that ran, but {reasons} — the file cannot be certified. See the skipped checks and signals below."
                 ),
             )
-        } else if ocr_skips > 0 {
+        } else if unbuilt_skips > 0 {
+            // Everything this build can inspect came back clean; some vectors are
+            // not yet implemented (e.g. the opt-in OCR pass, revisions).
             (
                 RiskTone::Warning,
                 RiskScore::Low,
-                "No matches in any inspected text vector; the image/OCR pass was not run.".to_string(),
+                format!("No matches in any inspected vector; {unbuilt_skips} vector(s) not yet implemented."),
                 format!(
-                    "No matches for {terms} across all inspected text vectors. The rendered-image OCR pass was not run, so text baked into images was not examined (re-run with --ocr)."
+                    "No matches for {terms} across every vector this build inspects. {unbuilt_skips} vector(s) are not yet implemented (e.g. the opt-in --ocr pass), so this is not a full-coverage clean — see the skipped checks below."
                 ),
             )
         } else {
@@ -265,6 +284,17 @@ mod tests {
     use super::*;
 
     fn check(vector: Vector, status: CheckStatus) -> Check {
+        // Default a skip to Unavailable (per-file blind spot); tests that need a
+        // NotImplemented skip use `skip_check`.
+        let kind = (status == CheckStatus::Skipped).then_some(SkipKind::Unavailable);
+        make_check(vector, status, kind)
+    }
+
+    fn skip_check(vector: Vector, kind: SkipKind) -> Check {
+        make_check(vector, CheckStatus::Skipped, Some(kind))
+    }
+
+    fn make_check(vector: Vector, status: CheckStatus, skip_kind: Option<SkipKind>) -> Check {
         let tone = match status {
             CheckStatus::Found => CheckTone::Leak,
             CheckStatus::CheckedClean => CheckTone::Passed,
@@ -278,6 +308,7 @@ mod tests {
             tone,
             status,
             detail: String::new(),
+            skip_kind,
         }
     }
 
@@ -348,11 +379,12 @@ mod tests {
     }
 
     #[test]
-    fn structural_skip_is_medium_warning() {
+    fn unavailable_skip_is_medium_warning() {
+        // A per-file blind spot (e.g. an unreadable catalog) caps at Medium.
         let r = report_with(
             vec![
                 check(Vector::PageText, CheckStatus::CheckedClean),
-                check(Vector::Metadata, CheckStatus::Skipped),
+                skip_check(Vector::Metadata, SkipKind::Unavailable),
             ],
             vec![],
             vec![],
@@ -362,17 +394,36 @@ mod tests {
     }
 
     #[test]
-    fn only_ocr_skip_is_low_warning() {
+    fn only_not_implemented_skips_is_low_warning() {
+        // Not-yet-built vectors (the phased-build state) → Low, never Medium,
+        // and never forced above a genuinely clean-so-far file.
         let r = report_with(
             vec![
                 check(Vector::PageText, CheckStatus::CheckedClean),
-                check(Vector::RenderedOcr, CheckStatus::Skipped),
+                skip_check(Vector::RenderedOcr, SkipKind::NotImplemented),
+                skip_check(Vector::Revisions, SkipKind::NotImplemented),
             ],
             vec![],
             vec![],
         );
         assert_eq!(r.risk_tone, RiskTone::Warning);
         assert_eq!(r.risk_score, RiskScore::Low);
+    }
+
+    #[test]
+    fn not_implemented_skips_do_not_mask_a_real_unavailable_skip() {
+        // Mixed: a per-file Unavailable skip must still dominate to Medium even
+        // when not-implemented skips are also present.
+        let r = report_with(
+            vec![
+                check(Vector::PageText, CheckStatus::CheckedClean),
+                skip_check(Vector::Metadata, SkipKind::Unavailable),
+                skip_check(Vector::Revisions, SkipKind::NotImplemented),
+            ],
+            vec![],
+            vec![],
+        );
+        assert_eq!(r.risk_score, RiskScore::Medium);
     }
 
     #[test]

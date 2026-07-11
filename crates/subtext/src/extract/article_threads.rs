@@ -2,7 +2,7 @@
 //! carries Info-style strings (`/Title`, `/Author`, `/Subject`, `/Keywords`)
 //! that can echo redacted text (spec §4-C, +audit).
 
-use crate::extract::{findings_in, CheckOutcome, DocContext, VectorCheck};
+use crate::extract::{scan_dict_keys, CheckOutcome, DocContext, VectorCheck};
 use crate::pdf;
 use crate::query::Query;
 use crate::report::{Finding, Vector};
@@ -27,21 +27,19 @@ impl VectorCheck for ArticleThreads {
 
     fn run(&self, ctx: &DocContext, query: &Query) -> CheckOutcome {
         let Some(doc) = ctx.lopdf else {
-            return CheckOutcome::Skipped("lopdf could not parse this document".to_string());
+            return CheckOutcome::unavailable("lopdf could not parse this document");
+        };
+        let Some(catalog) = pdf::catalog(doc) else {
+            return CheckOutcome::unavailable("document catalog could not be read");
         };
         let mut findings: Vec<Finding> = Vec::new();
-        if let Some(threads) = pdf::catalog(doc).and_then(|c| pdf::get_array(doc, c, b"Threads")) {
+        if let Some(threads) = pdf::get_array(doc, catalog, b"Threads") {
             for thread in threads {
                 let Some(thread) = pdf::resolve(doc, thread).and_then(|o| o.as_dict().ok()) else {
                     continue;
                 };
                 if let Some(info) = pdf::get_dict(doc, thread, b"I") {
-                    for key in INFO_KEYS {
-                        if let Some(text) = pdf::get_string(doc, info, key) {
-                            let key = String::from_utf8_lossy(key);
-                            findings_in(&text, query, Vector::ArticleThreads, &format!("Thread /I /{key}"), None, &mut findings);
-                        }
-                    }
+                    scan_dict_keys(doc, info, INFO_KEYS, query, Vector::ArticleThreads, None, |k| format!("Thread /I /{k}"), &mut findings);
                 }
             }
         }
@@ -67,7 +65,7 @@ mod tests {
         let q = Query::literal(["Zanzibar".to_string()], false, false).unwrap();
         let f = match ArticleThreads.run(&ctx, &q) {
             CheckOutcome::Ran { findings, .. } => findings,
-            CheckOutcome::Skipped(r) => panic!("skip: {r}"),
+            CheckOutcome::Skipped { reason: r, .. } => panic!("skip: {r}"),
         };
         assert_eq!(f.len(), 1);
     }

@@ -7,7 +7,7 @@
 //! drift from the set of implemented extractors.
 
 use crate::query::Query;
-use crate::report::{Finding, Signal, Vector};
+use crate::report::{Finding, Signal, SkipKind, Vector};
 use pdfium_render::prelude::PdfDocument;
 
 pub mod annotations;
@@ -37,7 +37,10 @@ pub enum CheckOutcome {
         findings: Vec<Finding>,
         signals: Vec<Signal>,
     },
-    Skipped(String),
+    Skipped {
+        reason: String,
+        kind: SkipKind,
+    },
 }
 
 impl CheckOutcome {
@@ -46,6 +49,48 @@ impl CheckOutcome {
         CheckOutcome::Ran {
             findings,
             signals: Vec::new(),
+        }
+    }
+
+    /// A skip because *this file* could not be inspected (per-file blind spot).
+    pub fn unavailable(reason: impl Into<String>) -> Self {
+        CheckOutcome::Skipped {
+            reason: reason.into(),
+            kind: SkipKind::Unavailable,
+        }
+    }
+
+    /// A skip because the extractor has not shipped yet (tool-phase limitation).
+    pub fn not_implemented(reason: impl Into<String>) -> Self {
+        CheckOutcome::Skipped {
+            reason: reason.into(),
+            kind: SkipKind::NotImplemented,
+        }
+    }
+}
+
+/// Matches `query` against each of `dict`'s `keys` (decoded via
+/// [`crate::pdf::get_string`], which resolves indirect values), emitting a
+/// finding per match under `vector`. `location(key)` builds the finding's
+/// location label from the matched key name. The shared "scan a fixed set of
+/// text keys on a dictionary" path used by the metadata/structure/annotation/
+/// forms/attachment/thread/redaction/signature extractors, so the
+/// decode-and-label convention lives in exactly one place.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn scan_dict_keys(
+    doc: &lopdf::Document,
+    dict: &lopdf::Dictionary,
+    keys: &[&[u8]],
+    query: &Query,
+    vector: Vector,
+    page: Option<u32>,
+    location: impl Fn(&str) -> String,
+    out: &mut Vec<Finding>,
+) {
+    for key in keys {
+        if let Some(text) = crate::pdf::get_string(doc, dict, key) {
+            let key = String::from_utf8_lossy(key);
+            findings_in(&text, query, vector, &location(&key), page, out);
         }
     }
 }
@@ -171,7 +216,7 @@ impl VectorCheck for Pending {
         self.method
     }
     fn run(&self, _ctx: &DocContext, _query: &Query) -> CheckOutcome {
-        CheckOutcome::Skipped(format!("extractor not yet implemented ({})", self.phase))
+        CheckOutcome::not_implemented(format!("extractor not yet implemented ({})", self.phase))
     }
 }
 

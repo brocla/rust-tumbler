@@ -28,25 +28,14 @@ impl VectorCheck for Scripts {
 
     fn run(&self, ctx: &DocContext, query: &Query) -> CheckOutcome {
         let Some(doc) = ctx.lopdf else {
-            return CheckOutcome::Skipped("lopdf could not parse this document".to_string());
+            return CheckOutcome::unavailable("lopdf could not parse this document");
         };
         let mut findings = Vec::new();
 
         // Every JavaScript action, wherever referenced: a dict with
         // /S /JavaScript carries its source in /JS (a string or a stream).
-        for (id, obj) in &doc.objects {
-            let dict = match obj {
-                Object::Dictionary(d) => d,
-                Object::Stream(s) => &s.dict,
-                _ => continue,
-            };
-            let is_js = dict
-                .get(b"S")
-                .ok()
-                .and_then(|o| o.as_name().ok())
-                .map(|n| n == b"JavaScript")
-                .unwrap_or(false);
-            if !is_js {
+        for (id, dict) in pdf::iter_dicts(doc) {
+            if !pdf::name_is(dict, b"S", &[b"JavaScript"]) {
                 continue;
             }
             match dict.get(b"JS").ok().and_then(|o| pdf::resolve(doc, o)) {
@@ -56,7 +45,7 @@ impl VectorCheck for Scripts {
                 }
                 Some(obj @ Object::Stream(_)) => {
                     if let Some(bytes) = pdf::stream_object_bytes(obj) {
-                        let text = String::from_utf8_lossy(&bytes);
+                        let text = pdf::decode_pdf_text(&bytes);
                         findings_in(&text, query, Vector::Scripts, &format!("JavaScript action stream (object {} {})", id.0, id.1), None, &mut findings);
                     }
                 }
@@ -90,7 +79,7 @@ mod tests {
         let q = Query::literal(["Zanzibar".to_string()], false, false).unwrap();
         let f = match Scripts.run(&ctx, &q) {
             CheckOutcome::Ran { findings, .. } => findings,
-            CheckOutcome::Skipped(r) => panic!("skip: {r}"),
+            CheckOutcome::Skipped { reason: r, .. } => panic!("skip: {r}"),
         };
         assert_eq!(f.len(), 1, "{f:?}");
     }

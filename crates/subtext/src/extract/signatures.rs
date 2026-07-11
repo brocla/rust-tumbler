@@ -5,11 +5,10 @@
 //! parsing is out of scope (Tumbler's is Windows-only). Signature dicts are
 //! found by their `/ByteRange`.
 
-use crate::extract::{findings_in, CheckOutcome, DocContext, VectorCheck};
+use crate::extract::{findings_in, scan_dict_keys, CheckOutcome, DocContext, VectorCheck};
 use crate::pdf;
 use crate::query::Query;
 use crate::report::Vector;
-use lopdf::Object;
 
 pub struct Signatures;
 
@@ -31,12 +30,11 @@ impl VectorCheck for Signatures {
 
     fn run(&self, ctx: &DocContext, query: &Query) -> CheckOutcome {
         let Some(doc) = ctx.lopdf else {
-            return CheckOutcome::Skipped("lopdf could not parse this document".to_string());
+            return CheckOutcome::unavailable("lopdf could not parse this document");
         };
         let mut findings = Vec::new();
 
-        for (id, obj) in &doc.objects {
-            let Object::Dictionary(dict) = obj else { continue };
+        for (id, dict) in pdf::iter_dicts(doc) {
             // A signature dictionary is identified by /ByteRange.
             if dict.get(b"ByteRange").is_err() {
                 continue;
@@ -46,12 +44,7 @@ impl VectorCheck for Signatures {
                 let text = String::from_utf8_lossy(contents);
                 findings_in(&text, query, Vector::Signatures, &format!("signature /Contents DER (object {} {})", id.0, id.1), None, &mut findings);
             }
-            for key in SIG_TEXT_KEYS {
-                if let Some(text) = pdf::get_string(doc, dict, key) {
-                    let key = String::from_utf8_lossy(key);
-                    findings_in(&text, query, Vector::Signatures, &format!("signature /{key}"), None, &mut findings);
-                }
-            }
+            scan_dict_keys(doc, dict, SIG_TEXT_KEYS, query, Vector::Signatures, None, |k| format!("signature /{k}"), &mut findings);
         }
         CheckOutcome::ran(findings)
     }
@@ -61,7 +54,7 @@ impl VectorCheck for Signatures {
 mod tests {
     use super::*;
     use crate::extract::CheckOutcome;
-    use lopdf::{dictionary, Document};
+    use lopdf::{dictionary, Document, Object};
 
     #[test]
     fn finds_secret_in_signature_reason() {
@@ -79,7 +72,7 @@ mod tests {
         let q = Query::literal(["Zanzibar".to_string()], false, false).unwrap();
         let f = match Signatures.run(&ctx, &q) {
             CheckOutcome::Ran { findings, .. } => findings,
-            CheckOutcome::Skipped(r) => panic!("skip: {r}"),
+            CheckOutcome::Skipped { reason: r, .. } => panic!("skip: {r}"),
         };
         assert!(f.iter().any(|x| x.location.contains("/Reason")), "{f:?}");
     }

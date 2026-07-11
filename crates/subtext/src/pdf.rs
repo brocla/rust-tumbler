@@ -5,36 +5,38 @@
 //! and UTF-16BE text strings are transparent. These helpers centralize that
 //! decoding and the reference/tree walking so no extractor re-implements it.
 
-use lopdf::{Dictionary, Document, Object, ObjectId};
+use lopdf::{Dictionary, Document, Object, ObjectId, StringFormat};
 
-/// Decodes a PDF string object's bytes to a Rust `String` per the PDF text-
-/// string convention: a leading UTF-16 byte-order mark selects UTF-16 (BE or
-/// LE); otherwise the bytes are PDFDocEncoding, which coincides with Latin-1
-/// over the printable range, so a lossy Latin-1 decode is faithful for the text
-/// we scan. lopdf's `Object::as_str` already un-escaped the literal, so this
-/// only handles the character encoding.
+/// Decodes PDF text-string bytes to a Rust `String` per the PDF text-string
+/// convention: a UTF-16 byte-order mark selects UTF-16 (BE **or** LE); a UTF-8
+/// BOM selects UTF-8; otherwise the bytes are **PDFDocEncoding** (whose
+/// 0x80–0xA0 range is typographic punctuation — smart quotes, dashes, bullet —
+/// *not* Latin-1 C1 controls, so a raw `b as char` cast silently mangles them
+/// and a query for a name like `O’Brien` would miss). We delegate the BE/UTF-8/
+/// PDFDocEncoding cases to lopdf's table-correct `decode_text_string` (wrapping
+/// the bytes in a literal `Object`) and handle only the UTF-16LE BOM ourselves,
+/// which lopdf does not. Used for both string objects and raw stream/content
+/// bytes; `Object::as_str` has already un-escaped any literal.
 pub fn decode_pdf_text(bytes: &[u8]) -> String {
-    if bytes.len() >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF {
-        // UTF-16BE with BOM.
-        let units: Vec<u16> = bytes[2..]
-            .chunks_exact(2)
-            .map(|c| u16::from_be_bytes([c[0], c[1]]))
-            .collect();
-        String::from_utf16_lossy(&units)
-    } else if bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE {
-        // UTF-16LE with BOM (rare, but seen).
+    if bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE {
+        // UTF-16LE with BOM (lopdf's decoder only recognizes the BE BOM).
         let units: Vec<u16> = bytes[2..]
             .chunks_exact(2)
             .map(|c| u16::from_le_bytes([c[0], c[1]]))
             .collect();
         String::from_utf16_lossy(&units)
     } else {
-        // PDFDocEncoding ≈ Latin-1 for printable text.
-        bytes.iter().map(|&b| b as char).collect()
+        // UTF-16BE BOM, UTF-8 BOM, and PDFDocEncoding are all handled correctly
+        // by lopdf's table-driven decoder.
+        let obj = Object::String(bytes.to_vec(), StringFormat::Literal);
+        lopdf::decode_text_string(&obj)
+            .unwrap_or_else(|_| bytes.iter().map(|&b| b as char).collect())
     }
 }
 
-/// The decoded text of an object *if* it is a string; `None` otherwise.
+/// The decoded text of an object *if* it is a string; `None` otherwise. Routes
+/// through [`decode_pdf_text`] so string objects get the same BOM-aware,
+/// PDFDocEncoding-correct decode as raw bytes.
 pub fn string_text(obj: &Object) -> Option<String> {
     obj.as_str().ok().map(decode_pdf_text)
 }
@@ -186,6 +188,31 @@ pub fn walk_number_tree<'a>(
     }
     let mut budget = 100_000u32;
     recurse(doc, root, 0, &mut budget, &mut visit);
+}
+
+/// Iterates every object that carries a dictionary — plain dictionaries and
+/// stream dictionaries alike — as `(id, &Dictionary)`. Centralizes the
+/// object-graph dict coercion the whole-graph extractors (scripts, URIs,
+/// optional content, signatures, metadata) would otherwise each re-derive, so
+/// they can never disagree about which object kinds expose a scannable dict.
+pub fn iter_dicts(doc: &Document) -> impl Iterator<Item = (ObjectId, &Dictionary)> {
+    doc.objects.iter().filter_map(|(id, obj)| match obj {
+        Object::Dictionary(d) => Some((*id, d)),
+        Object::Stream(s) => Some((*id, &s.dict)),
+        _ => None,
+    })
+}
+
+/// True when `dict[key]` is a name equal to one of `names`. Keeps the fiddly
+/// Option/Result-chained byte-name comparison (and its easy-to-flip
+/// `unwrap_or(false)` default) in one place so a type filter can't silently
+/// diverge across extractors.
+pub fn name_is(dict: &Dictionary, key: &[u8], names: &[&[u8]]) -> bool {
+    dict.get(key)
+        .ok()
+        .and_then(|o| o.as_name().ok())
+        .map(|n| names.contains(&n))
+        .unwrap_or(false)
 }
 
 /// The 1-based page numbers of every page, keyed by `ObjectId`, so page-level
@@ -374,8 +401,25 @@ mod tests {
     fn decode_latin1_and_utf16() {
         assert_eq!(decode_pdf_text(b"Zanzibar"), "Zanzibar");
         // UTF-16BE "Hi" with BOM.
-        let utf16 = [0xFE, 0xFF, 0x00, 0x48, 0x00, 0x69];
-        assert_eq!(decode_pdf_text(&utf16), "Hi");
+        let utf16be = [0xFE, 0xFF, 0x00, 0x48, 0x00, 0x69];
+        assert_eq!(decode_pdf_text(&utf16be), "Hi");
+        // UTF-16LE "Hi" with BOM (lopdf doesn't handle LE; we do).
+        let utf16le = [0xFF, 0xFE, 0x48, 0x00, 0x69, 0x00];
+        assert_eq!(decode_pdf_text(&utf16le), "Hi");
+    }
+
+    #[test]
+    fn decode_pdfdocencoding_punctuation() {
+        // PDFDocEncoding 0x92 is the trademark sign and 0x90 the right single
+        // quote — NOT Latin-1 C1 controls. A raw `b as char` cast would map
+        // these to U+0092 / U+0090 and a query would miss the real glyphs.
+        assert_eq!(decode_pdf_text(&[0x90]), "\u{2019}"); // right single quote
+        assert_eq!(decode_pdf_text(&[0x92]), "\u{2122}"); // trademark
+        // The apostrophe in a redacted name survives round-trip.
+        let mut bytes = b"O".to_vec();
+        bytes.push(0x90); // ’
+        bytes.extend_from_slice(b"Brien");
+        assert_eq!(decode_pdf_text(&bytes), "O\u{2019}Brien");
     }
 
     #[test]

@@ -55,7 +55,19 @@ impl Query {
         }
         let matchers = terms
             .iter()
-            .map(|t| compile(&regex::escape(t), case_sensitive, whole_word))
+            .map(|t| {
+                // Word boundaries (`\b`) only assert a transition next to a word
+                // char, so wrapping a term whose edge is a NON-word char (e.g.
+                // "$5,000") in `\b…\b` can never match — a false "clean". Apply
+                // `\b` only on the side where the term's edge character is itself
+                // a word char.
+                let edges = if whole_word {
+                    (starts_word(t), ends_word(t))
+                } else {
+                    (false, false)
+                };
+                compile(&regex::escape(t), case_sensitive, edges)
+            })
             .collect::<Result<_, _>>()?;
         Ok(Self {
             terms,
@@ -71,7 +83,11 @@ impl Query {
         if pattern.is_empty() {
             return Err("empty regex pattern".to_string());
         }
-        let matchers = vec![compile(&pattern, case_sensitive, whole_word)?];
+        // For a regex, `\b` is evaluated at the matched position, so wrapping the
+        // whole pattern in `\b…\b` is correct whenever the match starts/ends on a
+        // word char (the meaningful case); apply it on both sides.
+        let edges = (whole_word, whole_word);
+        let matchers = vec![compile(&pattern, case_sensitive, edges)?];
         Ok(Self {
             terms: vec![pattern],
             mode: QueryMode::Regex,
@@ -119,22 +135,41 @@ impl Query {
     }
 }
 
-/// Compiles one pattern with case/whole-word folded in. `(?i)` handles
-/// case-insensitivity; `\b…\b` handles whole-word. The caller escapes literal
-/// terms before calling.
-fn compile(pattern: &str, case_sensitive: bool, whole_word: bool) -> Result<Regex, String> {
+/// Compiles one pattern with case-insensitivity and word boundaries folded in.
+/// `(?i)` handles case-insensitivity; `edges.0`/`edges.1` add a leading/trailing
+/// `\b`. The caller escapes literal terms and decides the edges (see the
+/// boundary reasoning at the call sites). Wrapped in `(?:…)` so a leading/
+/// trailing `\b` binds to the whole term, not just its first/last branch.
+fn compile(pattern: &str, case_sensitive: bool, edges: (bool, bool)) -> Result<Regex, String> {
     let mut full = String::new();
     if !case_sensitive {
         full.push_str("(?i)");
     }
-    if whole_word {
-        full.push_str(r"\b(?:");
-        full.push_str(pattern);
-        full.push_str(r")\b");
-    } else {
-        full.push_str(pattern);
+    if edges.0 {
+        full.push_str(r"\b");
+    }
+    full.push_str("(?:");
+    full.push_str(pattern);
+    full.push(')');
+    if edges.1 {
+        full.push_str(r"\b");
     }
     Regex::new(&full).map_err(|e| format!("invalid pattern '{pattern}': {e}"))
+}
+
+/// True if `s`'s first character is a word char (`\w`: alphanumeric or `_`) —
+/// the side where a `\b` boundary is meaningful.
+fn starts_word(s: &str) -> bool {
+    s.chars().next().is_some_and(is_word_char)
+}
+
+/// True if `s`'s last character is a word char.
+fn ends_word(s: &str) -> bool {
+    s.chars().next_back().is_some_and(is_word_char)
+}
+
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
 }
 
 #[cfg(test)]
@@ -160,6 +195,23 @@ mod tests {
         let q = Query::literal(["Zan".to_string()], false, true).unwrap();
         assert!(!q.is_match("Zanzibar"));
         assert!(q.is_match("the Zan file"));
+    }
+
+    #[test]
+    fn whole_word_matches_term_with_nonword_edge() {
+        // "$5,000" starts with a non-word char; `\b$` can never hold, so the old
+        // `\b…\b` wrapper produced a false "clean". The conditional-edge build
+        // must find it, while still rejecting a run into more digits.
+        let q = Query::literal(["$5,000".to_string()], false, true).unwrap();
+        assert!(q.is_match("paid $5,000 total"), "should match with non-word leading edge");
+        assert!(!q.is_match("paid $5,0009 total"), "trailing word edge must still bound");
+    }
+
+    #[test]
+    fn whole_word_both_nonword_edges() {
+        // "(b)(6)" is non-word on both ends; whole-word must not suppress it.
+        let q = Query::literal(["(b)(6)".to_string()], false, true).unwrap();
+        assert!(q.is_match("exemption (b)(6) applies"));
     }
 
     #[test]

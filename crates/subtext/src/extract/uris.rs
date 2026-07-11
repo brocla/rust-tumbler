@@ -7,7 +7,6 @@ use crate::extract::{findings_in, CheckOutcome, DocContext, VectorCheck};
 use crate::pdf;
 use crate::query::Query;
 use crate::report::Vector;
-use lopdf::Object;
 
 pub struct Uris;
 
@@ -27,19 +26,14 @@ impl VectorCheck for Uris {
 
     fn run(&self, ctx: &DocContext, query: &Query) -> CheckOutcome {
         let Some(doc) = ctx.lopdf else {
-            return CheckOutcome::Skipped("lopdf could not parse this document".to_string());
+            return CheckOutcome::unavailable("lopdf could not parse this document");
         };
         let mut findings = Vec::new();
 
         // Every /URI string anywhere: URI actions, and the /URLS web-capture
         // name tree (whose values are also dicts with /URI). Iterating all
         // dicts for a /URI entry catches every reference site.
-        for (id, obj) in &doc.objects {
-            let dict = match obj {
-                Object::Dictionary(d) => d,
-                Object::Stream(s) => &s.dict,
-                _ => continue,
-            };
+        for (id, dict) in pdf::iter_dicts(doc) {
             if let Some(uri) = pdf::get_string(doc, dict, b"URI") {
                 findings_in(&uri, query, Vector::Uris, &format!("/URI (object {} {})", id.0, id.1), None, &mut findings);
             }
@@ -52,7 +46,7 @@ impl VectorCheck for Uris {
 mod tests {
     use super::*;
     use crate::extract::CheckOutcome;
-    use lopdf::{dictionary, Document};
+    use lopdf::{dictionary, Document, Object};
 
     #[test]
     fn finds_secret_in_uri_query_string() {
@@ -68,7 +62,7 @@ mod tests {
         let q = Query::literal(["Zanzibar".to_string()], false, false).unwrap();
         let f = match Uris.run(&ctx, &q) {
             CheckOutcome::Ran { findings, .. } => findings,
-            CheckOutcome::Skipped(r) => panic!("skip: {r}"),
+            CheckOutcome::Skipped { reason: r, .. } => panic!("skip: {r}"),
         };
         assert_eq!(f.len(), 1, "{f:?}");
     }

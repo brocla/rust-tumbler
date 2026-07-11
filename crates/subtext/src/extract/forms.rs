@@ -31,9 +31,14 @@ impl VectorCheck for Forms {
 
     fn run(&self, ctx: &DocContext, query: &Query) -> CheckOutcome {
         let Some(doc) = ctx.lopdf else {
-            return CheckOutcome::Skipped("lopdf could not parse this document".to_string());
+            return CheckOutcome::unavailable("lopdf could not parse this document");
         };
-        let Some(acroform) = pdf::catalog(doc).and_then(|c| pdf::get_dict(doc, c, b"AcroForm")) else {
+        let Some(catalog) = pdf::catalog(doc) else {
+            return CheckOutcome::unavailable("document catalog could not be read");
+        };
+        // No AcroForm at all is a legitimate "no forms present" — clean, not a
+        // blind spot.
+        let Some(acroform) = pdf::get_dict(doc, catalog, b"AcroForm") else {
             return CheckOutcome::ran(Vec::new());
         };
         let mut findings = Vec::new();
@@ -78,7 +83,7 @@ fn walk_field(
             // A rich-text /V can be a stream.
             Some(obj @ Object::Stream(_)) => {
                 if let Some(bytes) = pdf::stream_object_bytes(obj) {
-                    let text = String::from_utf8_lossy(&bytes);
+                    let text = pdf::decode_pdf_text(&bytes);
                     let key = String::from_utf8_lossy(key);
                     findings_in(&text, query, Vector::Forms, &format!("form field /{key} (stream)"), None, findings);
                 }
@@ -118,7 +123,7 @@ mod tests {
         let q = Query::literal(["Zanzibar".to_string()], false, false).unwrap();
         let f = match Forms.run(&ctx, &q) {
             CheckOutcome::Ran { findings, .. } => findings,
-            CheckOutcome::Skipped(r) => panic!("skip: {r}"),
+            CheckOutcome::Skipped { reason: r, .. } => panic!("skip: {r}"),
         };
         assert!(f.iter().any(|x| x.location == "form field /V"), "{f:?}");
     }

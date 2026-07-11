@@ -3,7 +3,7 @@
 //! content, and its `/AP` appearance stream can paint the secret too (spec
 //! §4-D). Inverts Tumbler's page-`/Annots` scrub.
 
-use crate::extract::{findings_in, CheckOutcome, DocContext, VectorCheck};
+use crate::extract::{findings_in, scan_dict_keys, CheckOutcome, DocContext, VectorCheck};
 use crate::pdf;
 use crate::query::Query;
 use crate::report::{Finding, Vector};
@@ -30,7 +30,7 @@ impl VectorCheck for Annotations {
 
     fn run(&self, ctx: &DocContext, query: &Query) -> CheckOutcome {
         let Some(doc) = ctx.lopdf else {
-            return CheckOutcome::Skipped("lopdf could not parse this document".to_string());
+            return CheckOutcome::unavailable("lopdf could not parse this document");
         };
         let mut findings = Vec::new();
         let page_nums = pdf::page_numbers(doc);
@@ -55,12 +55,7 @@ fn scan_annotation(
     page_num: u32,
     findings: &mut Vec<Finding>,
 ) {
-    for key in TEXT_KEYS {
-        if let Some(text) = pdf::get_string(doc, annot, key) {
-            let key = String::from_utf8_lossy(key);
-            findings_in(&text, query, Vector::Annotations, &format!("annotation /{key} (page {page_num})"), Some(page_num), findings);
-        }
-    }
+    scan_dict_keys(doc, annot, TEXT_KEYS, query, Vector::Annotations, Some(page_num), |k| format!("annotation /{k} (page {page_num})"), findings);
     // /AP appearance stream(s): /AP /N may be a stream, or a sub-dictionary of
     // appearance states each pointing to a stream. Decode and scan the text.
     if let Some(ap) = pdf::get_dict(doc, annot, b"AP") {
@@ -118,7 +113,7 @@ mod tests {
         let q = Query::literal([term.to_string()], false, false).unwrap();
         match Annotations.run(&ctx, &q) {
             CheckOutcome::Ran { findings, .. } => findings,
-            CheckOutcome::Skipped(r) => panic!("skip: {r}"),
+            CheckOutcome::Skipped { reason: r, .. } => panic!("skip: {r}"),
         }
     }
 
