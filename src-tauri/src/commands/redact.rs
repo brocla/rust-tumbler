@@ -3069,11 +3069,89 @@ mod tests {
         serialize(doc)
     }
 
+    /// One file that combines **eight** of the nine vectors at once — the
+    /// single comprehensive adversarial PDF (issue #78).
+    ///
+    /// Corrupted xrefs is the one vector that cannot be included: it is a
+    /// whole-file integrity attack (the cross-reference table is broken), which
+    /// by definition makes the file unredactable — it would mask the other
+    /// eight rather than combine with them. It necessarily stays a standalone
+    /// fixture (`corrupted-xref.pdf`), whose success *is* Tumbler refusing it.
+    ///
+    /// Structure:
+    /// - Revision 1's page content plants the secret four on-page ways: hidden
+    ///   under a black box, invisible (`3 Tr`, the OCR-layer mechanism), under a
+    ///   masked image, and inside an OFF optional-content group.
+    /// - `inject_leak_vectors` adds every document-level vector to that
+    ///   revision (embedded files via `/EmbeddedFiles` + `/AF`, a form field +
+    ///   XFA, an annotation, outlines, structure tree, metadata, an OCG name).
+    /// - A second, incremental revision then *covers* page 1 with innocuous
+    ///   text — so the on-page secrets live on in the superseded revision,
+    ///   physically present and recoverable by truncation. That covering step
+    ///   is the incremental-update vector itself.
+    fn attack_all_vectors_combined() -> Vec<u8> {
+        // Four on-page techniques, each in its own q/Q so text state (the
+        // `3 Tr` invisible mode, the black fill) can't leak between them.
+        let content = format!(
+            "q BT /F1 16 Tf 20 155 Td ({SECRET}) Tj ET Q\n\
+             q 0 0 0 rg 16 150 168 22 re f Q\n\
+             q BT /F1 16 Tf 3 Tr 20 120 Td ({SECRET}) Tj ET Q\n\
+             q BT /F1 16 Tf 20 84 Td ({SECRET}) Tj ET Q\n\
+             q 168 0 0 20 16 82 cm /Im0 Do Q\n\
+             /OC /MC0 BDC q BT /F1 16 Tf 20 48 Td ({SECRET}) Tj ET Q EMC"
+        );
+        let (mut doc, _cat, page_id, _font) = base_doc(content.as_bytes());
+
+        // Masked-image cover (1×1 black pixel scaled over the third run) and
+        // the on-page OCG referenced by the marked-content block.
+        let img = doc.add_object(Stream::new(
+            dictionary! {
+                "Type" => "XObject", "Subtype" => "Image",
+                "Width" => 1_i64, "Height" => 1_i64,
+                "ColorSpace" => "DeviceGray", "BitsPerComponent" => 8_i64,
+            },
+            vec![0u8],
+        ));
+        let ocg = doc.add_object(dictionary! {
+            "Type" => "OCG",
+            "Name" => Object::string_literal(format!("{SECRET} on-page layer")),
+        });
+        {
+            let page = doc.get_object_mut(page_id).unwrap().as_dict_mut().unwrap();
+            if let Ok(Object::Dictionary(res)) = page.get_mut(b"Resources") {
+                res.set("XObject", dictionary! { "Im0" => Object::Reference(img) });
+                res.set("Properties", dictionary! { "MC0" => Object::Reference(ocg) });
+            }
+        }
+
+        // All document-level vectors onto the same revision.
+        inject_leak_vectors(&mut doc, SECRET);
+        let revision_1 = serialize(doc);
+
+        // Cover page 1 with an appended revision — the original (with every
+        // on-page secret) survives underneath.
+        let (combined, _split) = stack_incremental_revision(&revision_1, "This page was redacted");
+        combined
+    }
+
     /// The full attack corpus.
     fn pentest_corpus() -> Vec<Attack> {
         let base = text_pdf_bytes(&[&format!("{SECRET} original")]);
         let (incremental, _split) = stack_incremental_revision(&base, "REDACTED");
         vec![
+            Attack {
+                name: "all-vectors-combined",
+                category: "COMBINED (8 of 9 vectors in one file)",
+                description: "One comprehensive file: the secret planted via hidden text, \
+                    invisible text / OCR layer, masked image, and an OFF optional-content \
+                    layer on the page; embedded files, a form field + XFA, an annotation, \
+                    outlines, structure tree, and metadata at the document level; all \
+                    covered by a second incremental revision so the originals survive \
+                    underneath. (Corrupted xrefs can't be combined — it makes the whole \
+                    file unredactable — so it stays the standalone corrupted-xref.pdf.)",
+                bytes: attack_all_vectors_combined(),
+                expect: Expect::Neutralized,
+            },
             Attack {
                 name: "hidden-text-black-box",
                 category: "hidden text",
@@ -3271,6 +3349,10 @@ mod tests {
              Find \u{2192} `Zanzibar` \u{2192} Redact all where it is visible), Apply, Save As,\n\
              then run `findstr Zanzibar <saved-copy>.pdf` \u{2014} expect **no** output. For\n\
              `corrupted-xref`, Tumbler should **refuse** the file (it can't be safely redacted).\n\n\
+             `all-vectors-combined.pdf` packs eight of the nine vectors into one file. The\n\
+             ninth \u{2014} corrupted xrefs \u{2014} can't be combined: a broken cross-reference\n\
+             table makes the whole file unredactable, so it would mask the others rather than\n\
+             join them; it stays the standalone `corrupted-xref.pdf`.\n\n\
              Regenerate with `cargo test dump_pentest_corpus -- --ignored --test-threads=1`.\n\
              The automated equivalent is the `pentest_corpus_is_neutralized_or_rejected` test.\n\n\
              | File | Vector | Expected outcome | Technique |\n\
