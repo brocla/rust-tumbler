@@ -51,6 +51,18 @@
 //! type), so the output cannot carry a revision history even if the input
 //! had one. See `input_with_incremental_update_revision_is_fully_redacted`
 //! and `redaction_output_is_a_single_pdf_revision`.
+//!
+//! **Corrupted / malformed cross-reference tables.** pdfium (the renderer) and
+//! `lopdf` (the rewriter) parse independently and recover differently: pdfium
+//! reconstructs a damaged `xref` and renders anyway, while `lopdf` is strict
+//! and errors. Redaction treats `lopdf`'s object graph as authoritative
+//! (pdfium only supplies pixels), and requires *both* parsers to succeed — so a
+//! file whose structure `lopdf` can't parse is refused before any output is
+//! produced, and a file the two parsers resolve to a different page count is
+//! refused by `check_parser_agreement`. Both fail closed: a hard "can't be
+//! safely redacted" error, never a partial copy. Tumbler does not attempt to
+//! repair broken PDFs. See `corrupted_xref_input_is_rejected_with_no_output`
+//! and `check_parser_agreement_fails_closed_on_mismatch` (issue #77).
 
 use crate::commands::ocr::{OcrCache, OcrEngine, OCR_UNAVAILABLE_MESSAGE};
 use crate::commands::text::{page_origin, search_document_impl, TextRect};
@@ -739,6 +751,22 @@ pub(crate) fn verify_redactions(
 
 // ── The pipeline ────────────────────────────────────────────────────────────
 
+/// Fail-closed guard (issue #77): the pdfium render view and the lopdf rewrite
+/// view must agree on the page count. A mismatch means the two parsers
+/// resolved a (likely malformed) document differently — flattening one while
+/// rewriting the other could leave un-redacted content in the output — so
+/// redaction is refused rather than risk an incompletely-redacted copy.
+fn check_parser_agreement(pdfium_pages: u32, lopdf_pages: u32) -> Result<(), AppError> {
+    if pdfium_pages != lopdf_pages {
+        return Err(AppError::Other(format!(
+            "This PDF is inconsistent between its rendered and structural views \
+             ({pdfium_pages} vs {lopdf_pages} pages) — it may be malformed. \
+             Redaction was aborted to avoid producing an incompletely-redacted copy."
+        )));
+    }
+    Ok(())
+}
+
 /// Builds the redacted bytes from `pdf_bytes`: flatten each page that has
 /// regions, scrub document-level leak vectors, re-OCR the flattened pages, and
 /// verify the final bytes. Pure with respect to `AppState` so it runs inside
@@ -781,6 +809,16 @@ pub(crate) fn apply_redactions_impl(
 
     // pdfium view for rendering, lopdf view for rewriting — both from the same
     // bytes, so their 1-based page order matches.
+    //
+    // Malformed-input safety (issue #77): the two libraries parse independently
+    // and recover differently. pdfium reconstructs a damaged cross-reference
+    // table and renders anyway; lopdf is strict and errors instead. Redaction
+    // depends on lopdf's object graph being the *authoritative* structure —
+    // pdfium only supplies pixels — so any disagreement between them means we'd
+    // be flattening one document while rewriting another. Both guards below fail
+    // closed: a file that can't be parsed identically by both is refused, so no
+    // incompletely-redacted copy is ever produced (a hard failure is the
+    // correct outcome — Tumbler does not attempt to repair broken PDFs).
     let fdoc = pdfium
         .load_pdf_from_byte_vec(pdf_bytes.to_vec(), None)
         .map_err(|e| AppError::pdfium("Failed to load PDF for redaction", e))?;
@@ -790,8 +828,22 @@ pub(crate) fn apply_redactions_impl(
             "Redaction region on page {bad}, but the document has {page_count} pages"
         )));
     }
-    let mut ldoc = Document::load_mem(pdf_bytes)
-        .map_err(|e| AppError::lopdf("Failed to parse PDF for redaction", e))?;
+    // lopdf's strict parse is the backstop: it refuses a damaged xref rather
+    // than silently accepting a partial/divergent graph (verified by the
+    // corrupted-xref tests). Frame the failure for the user — the file can't be
+    // safely redacted, not a generic parse blip.
+    let mut ldoc = Document::load_mem(pdf_bytes).map_err(|_| {
+        AppError::Other(
+            "This PDF could not be parsed safely for redaction — its structure \
+             (cross-reference table) appears damaged. Redaction was aborted so \
+             no incompletely-redacted copy is produced."
+                .to_string(),
+        )
+    })?;
+    // Even when both parsers succeed, require them to agree on the page count;
+    // a disagreement means they resolved the (possibly malformed) structure
+    // differently, and the flatten/rewrite would target different documents.
+    check_parser_agreement(page_count, ldoc.get_pages().len() as u32)?;
     let page_ids = ldoc.get_pages();
 
     // Flatten each redacted page.
@@ -2378,6 +2430,112 @@ mod tests {
         assert_eq!(count_occurrences(&out, b"%%EOF"), 1, "exactly one end-of-file marker");
         let doc = Document::load_mem(&out).expect("parse output");
         assert!(doc.trailer.get(b"Prev").is_err(), "trailer must not chain to a previous revision");
+    }
+
+    // ── Corrupted / malformed xref (issue #77) ──────────────────────────────
+
+    /// Rewrites the byte offset in the file's final `startxref\n<offset>\n%%EOF`
+    /// to `new_offset`. A wrong offset is the simplest xref corruption: the
+    /// parser is told the cross-reference table lives somewhere it doesn't.
+    fn corrupt_startxref_offset(bytes: &[u8], new_offset: usize) -> Vec<u8> {
+        let s = bytes;
+        let marker = b"startxref";
+        let pos = s.windows(marker.len()).rposition(|w| w == marker).expect("startxref");
+        let mut out = s[..pos].to_vec();
+        out.extend_from_slice(format!("startxref\n{new_offset}\n%%EOF").as_bytes());
+        out
+    }
+
+    /// The safety property behind issue #77, verified end to end: a file with a
+    /// damaged cross-reference table is *rejected*, never redacted. lopdf parses
+    /// strictly (it errors rather than reconstruct a divergent object graph the
+    /// way pdfium's renderer does), and the pipeline requires lopdf to succeed,
+    /// so every corruption below aborts with an error and produces no output —
+    /// there is no incompletely-redacted copy for an attacker to mine.
+    ///
+    /// The most pointed case is the corrupted **two-revision** file: pdfium
+    /// recovers and shows the covering revision, but the pre-redaction original
+    /// is still physically present; if the pipeline trusted pdfium's recovery it
+    /// could roll back to the uncovered secret. It doesn't — lopdf's strict
+    /// parse refuses it.
+    #[test]
+    fn corrupted_xref_input_is_rejected_with_no_output() {
+        let _guard = crate::test_pdfium_guard();
+        let pdfium = crate::test_pdfium();
+        let good = text_pdf_bytes(&["ZANZIBAR original"]);
+        let (two_rev, _split) = stack_incremental_revision(&good, "REDACTED");
+
+        let corruptions: Vec<(&str, Vec<u8>)> = vec![
+            ("startxref -> 0", corrupt_startxref_offset(&good, 0)),
+            ("startxref -> mid-file", corrupt_startxref_offset(&good, good.len() / 2)),
+            ("startxref -> past EOF", corrupt_startxref_offset(&good, good.len() + 9999)),
+            ("truncated mid-object", good[..good.len() * 6 / 10].to_vec()),
+            ("two-revision, xref corrupted", corrupt_startxref_offset(&two_rev, 0)),
+        ];
+
+        for (label, bytes) in corruptions {
+            // Precondition: this really is a file lopdf rejects (so the test
+            // exercises the guard rather than a happens-to-be-valid file).
+            assert!(
+                Document::load_mem(&bytes).is_err(),
+                "[{label}] fixture should be unparseable by lopdf"
+            );
+
+            let result = apply_redactions_impl(
+                &no_progress,
+                pdfium,
+                &bytes,
+                &[full_page_region(1)],
+                &["ZANZIBAR".to_string()],
+                150.0,
+                &empty_engine(),
+                &not_cancelled(),
+            );
+            match result {
+                Err(_) => {} // correct: refused, nothing produced
+                Ok((r, o)) => panic!(
+                    "[{label}] corrupt input must be rejected, got Ok(verified={}, has_output={})",
+                    r.verified,
+                    o.is_some()
+                ),
+            }
+        }
+    }
+
+    /// The explicit fail-closed guard: when the two parsers disagree on the
+    /// page count (they resolved a malformed structure differently), redaction
+    /// is refused. Tested directly so the invariant is pinned without needing a
+    /// pathological both-parsers-succeed-but-differ fixture.
+    #[test]
+    fn check_parser_agreement_fails_closed_on_mismatch() {
+        assert!(check_parser_agreement(3, 3).is_ok(), "matching counts proceed");
+        assert!(check_parser_agreement(0, 0).is_ok());
+        let err = check_parser_agreement(2, 1).expect_err("mismatch must be refused");
+        let msg = err.to_string();
+        assert!(msg.contains("inconsistent") && msg.contains("2 vs 1"), "got: {msg}");
+    }
+
+    /// A well-formed file still redacts normally — the malformed-input guards
+    /// don't reject valid documents (guards the false-positive direction).
+    #[test]
+    fn valid_input_still_redacts_after_hardening() {
+        let _guard = crate::test_pdfium_guard();
+        let pdfium = crate::test_pdfium();
+        let bytes = text_pdf_bytes(&["ZANZIBAR original"]);
+
+        let (result, output) = apply_redactions_impl(
+            &no_progress,
+            pdfium,
+            &bytes,
+            &[full_page_region(1)],
+            &["ZANZIBAR".to_string()],
+            150.0,
+            &empty_engine(),
+            &not_cancelled(),
+        )
+        .expect("valid input must still redact");
+        assert!(result.verified, "leaks: {:?}", result.leaks);
+        assert_eq!(count_occurrences(&output.expect("output"), b"ZANZIBAR"), 0);
     }
 
     /// Check 4 fails closed: if a text-bearing structure the text checks can't
