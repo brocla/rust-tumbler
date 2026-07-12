@@ -1,0 +1,9 @@
+# Repo-root workspace for standalone crates incubating in the Tumbler repo
+# (doc/redaction-checker-design.md §6.1/§9). The Tauri app keeps its own
+# workspace at src-tauri/Cargo.toml — it is `exclude`d here, so `npm run tauri`
+# builds are unaffected. Subtext borrows from Tumbler via path deps only; no
+# Subtext code lands in src-tauri/src/ (Build rule #0).
+[workspace]
+resolver = "2"
+members = ["crates/subtext"]
+exclude = ["src-tauri"]
