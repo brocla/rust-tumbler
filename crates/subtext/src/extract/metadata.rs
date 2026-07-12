@@ -53,7 +53,9 @@ impl VectorCheck for Metadata {
         // catalog's and each page's `/Metadata` target *regardless of /Type* —
         // a hider can omit the optional `/Type` marker, so the structural
         // reference must be followed directly (spec §4-B), not just the tag.
-        let mut xmp_ids: Vec<lopdf::ObjectId> = pdf::iter_dicts(doc)
+        // A BTreeSet dedups the tag-scanned streams against the catalog/page
+        // /Metadata refs on insert, and iterates in id order for free.
+        let mut xmp_ids: std::collections::BTreeSet<lopdf::ObjectId> = pdf::iter_dicts(doc)
             .filter(|(_, dict)| is_metadata_stream(dict))
             .map(|(id, _)| id)
             .collect();
@@ -65,8 +67,6 @@ impl VectorCheck for Metadata {
                 push_metadata_ref(page, &mut xmp_ids);
             }
         }
-        xmp_ids.sort_unstable();
-        xmp_ids.dedup();
 
         for id in xmp_ids {
             // Only scan objects that are actually streams (a /Metadata entry
@@ -84,11 +84,11 @@ impl VectorCheck for Metadata {
     }
 }
 
-/// Pushes `dict`'s `/Metadata` entry's object id (when it is an indirect
-/// reference) onto `ids`.
-fn push_metadata_ref(dict: &lopdf::Dictionary, ids: &mut Vec<lopdf::ObjectId>) {
+/// Inserts `dict`'s `/Metadata` entry's object id (when it is an indirect
+/// reference) into `ids`.
+fn push_metadata_ref(dict: &lopdf::Dictionary, ids: &mut std::collections::BTreeSet<lopdf::ObjectId>) {
     if let Ok(id) = dict.get(b"Metadata").and_then(|o| o.as_reference()) {
-        ids.push(id);
+        ids.insert(id);
     }
 }
 

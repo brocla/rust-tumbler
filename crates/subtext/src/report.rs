@@ -189,17 +189,21 @@ impl Report {
     /// `description`. Deterministic — no judgement beyond counting.
     pub fn finalize(&mut self) {
         let total = self.checks.len();
-        let skipped = || self.checks.iter().filter(|c| c.status == CheckStatus::Skipped);
-        // A per-file blind spot: the term could hide in a place THIS file
-        // prevented us from inspecting → caps a no-match report at warning.
-        let unavailable_skips = skipped()
-            .filter(|c| c.skip_kind == Some(SkipKind::Unavailable))
-            .count();
-        // Tool-phase limitations: an extractor not yet shipped (incl. the opt-in
-        // OCR pass). Disclosed, but not evidence the file is suspicious.
-        let unbuilt_skips = skipped()
-            .filter(|c| c.skip_kind == Some(SkipKind::NotImplemented))
-            .count();
+        // Partition the skips in one pass:
+        //  - `unavailable_skips`: a per-file blind spot (encryption, unsupported
+        //    filter, unreadable catalog) → caps a no-match report at warning.
+        //  - `unbuilt_skips`: a tool-phase limitation — an extractor not shipped,
+        //    or (once OCR lands) a pass the user didn't request. Disclosed, but
+        //    not evidence the file is suspicious.
+        let mut unavailable_skips = 0usize;
+        let mut unbuilt_skips = 0usize;
+        for c in &self.checks {
+            match c.skip_kind {
+                Some(SkipKind::Unavailable) => unavailable_skips += 1,
+                Some(SkipKind::NotImplemented) => unbuilt_skips += 1,
+                None => {}
+            }
+        }
         let signals = self.signals.len();
         let terms = terms_phrase(&self.query.terms);
 

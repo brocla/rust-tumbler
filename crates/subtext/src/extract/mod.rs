@@ -112,8 +112,7 @@ pub fn run_checks(checks: &[&dyn VectorCheck], ctx: &DocContext, query: &Query) 
                     }
                 } else {
                     let detail = summarize_hits(&hits);
-                    let mut hits = hits;
-                    findings.append(&mut hits);
+                    findings.extend(hits);
                     (CheckTone::Leak, CheckStatus::Found, detail, None)
                 }
             }
