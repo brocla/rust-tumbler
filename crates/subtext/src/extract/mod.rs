@@ -22,6 +22,7 @@ pub mod outlines;
 pub mod page_labels;
 pub mod page_text;
 pub mod redaction;
+pub mod revisions;
 pub mod scripts;
 pub mod signatures;
 pub mod structure;
@@ -175,7 +176,6 @@ pub fn non_recursive_checks() -> Vec<&'static dyn VectorCheck> {
 /// by `Revisions` after running the shared extractors on a prior revision —
 /// matching stays inside `findings_in`, only the provenance field is set here
 /// (resolves review item AL1 without letting the query modes diverge).
-#[allow(dead_code)] // wired in §14.5 (Revisions)
 pub(crate) fn stamp_revision(findings: &mut [Finding], rev: u32) {
     for f in findings {
         f.revision = Some(rev);
@@ -370,13 +370,7 @@ pub static REGISTRY: &[&dyn VectorCheck] = &[
     &uris::Uris,
     &optional_content::OptionalContent,
     &signatures::Signatures,
-    &Pending {
-        id: "revisions",
-        label: "Superseded revisions",
-        vector: Vector::Revisions,
-        method: "per-revision reparse",
-        phase: "Phase 3",
-    },
+    &revisions::Revisions,
     &Pending {
         id: "orphan_objects",
         label: "Orphaned objects",

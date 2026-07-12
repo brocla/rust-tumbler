@@ -50,13 +50,12 @@ const MUST_DETECT: &[&str] = &[
     // Document-level reachable (Phase 2).
     "annotation-appearance", // /AP appearance stream + /Contents
     "all-vectors-combined",  // doc-level vectors survive in the newest revision
+    // Superseded-revision reachable (Phase 3).
+    "incremental-update-cover", // secret lives only in the prior revision
 ];
 
-/// The one attack still not detectable: its only secret lives in a superseded
-/// revision the covering incremental update hides from a newest-wins parse.
-const PENDING: &[(&str, &str)] = &[
-    ("incremental-update-cover", "Phase 3 — superseded revisions"),
-];
+/// Every corpus attack is now detected; the PENDING set is empty.
+const PENDING: &[(&str, &str)] = &[];
 
 fn pdfium() -> &'static Pdfium {
     static PDFIUM: OnceLock<Pdfium> = OnceLock::new();
