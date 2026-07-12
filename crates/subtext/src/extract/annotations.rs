@@ -75,13 +75,26 @@ fn scan_annotation(
     }
 }
 
-/// Decodes one resolved appearance-stream XObject and scans its content-stream
-/// string operands for the query.
+/// Decodes one resolved appearance-stream XObject and scans its drawn text for
+/// the query. The show-operator strings are **concatenated** before matching so
+/// a secret split across operators or a `TJ` kerning array (`[(Zan)-14(zibar)]`)
+/// reassembles — mirroring pdfium's page-text reading-order reassembly, which an
+/// appearance stream (not page content) would otherwise not get (review item
+/// #8, spec §4-A/§4-L).
 fn scan_appearance(obj: &Object, query: &Query, page_num: u32, findings: &mut Vec<Finding>) {
     let Some(bytes) = pdf::stream_object_bytes(obj) else { return };
-    for s in pdf::scan_content_strings(&bytes) {
-        findings_in(&s.value, query, Vector::Annotations, &format!("annotation /AP appearance (page {page_num})"), Some(page_num), findings);
-    }
+    let text: String = pdf::scan_content_strings(&bytes)
+        .into_iter()
+        .map(|s| s.value)
+        .collect();
+    findings_in(
+        &text,
+        query,
+        Vector::Annotations,
+        &format!("annotation /AP appearance (page {page_num})"),
+        Some(page_num),
+        findings,
+    );
 }
 
 #[cfg(test)]
@@ -150,5 +163,37 @@ mod tests {
 
         let f = run(&doc, "Zanzibar");
         assert!(f.iter().any(|x| x.location.contains("/AP appearance")), "{f:?}");
+    }
+
+    #[test]
+    fn finds_secret_split_across_tj_operators_in_appearance() {
+        // A TJ kerning array splits the secret across operands; concatenation
+        // must reassemble it (review item #8).
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        let ap = doc.add_object(Stream::new(
+            dictionary! { "Type" => "XObject", "Subtype" => "Form" },
+            b"BT /F1 18 Tf [(Zan)-14(zibar)] TJ ET".to_vec(),
+        ));
+        let annot_id = doc.add_object(dictionary! {
+            "Type" => "Annot", "Subtype" => "FreeText",
+            "AP" => dictionary! { "N" => Object::Reference(ap) },
+        });
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page", "Parent" => pages_id,
+            "MediaBox" => vec![Object::Integer(0), Object::Integer(0), Object::Integer(200), Object::Integer(200)],
+            "Annots" => vec![Object::Reference(annot_id)],
+        });
+        doc.objects.insert(pages_id, Object::Dictionary(dictionary! {
+            "Type" => "Pages", "Kids" => vec![Object::Reference(page_id)], "Count" => Object::Integer(1),
+        }));
+        let catalog = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        doc.trailer.set("Root", catalog);
+
+        let f = run(&doc, "Zanzibar");
+        assert!(
+            f.iter().any(|x| x.location.contains("/AP appearance")),
+            "split TJ secret should reassemble: {f:?}"
+        );
     }
 }
