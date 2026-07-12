@@ -45,7 +45,7 @@ impl VectorCheck for Scripts {
                 }
                 Some(obj @ Object::Stream(_)) => {
                     if let Some(bytes) = pdf::stream_object_bytes(obj) {
-                        let text = pdf::decode_pdf_text(&bytes);
+                        let text = pdf::decode_stream_text(&bytes);
                         findings_in(&text, query, Vector::Scripts, &format!("JavaScript action stream (object {} {})", id.0, id.1), None, &mut findings);
                     }
                 }

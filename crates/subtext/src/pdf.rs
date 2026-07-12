@@ -34,6 +34,25 @@ pub fn decode_pdf_text(bytes: &[u8]) -> String {
     }
 }
 
+/// Decodes arbitrary **stream / embedded-file** bytes to text for scanning.
+///
+/// Unlike [`decode_pdf_text`] — which assumes PDFDocEncoding for non-BOM bytes,
+/// correct for PDF *text-string objects* — a stream's contents are an arbitrary
+/// file (an attachment, a JavaScript source, a rich-text value), most often
+/// UTF-8. So we prefer UTF-16 (either BOM), then UTF-8, and only fall back to
+/// the PDF text-string decode. This keeps a UTF-8 embedded file's non-ASCII
+/// secret matchable (a PDFDocEncoding-only decode would mangle `Zürich` into
+/// `ZÃ¼rich`) while still catching a UTF-16 stream.
+pub fn decode_stream_text(bytes: &[u8]) -> String {
+    if bytes.starts_with(&[0xFE, 0xFF]) || bytes.starts_with(&[0xFF, 0xFE]) {
+        return decode_pdf_text(bytes); // UTF-16 (BE via lopdf, LE ourselves)
+    }
+    if let Ok(s) = std::str::from_utf8(bytes) {
+        return s.to_string(); // valid UTF-8 (covers ASCII and UTF-8 files)
+    }
+    decode_pdf_text(bytes) // last resort: PDF text-string / PDFDocEncoding
+}
+
 /// The decoded text of an object *if* it is a string; `None` otherwise. Routes
 /// through [`decode_pdf_text`] so string objects get the same BOM-aware,
 /// PDFDocEncoding-correct decode as raw bytes.
@@ -406,6 +425,20 @@ mod tests {
         // UTF-16LE "Hi" with BOM (lopdf doesn't handle LE; we do).
         let utf16le = [0xFF, 0xFE, 0x48, 0x00, 0x69, 0x00];
         assert_eq!(decode_pdf_text(&utf16le), "Hi");
+    }
+
+    #[test]
+    fn decode_stream_text_prefers_utf8_then_utf16() {
+        // A UTF-8 (no BOM) stream with a non-ASCII secret must round-trip — a
+        // PDFDocEncoding-only decode would mangle it (regression guard).
+        assert_eq!(decode_stream_text("Zürich".as_bytes()), "Zürich");
+        assert_eq!(decode_stream_text(b"plain ascii"), "plain ascii");
+        // UTF-16BE and LE (with BOM) still decode.
+        assert_eq!(decode_stream_text(&[0xFE, 0xFF, 0x00, 0x48, 0x00, 0x69]), "Hi");
+        assert_eq!(decode_stream_text(&[0xFF, 0xFE, 0x48, 0x00, 0x69, 0x00]), "Hi");
+        // Non-UTF-8, non-BOM bytes fall back to the PDF text-string decode
+        // (PDFDocEncoding): 0x92 → trademark, not dropped or mis-cast.
+        assert_eq!(decode_stream_text(&[0x92]), "\u{2122}");
     }
 
     #[test]

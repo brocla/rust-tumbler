@@ -83,7 +83,7 @@ fn walk_field(
             // A rich-text /V can be a stream.
             Some(obj @ Object::Stream(_)) => {
                 if let Some(bytes) = pdf::stream_object_bytes(obj) {
-                    let text = pdf::decode_pdf_text(&bytes);
+                    let text = pdf::decode_stream_text(&bytes);
                     let key = String::from_utf8_lossy(key);
                     findings_in(&text, query, Vector::Forms, &format!("form field /{key} (stream)"), None, findings);
                 }

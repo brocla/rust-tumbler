@@ -80,9 +80,12 @@ fn scan_filespec(doc: &Document, fs: &Dictionary, query: &Query, where_: &str, f
         for stream_key in [b"F".as_slice(), b"UF"] {
             if let Some(id) = ef.get(stream_key).ok().and_then(|o| o.as_reference().ok()) {
                 if let Some(bytes) = pdf::stream_bytes(doc, id) {
-                    // BOM-aware decode so a UTF-16 embedded text file is scanned,
-                    // not turned into NUL-interleaved noise by a lossy UTF-8 read.
-                    let text = pdf::decode_pdf_text(&bytes);
+                    // Stream-aware decode (UTF-16 BOM → UTF-8 → PDFDocEncoding):
+                    // an embedded file is an arbitrary file, usually UTF-8, and
+                    // must not be forced through PDFDocEncoding (which would
+                    // mangle non-ASCII) nor a lossy UTF-8 read (which would drop
+                    // a UTF-16 stream).
+                    let text = pdf::decode_stream_text(&bytes);
                     findings_in(&text, query, Vector::Attachments, &format!("{where_} embedded file contents"), None, findings);
                 }
             }

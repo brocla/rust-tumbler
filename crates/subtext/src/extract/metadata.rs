@@ -54,7 +54,7 @@ impl VectorCheck for Metadata {
         // a hider can omit the optional `/Type` marker, so the structural
         // reference must be followed directly (spec §4-B), not just the tag.
         let mut xmp_ids: Vec<lopdf::ObjectId> = pdf::iter_dicts(doc)
-            .filter(|(id, dict)| is_metadata_stream(dict) && doc.get_object(*id).is_ok())
+            .filter(|(_, dict)| is_metadata_stream(dict))
             .map(|(id, _)| id)
             .collect();
         if let Some(catalog) = pdf::catalog(doc) {
