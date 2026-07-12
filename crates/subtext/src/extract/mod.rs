@@ -18,9 +18,11 @@ pub mod forms;
 pub mod marked_content;
 pub mod metadata;
 pub mod optional_content;
+pub mod orphans;
 pub mod outlines;
 pub mod page_labels;
 pub mod page_text;
+pub mod raw;
 pub mod redaction;
 pub mod revisions;
 pub mod scripts;
@@ -371,20 +373,8 @@ pub static REGISTRY: &[&dyn VectorCheck] = &[
     &optional_content::OptionalContent,
     &signatures::Signatures,
     &revisions::Revisions,
-    &Pending {
-        id: "orphan_objects",
-        label: "Orphaned objects",
-        vector: Vector::OrphanObjects,
-        method: "N N obj + ObjStm brute-scan",
-        phase: "Phase 3",
-    },
-    &Pending {
-        id: "raw_decompressed",
-        label: "Raw decompressed scan",
-        vector: Vector::RawDecompressed,
-        method: "inflate-all + scan",
-        phase: "Phase 3",
-    },
+    &orphans::OrphanObjects,
+    &raw::RawDecompressed,
 ];
 
 #[cfg(test)]
