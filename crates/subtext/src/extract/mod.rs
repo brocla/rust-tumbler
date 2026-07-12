@@ -7,7 +7,7 @@
 //! drift from the set of implemented extractors.
 
 use crate::query::Query;
-use crate::report::{Finding, Signal, SkipKind, Vector};
+use crate::report::{Check, CheckStatus, CheckTone, Finding, Signal, SkipKind, Vector};
 use pdfium_render::prelude::PdfDocument;
 
 pub mod annotations;
@@ -66,6 +66,128 @@ impl CheckOutcome {
             reason: reason.into(),
             kind: SkipKind::NotImplemented,
         }
+    }
+}
+
+/// The outcome of running a set of checks against one document view: the check
+/// rows (for the report's "everything inspected" list) plus the collected
+/// findings and signals. `check_pdf` runs the full `REGISTRY`; `Revisions` and
+/// `--recurse-embedded` run [`non_recursive_checks`] against a sub-document.
+pub struct RunResult {
+    pub checks: Vec<Check>,
+    pub findings: Vec<Finding>,
+    pub signals: Vec<Signal>,
+}
+
+/// Runs each of `checks` against `ctx`, mapping every outcome to a [`Check`]
+/// row and collecting findings + signals. The single per-check code path shared
+/// by the top-level scan and every sub-scan, so a prior revision or an embedded
+/// PDF is inspected exactly as the host document is.
+pub fn run_checks(checks: &[&dyn VectorCheck], ctx: &DocContext, query: &Query) -> RunResult {
+    let mut out_checks = Vec::with_capacity(checks.len());
+    let mut findings: Vec<Finding> = Vec::new();
+    let mut signals: Vec<Signal> = Vec::new();
+
+    for check in checks {
+        let (tone, status, detail, skip_kind) = match check.run(ctx, query) {
+            CheckOutcome::Ran {
+                findings: hits,
+                signals: mut sigs,
+            } => {
+                let n_sigs = sigs.len();
+                signals.append(&mut sigs);
+                if hits.is_empty() {
+                    if n_sigs > 0 {
+                        (
+                            CheckTone::Warning,
+                            CheckStatus::CheckedClean,
+                            format!("No matches, but {n_sigs} suspicious signal(s) — see signals"),
+                            None,
+                        )
+                    } else {
+                        (CheckTone::Passed, CheckStatus::CheckedClean, "No matches".to_string(), None)
+                    }
+                } else {
+                    let detail = summarize_hits(&hits);
+                    let mut hits = hits;
+                    findings.append(&mut hits);
+                    (CheckTone::Leak, CheckStatus::Found, detail, None)
+                }
+            }
+            CheckOutcome::Skipped { reason, kind } => {
+                (CheckTone::Skipped, CheckStatus::Skipped, reason, Some(kind))
+            }
+        };
+        out_checks.push(Check {
+            id: check.id(),
+            label: check.label(),
+            vector: check.vector(),
+            method: check.method(),
+            tone,
+            status,
+            detail,
+            skip_kind,
+        });
+    }
+    RunResult { checks: out_checks, findings, signals }
+}
+
+/// A one-line summary of a check's hits for its `detail` field, e.g.
+/// "2 matches on pages 4, 7" or "1 match".
+fn summarize_hits(hits: &[Finding]) -> String {
+    let n = hits.len();
+    let noun = if n == 1 { "match" } else { "matches" };
+    let mut pages: Vec<u32> = hits.iter().filter_map(|h| h.page).collect();
+    pages.sort_unstable();
+    pages.dedup();
+    match pages.as_slice() {
+        [] => format!("{n} {noun}"),
+        [p] => format!("{n} {noun} on page {p}"),
+        many => {
+            let list = many.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ");
+            format!("{n} {noun} on pages {list}")
+        }
+    }
+}
+
+/// The vectors that must NOT run inside a per-revision or per-embedded sub-scan:
+/// they would recurse (`Revisions`, `OrphanObjects`, `RawDecompressed` operate
+/// on the whole file's raw bytes) or are too costly to repeat (`RenderedOcr`).
+pub fn is_recursive_vector(v: Vector) -> bool {
+    matches!(
+        v,
+        Vector::RenderedOcr | Vector::Revisions | Vector::OrphanObjects | Vector::RawDecompressed
+    )
+}
+
+/// The registry entries safe to run against a sub-document (a prior revision or
+/// an embedded PDF) — everything except the recursive/expensive vectors. Built
+/// at call time so the registry list is never duplicated.
+pub fn non_recursive_checks() -> Vec<&'static dyn VectorCheck> {
+    REGISTRY
+        .iter()
+        .copied()
+        .filter(|c| !is_recursive_vector(c.vector()))
+        .collect()
+}
+
+/// Stamps every finding with the superseded-revision index it came from. Used
+/// by `Revisions` after running the shared extractors on a prior revision —
+/// matching stays inside `findings_in`, only the provenance field is set here
+/// (resolves review item AL1 without letting the query modes diverge).
+#[allow(dead_code)] // wired in §14.5 (Revisions)
+pub(crate) fn stamp_revision(findings: &mut [Finding], rev: u32) {
+    for f in findings {
+        f.revision = Some(rev);
+    }
+}
+
+/// Stamps every finding with the embedded-container path it came from. Used by
+/// `--recurse-embedded` (§14.10).
+#[allow(dead_code)] // wired in §14.10
+pub(crate) fn stamp_container(findings: &mut [Finding], path: &str) {
+    for f in findings {
+        f.container = Some(path.to_string());
     }
 }
 
