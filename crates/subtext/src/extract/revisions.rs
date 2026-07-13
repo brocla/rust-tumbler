@@ -10,17 +10,18 @@
 //! Approach: for each prior-revision prefix (bytes up to a non-final `%%EOF`),
 //! reparse it as a standalone document and run the non-recursive extractors on
 //! it, plus a lopdf page-show-text scan (pdfium is not loaded per-revision). Each
-//! finding is stamped with the revision index it came from. A `/Linearized` file
-//! is a single revision whose first-page section is *not* a prior revision, so it
-//! is skipped (the linearization guard).
+//! finding is stamped with the revision index it came from. In a linearized file
+//! the first `%%EOF` ends the up-front first-page section, which is *not* a prior
+//! revision, so that first boundary alone is dropped — any later `%%EOF`
+//! boundaries are genuinely appended revisions and are still scanned.
 
 use crate::extract::{
-    findings_in, non_recursive_checks, run_checks, stamp_revision, CheckOutcome, DocContext,
-    VectorCheck,
+    findings_in, non_recursive_checks, run_checks, stamp_revision, sub_document_signal,
+    CheckOutcome, DocContext, VectorCheck,
 };
 use crate::pdf;
 use crate::query::Query;
-use crate::report::{Finding, Vector};
+use crate::report::{Finding, Signal, Vector};
 use lopdf::Document;
 
 pub struct Revisions;
@@ -49,14 +50,20 @@ impl VectorCheck for Revisions {
             );
         }
 
-        // A linearized file's early %%EOF is not a prior revision — skip it so we
-        // don't manufacture a phantom "prior revision" from the first-page xref.
-        if ctx.lopdf.map(is_linearized).unwrap_or(false) {
-            return CheckOutcome::ran(Vec::new());
+        let mut boundaries = prior_revision_boundaries(ctx.bytes);
+        // A linearized file writes a first-page section up front, terminated by
+        // its own %%EOF — that boundary is NOT a prior revision. Drop only that
+        // first boundary; any *later* %%EOF boundaries are genuinely appended
+        // revisions and must still be scanned (§14.5). Do NOT bail on the whole
+        // vector, and detect linearization from the file's first bytes, not from
+        // a /Linearized key anywhere in the object map (which a crafted file
+        // could plant to disable this check).
+        if !boundaries.is_empty() && is_linearized(ctx.bytes) {
+            boundaries.remove(0);
         }
 
-        let boundaries = prior_revision_boundaries(ctx.bytes);
         let mut findings: Vec<Finding> = Vec::new();
+        let mut signals: Vec<Signal> = Vec::new();
         let sub_checks = non_recursive_checks();
 
         for (rev_index, &end) in boundaries.iter().enumerate() {
@@ -68,12 +75,29 @@ impl VectorCheck for Revisions {
                 continue;
             };
             let rev = (rev_index + 1) as u32;
+            let label = format!("revision {rev}");
 
             // Structural vectors on the prior revision (Info, XMP, annots, …).
-            let sub_ctx = DocContext::new(prefix, Some(&prior), None);
+            // Propagate the recursion state and pdfium binding so an embedded
+            // PDF that exists only in this prior revision is still recursed when
+            // --recurse-embedded was passed (§14.10).
+            let mut sub_ctx = DocContext::new(prefix, Some(&prior), None);
+            sub_ctx.recurse = ctx.recurse;
+            sub_ctx.pdfium_lib = ctx.pdfium_lib;
             let mut sub = run_checks(&sub_checks, &sub_ctx, query);
             stamp_revision(&mut sub.findings, rev);
             findings.append(&mut sub.findings);
+
+            // Carry the sub-scan's signals and blind-spot disclosures up, tagged
+            // with the revision, so a suspicion inside a prior revision isn't
+            // dropped (the honesty contract, §14.9).
+            for mut sig in sub.signals {
+                sig.location = format!("{label} · {}", sig.location);
+                signals.push(sig);
+            }
+            if let Some(sig) = sub_document_signal(&label, &sub.checks) {
+                signals.push(sig);
+            }
 
             // Prior-revision page text (pdfium isn't loaded per-revision, so use
             // the lopdf show-text approximation).
@@ -92,17 +116,21 @@ impl VectorCheck for Revisions {
             findings.append(&mut page_hits);
         }
 
-        CheckOutcome::ran(findings)
+        CheckOutcome::Ran { findings, signals }
     }
 }
 
-/// True if the document is linearized (its first object carries `/Linearized`).
-fn is_linearized(doc: &Document) -> bool {
-    doc.objects.values().any(|o| match o {
-        lopdf::Object::Dictionary(d) => d.get(b"Linearized").is_ok(),
-        lopdf::Object::Stream(s) => s.dict.get(b"Linearized").is_ok(),
-        _ => false,
-    })
+/// True if `bytes` is a linearized PDF. Per ISO 32000 Annex F the linearization
+/// parameter dictionary is the file's first indirect object, entirely within
+/// the first 1024 bytes, so scan only that prefix for the `/Linearized` marker
+/// — mirroring `FPDFAvail_IsLinearized` and Tumbler's own `buffer_is_linearized`
+/// (linearize.rs). This deliberately does NOT trust a `/Linearized` key found
+/// deeper in the object graph, which a crafted file could plant.
+fn is_linearized(bytes: &[u8]) -> bool {
+    const SCAN_LEN: usize = 1024;
+    const MARKER: &[u8] = b"/Linearized";
+    let scan = &bytes[..bytes.len().min(SCAN_LEN)];
+    scan.windows(MARKER.len()).any(|w| w == MARKER)
 }
 
 /// Byte offsets just past each `%%EOF` that starts a *prior* revision — i.e.
@@ -130,6 +158,98 @@ fn prior_revision_boundaries(bytes: &[u8]) -> Vec<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::extract::Recurse;
+    use lopdf::{dictionary, Object};
+
+    fn zanzibar() -> Query {
+        Query::literal(["Zanzibar".to_string()], false, false).unwrap()
+    }
+
+    fn run_findings(ctx: &DocContext) -> Vec<Finding> {
+        match Revisions.run(ctx, &zanzibar()) {
+            CheckOutcome::Ran { findings, .. } => findings,
+            CheckOutcome::Skipped { reason, .. } => panic!("skip: {reason}"),
+        }
+    }
+
+    #[test]
+    fn is_linearized_only_trusts_the_first_1024_bytes() {
+        assert!(is_linearized(b"%PDF-1.5\n1 0 obj\n<< /Linearized 1 >>\nendobj\n"));
+        let mut buried = vec![b' '; 1100];
+        buried.extend_from_slice(b"/Linearized 1");
+        assert!(!is_linearized(&buried), "a marker past 1024 bytes must be ignored");
+    }
+
+    #[test]
+    fn linearized_marker_past_1024_bytes_does_not_disable_the_vector() {
+        // A `/Linearized` token planted deep in the file (past the first 1 KB)
+        // must NOT be treated as a linearization marker — otherwise it is a
+        // kill switch that silences the whole prior-revision scan (review #1).
+        let mut rev1 = Document::with_version("1.5");
+        let info = rev1.add_object(dictionary! { "Title" => Object::string_literal("Zanzibar") });
+        // Push the total length past 1024 bytes so the appended marker lands
+        // outside the linearization-detection window.
+        rev1.add_object(Object::string_literal("x".repeat(1300)));
+        let catalog = rev1.add_object(dictionary! { "Type" => "Catalog" });
+        rev1.trailer.set("Root", catalog);
+        rev1.trailer.set("Info", info);
+        let mut bytes = Vec::new();
+        rev1.save_to(&mut bytes).expect("serialize rev1");
+        assert!(bytes.len() > 1024, "rev1 must exceed the detection window");
+        bytes.extend_from_slice(b"\n5 0 obj\n<< /Linearized 1 >>\nendobj\n%%EOF\n");
+
+        let ctx = DocContext::new(&bytes, None, None);
+        let f = run_findings(&ctx);
+        assert!(
+            f.iter().any(|x| x.matched_text == "Zanzibar" && x.revision == Some(1)),
+            "buried /Linearized must not disable the prior-revision scan: {f:?}"
+        );
+    }
+
+    #[test]
+    fn linearized_first_page_boundary_is_not_a_phantom_revision() {
+        // A genuinely linearized file (marker in the first KB) with its two
+        // %%EOF markers has NO prior revision — the first %%EOF ends the
+        // up-front first-page section, not an earlier revision. Dropping only
+        // that first boundary leaves nothing to scan, so no phantom finding.
+        let mut bytes = b"%PDF-1.5\n<< /Linearized 1 /L 100 /O 3 /E 50 /N 1 /T 90 >>\n".to_vec();
+        bytes.extend_from_slice(b"1 0 obj\n<< /Type /Catalog >>\nendobj\n");
+        bytes.extend_from_slice(b"first-page section with (Zanzibar) in it\n%%EOF\n");
+        bytes.extend_from_slice(b"2 0 obj\n<< >>\nendobj\nmain body\n%%EOF\n");
+        let ctx = DocContext::new(&bytes, None, None);
+        // The dropped first-page prefix is never reparsed, so its stray
+        // "(Zanzibar)" text must not surface as a revision-1 leak.
+        assert!(run_findings(&ctx).is_empty());
+    }
+
+    #[test]
+    fn recursion_propagates_into_a_prior_revision_embedded_pdf() {
+        // A secret hidden inside an embedded PDF that exists only in a prior
+        // revision must be reachable when --recurse-embedded is passed — the
+        // recursion state has to flow into the per-revision sub-context (#5).
+        let inner = crate::extract::attachments::tests::pdf_bytes_with_xmp_secret("Zanzibar");
+        let mut host = crate::extract::attachments::tests::host_with_attachment("inner.pdf", &inner, false);
+        let mut bytes = Vec::new();
+        host.save_to(&mut bytes).expect("serialize rev1 host");
+        bytes.extend_from_slice(b"\n9 0 obj\n<< >>\nendobj\n%%EOF\n");
+
+        let visited = std::cell::RefCell::new(std::collections::HashSet::new());
+        let mut ctx = DocContext::new(&bytes, None, None);
+        ctx.recurse = Some(Recurse { depth: 0, visited: &visited });
+        let f = run_findings(&ctx);
+        // The secret must surface from a prior revision (revision stamped) via
+        // the embedded-PDF recursion (container stamped). The exact revision
+        // index isn't pinned — the embedded stream carries its own %%EOF, which
+        // adds a boundary, so the host revision may not be index 1.
+        assert!(
+            f.iter().any(|x| {
+                x.revision.is_some()
+                    && x.container.as_deref().is_some_and(|c| c.contains("attachment:inner.pdf"))
+                    && x.matched_text == "Zanzibar"
+            }),
+            "prior-revision embedded PDF must be recursed: {f:?}"
+        );
+    }
 
     #[test]
     fn boundaries_are_all_but_the_last_eof() {

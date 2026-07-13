@@ -156,6 +156,11 @@ pub enum CheckStatus {
 pub enum SignalKind {
     UnappliedRedactAnnotation,
     RenderExtractMismatch,
+    /// A sub-document (a prior revision or an embedded PDF) that one or more
+    /// vectors could not inspect — e.g. an encrypted or unparseable attachment.
+    /// Its own check rows never reach this report, so this signal carries the
+    /// blind spot up so the file cannot be certified clean (§14.9).
+    SubDocumentNotInspected,
 }
 
 /// One `Vector` variant per registered `VectorCheck` (§3.1). The `checks`

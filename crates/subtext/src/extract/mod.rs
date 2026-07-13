@@ -7,7 +7,7 @@
 //! drift from the set of implemented extractors.
 
 use crate::query::Query;
-use crate::report::{Check, CheckStatus, CheckTone, Finding, Signal, SkipKind, Vector};
+use crate::report::{Check, CheckStatus, CheckTone, Finding, Signal, SignalKind, SkipKind, Vector};
 use pdfium_render::prelude::{PdfDocument, Pdfium};
 
 pub mod annotations;
@@ -374,6 +374,68 @@ impl<'a, 'p> DocContext<'a, 'p> {
     pub fn pdfium_unavailable(&self) -> CheckOutcome {
         CheckOutcome::unavailable(self.pdfium_reason)
     }
+}
+
+/// The lopdf structural view plus what loading it revealed about encryption.
+/// Produced by [`load_lopdf_view`] and consumed by both the top-level scan
+/// (`check_pdf`) and the embedded-PDF sub-scan (`recurse_embedded`), so an
+/// encrypted document is handled identically wherever it appears.
+pub(crate) struct LopdfView {
+    /// The view to scan, or `None` when the file is encrypted and could not be
+    /// decrypted (every string/stream would be ciphertext).
+    pub doc: Option<lopdf::Document>,
+    /// True when the file declares encryption, whether or not it decrypted.
+    pub encrypted: bool,
+}
+
+/// Loads the lopdf view and decides whether it is safe to scan (§14.9).
+///
+/// lopdf's loader returns `Ok` even for an encrypted PDF it cannot
+/// authenticate, leaving `/Encrypt` in the trailer and every string/stream as
+/// CIPHERTEXT. Scanning that would report honest-looking "no matches" over
+/// unreadable bytes, so this discards such a view (`doc = None`) and flags the
+/// file encrypted; the checks then skip with an encryption reason rather than
+/// false-clean. With a `password` it decrypts during parse (a post-hoc decrypt
+/// can't read the encrypted object streams); without one, `load_mem` still
+/// auto-unlocks an empty user password.
+pub(crate) fn load_lopdf_view(bytes: &[u8], password: Option<&str>) -> LopdfView {
+    let loaded = match password {
+        Some(pw) => {
+            lopdf::Document::load_mem_with_options(bytes, lopdf::LoadOptions::with_password(pw))
+        }
+        None => lopdf::Document::load_mem(bytes),
+    }
+    .ok();
+
+    let undecrypted = loaded
+        .as_ref()
+        .is_some_and(|d| d.trailer.get(b"Encrypt").is_ok());
+    let doc = if undecrypted { None } else { loaded };
+    let encrypted = undecrypted
+        || match doc.as_ref() {
+            Some(d) => d.encryption_state.is_some(),
+            // Nothing parsed at all — fall back to the raw bytes.
+            None => bytes.windows(8).any(|w| w == b"/Encrypt"),
+        };
+    LopdfView { doc, encrypted }
+}
+
+/// Builds a [`SignalKind::SubDocumentNotInspected`] signal when one or more
+/// vectors returned `Unavailable` while scanning a sub-document (a prior
+/// revision or an embedded PDF), so a partly- or wholly-unreadable
+/// sub-document is disclosed rather than silently counted clean (§14.9). The
+/// sub-scan's own check rows never reach the top-level report, so this signal
+/// is how a sub-document blind spot reaches `finalize`'s warning cap.
+pub(crate) fn sub_document_signal(location: &str, checks: &[Check]) -> Option<Signal> {
+    let n = checks
+        .iter()
+        .filter(|c| c.skip_kind == Some(SkipKind::Unavailable))
+        .count();
+    (n > 0).then(|| Signal {
+        kind: SignalKind::SubDocumentNotInspected,
+        location: location.to_string(),
+        detail: format!("{n} vector(s) could not be inspected in this sub-document"),
+    })
 }
 
 /// One registered extractor. Object-safe so the registry is a slice of

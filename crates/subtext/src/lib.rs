@@ -61,34 +61,12 @@ pub fn check_pdf(
     let password = options.password.as_deref();
     // pdfium view (page text, rendering).
     let pdfium_doc = pdfium.load_pdf_from_byte_vec(bytes.to_vec(), password).ok();
-    // lopdf view (structural vectors). With a password, decrypt-during-parse
-    // (a post-hoc decrypt() can't read the encrypted object streams); without
-    // one, `load_mem` still auto-unlocks an empty user password.
-    let lopdf_loaded = match password {
-        Some(pw) => {
-            lopdf::Document::load_mem_with_options(bytes, lopdf::LoadOptions::with_password(pw))
-        }
-        None => lopdf::Document::load_mem(bytes),
-    }
-    .ok();
-
-    // lopdf's loader decrypts only when it can authenticate (a supplied or
-    // empty user password): success strips /Encrypt from the trailer and
-    // records `encryption_state`; otherwise it still returns a parsed document
-    // whose strings/streams are CIPHERTEXT. Scanning that view would report
-    // honest-looking "no matches" over unreadable bytes, so discard it and let
-    // the checks skip with the encryption reason instead (§14.9).
-    let undecrypted = lopdf_loaded
-        .as_ref()
-        .is_some_and(|d| d.trailer.get(b"Encrypt").is_ok());
-    let lopdf_doc = if undecrypted { None } else { lopdf_loaded };
-
-    let encrypted = undecrypted
-        || match lopdf_doc.as_ref() {
-            Some(d) => d.encryption_state.is_some(),
-            // Nothing parsed at all — fall back to the raw bytes.
-            None => bytes.windows(8).any(|w| w == b"/Encrypt"),
-        };
+    // lopdf view (structural vectors) via the shared loader: an encrypted view
+    // it could not decrypt is discarded so we never scan ciphertext, and the
+    // same loader serves the embedded-PDF sub-scan so both agree (§14.9).
+    let lopdf_view = extract::load_lopdf_view(bytes, password);
+    let lopdf_doc = lopdf_view.doc;
+    let encrypted = lopdf_view.encrypted;
 
     let pages = pdfium_doc
         .as_ref()

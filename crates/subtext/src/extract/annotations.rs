@@ -76,25 +76,31 @@ fn scan_annotation(
 }
 
 /// Decodes one resolved appearance-stream XObject and scans its drawn text for
-/// the query. The show-operator strings are **concatenated** before matching so
-/// a secret split across operators or a `TJ` kerning array (`[(Zan)-14(zibar)]`)
-/// reassembles — mirroring pdfium's page-text reading-order reassembly, which an
-/// appearance stream (not page content) would otherwise not get (review item
-/// #8, spec §4-A/§4-L).
+/// the query, two ways. The **per-string** pass matches each show operand on its
+/// own — a whole-word query needs this, since the concatenated pass fuses
+/// adjacent operands (`(Zanzibar)(2024)` → `"Zanzibar2024"`) and would drop the
+/// trailing word boundary. The **concatenated** pass reassembles a secret split
+/// across operators or a `TJ` kerning array (`[(Zan)-14(zibar)]`) that no single
+/// operand contains — mirroring pdfium's page-text reading-order reassembly,
+/// which an appearance stream would otherwise not get (review item #8, spec
+/// §4-A/§4-L). A term caught by both passes is deduped so it is reported once.
 fn scan_appearance(obj: &Object, query: &Query, page_num: u32, findings: &mut Vec<Finding>) {
     let Some(bytes) = pdf::stream_object_bytes(obj) else { return };
-    let text: String = pdf::scan_content_strings(&bytes)
-        .into_iter()
-        .map(|s| s.value)
-        .collect();
-    findings_in(
-        &text,
-        query,
-        Vector::Annotations,
-        &format!("annotation /AP appearance (page {page_num})"),
-        Some(page_num),
-        findings,
-    );
+    let strings = pdf::scan_content_strings(&bytes);
+    let location = format!("annotation /AP appearance (page {page_num})");
+
+    let mut hits: Vec<Finding> = Vec::new();
+    for s in &strings {
+        findings_in(&s.value, query, Vector::Annotations, &location, Some(page_num), &mut hits);
+    }
+    let joined: String = strings.iter().map(|s| s.value.as_str()).collect();
+    findings_in(&joined, query, Vector::Annotations, &location, Some(page_num), &mut hits);
+
+    // Both passes report under the same location, so a term wholly inside one
+    // operand appears in each; dedup by matched text so it lands once.
+    let mut seen = std::collections::HashSet::new();
+    hits.retain(|f| seen.insert(f.matched_text.clone()));
+    findings.append(&mut hits);
 }
 
 #[cfg(test)]
@@ -163,6 +169,74 @@ mod tests {
 
         let f = run(&doc, "Zanzibar");
         assert!(f.iter().any(|x| x.location.contains("/AP appearance")), "{f:?}");
+    }
+
+    #[test]
+    fn whole_word_match_survives_adjacent_word_char_operand() {
+        // (Zanzibar)(2024) fuses to "Zanzibar2024" in the concatenated pass; a
+        // whole-word query must still match via the per-string pass, which
+        // scans each operand on its own (regression guard for review #4).
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        let ap = doc.add_object(Stream::new(
+            dictionary! { "Type" => "XObject", "Subtype" => "Form" },
+            b"BT /F1 18 Tf (Zanzibar) Tj (2024) Tj ET".to_vec(),
+        ));
+        let annot_id = doc.add_object(dictionary! {
+            "Type" => "Annot", "Subtype" => "FreeText",
+            "AP" => dictionary! { "N" => Object::Reference(ap) },
+        });
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page", "Parent" => pages_id,
+            "MediaBox" => vec![Object::Integer(0), Object::Integer(0), Object::Integer(200), Object::Integer(200)],
+            "Annots" => vec![Object::Reference(annot_id)],
+        });
+        doc.objects.insert(pages_id, Object::Dictionary(dictionary! {
+            "Type" => "Pages", "Kids" => vec![Object::Reference(page_id)], "Count" => Object::Integer(1),
+        }));
+        let catalog = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        doc.trailer.set("Root", catalog);
+
+        let ctx = DocContext::new(&[], Some(&doc), None);
+        let q = Query::literal(["Zanzibar".to_string()], false, true).unwrap(); // whole_word
+        let f = match Annotations.run(&ctx, &q) {
+            CheckOutcome::Ran { findings, .. } => findings,
+            CheckOutcome::Skipped { reason: r, .. } => panic!("skip: {r}"),
+        };
+        assert!(
+            f.iter().any(|x| x.matched_text == "Zanzibar"),
+            "whole-word term in a standalone operand must be found: {f:?}"
+        );
+    }
+
+    #[test]
+    fn appearance_match_is_reported_once_not_duplicated() {
+        // A term wholly inside one operand is caught by both the per-string and
+        // the concatenated pass; dedup must collapse it to a single finding.
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        let ap = doc.add_object(Stream::new(
+            dictionary! { "Type" => "XObject", "Subtype" => "Form" },
+            b"BT /F1 18 Tf (Zanzibar) Tj ET".to_vec(),
+        ));
+        let annot_id = doc.add_object(dictionary! {
+            "Type" => "Annot", "Subtype" => "FreeText",
+            "AP" => dictionary! { "N" => Object::Reference(ap) },
+        });
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page", "Parent" => pages_id,
+            "MediaBox" => vec![Object::Integer(0), Object::Integer(0), Object::Integer(200), Object::Integer(200)],
+            "Annots" => vec![Object::Reference(annot_id)],
+        });
+        doc.objects.insert(pages_id, Object::Dictionary(dictionary! {
+            "Type" => "Pages", "Kids" => vec![Object::Reference(page_id)], "Count" => Object::Integer(1),
+        }));
+        let catalog = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        doc.trailer.set("Root", catalog);
+
+        let f = run(&doc, "Zanzibar");
+        let ap_hits = f.iter().filter(|x| x.location.contains("/AP appearance")).count();
+        assert_eq!(ap_hits, 1, "the term must be reported once, not per pass: {f:?}");
     }
 
     #[test]
