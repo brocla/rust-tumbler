@@ -28,9 +28,11 @@ use crate::report::Vector;
 #[cfg(feature = "ocr")]
 use crate::extract::findings_in;
 #[cfg(feature = "ocr")]
-use crate::report::Finding;
+use crate::report::{Finding, Signal, SignalKind};
 #[cfg(feature = "ocr")]
 use pdfium_render::prelude::PdfDocument;
+#[cfg(feature = "ocr")]
+use std::collections::HashSet;
 #[cfg(feature = "ocr")]
 use tumbler_lib::ocr_api::{render_page_for_ocr, OcrEngine, OcrWord};
 
@@ -82,6 +84,7 @@ impl VectorCheck for RenderedOcr {
 fn run_ocr(doc: &PdfDocument, engine: &dyn OcrEngine, query: &Query) -> CheckOutcome {
     let page_count = doc.pages().len() as u32;
     let mut findings: Vec<Finding> = Vec::new();
+    let mut signals: Vec<Signal> = Vec::new();
     let mut attempted = 0u32;
     let mut errored = 0u32;
     let mut last_err = String::new();
@@ -91,19 +94,81 @@ fn run_ocr(doc: &PdfDocument, engine: &dyn OcrEngine, query: &Query) -> CheckOut
             continue;
         };
         attempted += 1;
-        match engine.recognize(&rgba, w, h) {
-            Ok(words) => findings_from_words(&words, page, query, &mut findings),
+        let words = match engine.recognize(&rgba, w, h) {
+            Ok(words) => words,
             Err(e) => {
                 errored += 1;
                 last_err = e.to_string();
+                continue;
             }
+        };
+        findings_from_words(&words, page, query, &mut findings);
+
+        // Query-independent glyph-spoof signal (§12 Q5): if the page's OCR'd
+        // text disagrees with its extracted text layer, the visible glyphs may
+        // be spoofed (e.g. a ToUnicode remap), so extraction-based vectors could
+        // be reading a decoy. Only reachable under --ocr; scored as a signal.
+        let ocr_text = words.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" ");
+        let extracted = extracted_page_text(doc, page);
+        if is_render_extract_mismatch(&ocr_text, &extracted) {
+            signals.push(Signal {
+                kind: SignalKind::RenderExtractMismatch,
+                location: format!("page {page}"),
+                detail: "Rendered text (OCR) does not match the extracted text layer — the \
+                         visible glyphs may be spoofed, so extraction-based checks could be \
+                         reading a decoy."
+                    .to_string(),
+            });
         }
     }
 
     if attempted > 0 && errored == attempted {
         return CheckOutcome::unavailable(format!("OCR engine unavailable — {last_err}"));
     }
-    CheckOutcome::ran(findings)
+    CheckOutcome::Ran { findings, signals }
+}
+
+/// A page's extracted text layer (pdfium), in document order — the same
+/// reading-order walk `PageText` uses, so the two views are comparable.
+#[cfg(feature = "ocr")]
+fn extracted_page_text(doc: &PdfDocument, page: u32) -> String {
+    let pages = doc.pages();
+    let Ok(p) = pages.get((page.saturating_sub(1)) as u16 as i32) else {
+        return String::new();
+    };
+    let Ok(text) = p.text() else {
+        return String::new();
+    };
+    crate::extract::page_text::page_text_in_document_order(&text)
+}
+
+/// True when a page's OCR'd text and its extracted text layer disagree enough
+/// to suspect glyph spoofing. Deliberately conservative to limit noise (the
+/// signal is labelled, not load-bearing, §12 Q5): it fires only when BOTH sides
+/// carry several real words — so a plain scanned page with no text layer, or a
+/// page OCR misread as empty, does not trip it — and fewer than half the OCR'd
+/// words appear in the extracted layer.
+#[cfg(feature = "ocr")]
+fn is_render_extract_mismatch(ocr_text: &str, extracted_text: &str) -> bool {
+    const MIN_WORDS: usize = 4;
+    const MAX_OVERLAP: f32 = 0.5;
+    let ocr = word_set(ocr_text);
+    let ext = word_set(extracted_text);
+    if ocr.len() < MIN_WORDS || ext.len() < MIN_WORDS {
+        return false;
+    }
+    let shared = ocr.iter().filter(|w| ext.contains(*w)).count();
+    (shared as f32 / ocr.len() as f32) < MAX_OVERLAP
+}
+
+/// Lowercased alphanumeric word tokens (length ≥ 2), for a noise-tolerant
+/// comparison of two texts.
+#[cfg(feature = "ocr")]
+fn word_set(s: &str) -> HashSet<String> {
+    s.split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.chars().count() >= 2)
+        .map(|w| w.to_lowercase())
+        .collect()
 }
 
 /// Joins one page's recognized words into reading-ordered text and runs the
@@ -273,5 +338,36 @@ mod tests {
             CheckOutcome::Skipped { kind, .. } => assert_eq!(kind, SkipKind::Unavailable),
             CheckOutcome::Ran { .. } => panic!("an engine that fails everywhere must be Unavailable"),
         }
+    }
+
+    #[test]
+    fn mismatch_fires_when_text_layer_disagrees_with_pixels() {
+        // The ToUnicode-spoof shape: OCR reads the real words, the extracted
+        // layer is an unrelated decoy → the glyphs are suspect.
+        let ocr = "Zanzibar confidential dossier subject informant";
+        let extracted = "lorem ipsum dolor sit amet";
+        assert!(is_render_extract_mismatch(ocr, extracted));
+    }
+
+    #[test]
+    fn mismatch_tolerates_ocr_noise_on_a_matching_page() {
+        // Same page, one OCR misread ("quiick") — must NOT fire.
+        let ocr = "the quiick brown fox jumps";
+        let extracted = "the quick brown fox jumps";
+        assert!(!is_render_extract_mismatch(ocr, extracted));
+    }
+
+    #[test]
+    fn mismatch_does_not_fire_on_a_pure_scan_with_no_text_layer() {
+        // OCR reads plenty, but there is no extracted layer to disagree with —
+        // that is a scanned page, not a spoof.
+        let ocr = "Zanzibar confidential dossier subject informant";
+        assert!(!is_render_extract_mismatch(ocr, ""));
+    }
+
+    #[test]
+    fn mismatch_does_not_fire_on_too_little_text() {
+        // Below the word floor on either side → no signal (avoids noise).
+        assert!(!is_render_extract_mismatch("Zanzibar", "decoy"));
     }
 }

@@ -70,7 +70,7 @@ fn find_in_pages(doc: &PdfDocument, query: &Query) -> Vec<Finding> {
 /// `page_text_in_document_order` (text.rs): it deliberately avoids
 /// `PdfPageText::all()`, whose geometric reading-order reconstruction can
 /// scramble rotated / multi-column layouts (Tumbler issue #80).
-fn page_text_in_document_order(text: &PdfPageText) -> String {
+pub(crate) fn page_text_in_document_order(text: &PdfPageText) -> String {
     text.chars()
         .iter()
         .filter_map(|ch| ch.unicode_char())
