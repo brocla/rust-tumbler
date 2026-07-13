@@ -56,3 +56,42 @@ jobs:
       - name: Check Rust
         working-directory: src-tauri
         run: cargo check
+
+  # Subtext (crates/subtext) is a separate workspace crate. Its Tumbler/Windows
+  # deps are gated behind `[target.'cfg(target_os = "windows")']` + the `ocr`
+  # feature, so the portable build has zero native deps and tests on Linux.
+  test-subtext:
+    name: Subtext (portable)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Lib tests (no pdfium needed)
+        run: cargo test -p subtext --lib
+      - name: Clippy
+        run: cargo clippy -p subtext --all-targets -- -D warnings
+
+  # The corpus/integration tests bind a real pdfium and load PDFs, so they need
+  # the runtime DLL (not checked in — fetched here, mirroring release.yml).
+  # pdfium can only bind once per process and its teardown can crash under
+  # concurrency, so these run single-threaded (see crates/subtext/tests/corpus.rs).
+  test-subtext-corpus:
+    name: Subtext corpus (pdfium)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Download pdfium.dll
+        working-directory: src-tauri
+        run: |
+          New-Item -ItemType Directory -Force -Path resources | Out-Null
+          $url = "https://github.com/bblanchon/pdfium-binaries/releases/latest/download/pdfium-win-x64.tgz"
+          Invoke-WebRequest -Uri $url -OutFile pdfium.tgz
+          tar -xzf pdfium.tgz bin/pdfium.dll
+          Copy-Item bin/pdfium.dll resources/pdfium.dll -Force
+      - name: Corpus tests
+        run: cargo test -p subtext --test corpus -- --test-threads=1
