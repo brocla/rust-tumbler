@@ -6,7 +6,7 @@ use clap::Parser;
 use pdfium_render::prelude::Pdfium;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use subtext::report::{CheckStatus, Report, RiskTone};
+use subtext::report::{CheckStatus, Report, RiskTone, SignalKind};
 use subtext::{CheckOptions, Query};
 
 /// Subtext — A Redaction Checker. Report every place a term still appears
@@ -79,9 +79,9 @@ fn main() -> ExitCode {
         ocr: cli.ocr,
     };
 
-    let mut any_leak = false;
     let mut any_error = false;
-    for (i, file) in cli.files.iter().enumerate() {
+    let mut reports: Vec<Report> = Vec::with_capacity(cli.files.len());
+    for file in &cli.files {
         let bytes = match std::fs::read(file) {
             Ok(b) => b,
             Err(e) => {
@@ -94,27 +94,38 @@ fn main() -> ExitCode {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| file.display().to_string());
-        let report = subtext::check_pdf(&pdfium, &bytes, &name, &query, &options);
-        if report.risk_tone == RiskTone::Leak {
-            any_leak = true;
-        }
-        if cli.json {
-            match serde_json::to_string_pretty(&report) {
-                Ok(s) => println!("{s}"),
-                Err(e) => {
-                    eprintln!("subtext: failed to serialize report: {e}");
-                    any_error = true;
-                }
-            }
+        reports.push(subtext::check_pdf(&pdfium, &bytes, &name, &query, &options));
+    }
+
+    if cli.json {
+        // One report → a bare object (the §3.2 shape); multiple → a JSON array,
+        // so a batch is still a single valid JSON document.
+        let json = if reports.len() == 1 {
+            serde_json::to_string_pretty(&reports[0])
         } else {
+            serde_json::to_string_pretty(&reports)
+        };
+        match json {
+            Ok(s) => println!("{s}"),
+            Err(e) => {
+                eprintln!("subtext: failed to serialize report: {e}");
+                any_error = true;
+            }
+        }
+    } else {
+        for (i, report) in reports.iter().enumerate() {
             if i > 0 {
                 println!();
             }
-            print_human(&report);
+            print_human(report);
+        }
+        if reports.len() > 1 {
+            print_batch_summary(&reports);
         }
     }
 
     // Exit code: 1 = a leak was found, 2 = an error, 0 = clean/warning only.
+    let any_leak = reports.iter().any(|r| r.risk_tone == RiskTone::Leak);
     if any_error {
         ExitCode::from(2)
     } else if any_leak {
@@ -122,6 +133,18 @@ fn main() -> ExitCode {
     } else {
         ExitCode::SUCCESS
     }
+}
+
+/// A one-line tally across a multi-file run: how many files leaked, warned, or
+/// came back clean.
+fn print_batch_summary(reports: &[Report]) {
+    let leaks = reports.iter().filter(|r| r.risk_tone == RiskTone::Leak).count();
+    let warnings = reports.iter().filter(|r| r.risk_tone == RiskTone::Warning).count();
+    let clean = reports.iter().filter(|r| r.risk_tone == RiskTone::Clean).count();
+    println!(
+        "\n{} files: {leaks} leak, {warnings} warning, {clean} clean",
+        reports.len()
+    );
 }
 
 fn build_query(cli: &Cli) -> Result<Query, String> {
@@ -193,7 +216,13 @@ fn print_human(report: &Report) {
     println!("  {}", report.description);
     println!("  risk: {:?} · pages: {} · size: {} bytes", report.risk_score, report.pages, report.file_size);
 
-    println!("\n  Checks ({} vectors):", report.checks.len());
+    let leaks = report.checks.iter().filter(|c| c.status == CheckStatus::Found).count();
+    let clean = report.checks.iter().filter(|c| c.status == CheckStatus::CheckedClean).count();
+    let skipped = report.checks.iter().filter(|c| c.status == CheckStatus::Skipped).count();
+    println!(
+        "\n  Checks ({} vectors — {clean} clean, {skipped} skipped, {leaks} with matches):",
+        report.checks.len()
+    );
     for c in &report.checks {
         let mark = match c.status {
             CheckStatus::Found => "LEAK",
@@ -223,7 +252,16 @@ fn print_human(report: &Report) {
     if !report.signals.is_empty() {
         println!("\n  Signals:");
         for s in &report.signals {
-            println!("    ! {} — {}", s.location, s.detail);
+            println!("    ! [{}] {} — {}", signal_label(s.kind), s.location, s.detail);
         }
+    }
+}
+
+/// A short human label for a query-independent signal's kind.
+fn signal_label(kind: SignalKind) -> &'static str {
+    match kind {
+        SignalKind::UnappliedRedactAnnotation => "unapplied redaction",
+        SignalKind::RenderExtractMismatch => "render/extract mismatch",
+        SignalKind::SubDocumentNotInspected => "sub-document not inspected",
     }
 }
