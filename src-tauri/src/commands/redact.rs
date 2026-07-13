@@ -3374,4 +3374,67 @@ mod tests {
         std::fs::write(dir.join("README.md"), readme).expect("write README");
         println!("wrote {} attacks to {}", pentest_corpus().len(), dir.display());
     }
+
+    /// Writes Tumbler's *redacted* output of each neutralized pen-test attack to
+    /// `tests/fixtures/redaction/pentest-redacted/`, so the Subtext §8 closure
+    /// test (in `crates/subtext`) can confirm the checker finds 0 in what
+    /// Tumbler scrubbed — closing the loop: Tumbler removes it, Subtext agrees
+    /// it's gone. The `corrupted-xref` attack is `Rejected` (no output), so it
+    /// has no redacted fixture. Regenerate with:
+    /// `cargo test dump_redacted_pentest_corpus -- --ignored --test-threads=1`
+    #[test]
+    #[ignore = "writes Tumbler's redacted pen-test output to disk"]
+    fn dump_redacted_pentest_corpus() {
+        let _guard = crate::test_pdfium_guard();
+        let pdfium = crate::test_pdfium();
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/redaction/pentest-redacted");
+        std::fs::create_dir_all(&dir).expect("create pentest-redacted dir");
+
+        let mut readme = String::from(
+            "# Redaction pen-test corpus — Tumbler's redacted output (§8 closure)\n\n\
+             Each PDF here is Tumbler's redacted output of the same-named attack in\n\
+             `../pentest/`: page 1 flattened + the full document-vector scrub applied by\n\
+             `apply_redactions_impl`. They exist so Subtext (`crates/subtext`) can close the\n\
+             §8 loop \u{2014} its `tumbler_redacted_output_has_no_findings` test asserts the\n\
+             checker finds **0** copies of `Zanzibar` in each, proving Tumbler removed what\n\
+             Subtext knows how to look for.\n\n\
+             `corrupted-xref` is absent: Tumbler *refuses* that file (unsafe to redact), so\n\
+             there is no redacted output to check.\n\n\
+             Regenerate (after any change to the redactor or the attack corpus) with:\n\
+             `cargo test dump_redacted_pentest_corpus -- --ignored --test-threads=1`\n\n\
+             | File | Source attack vector |\n\
+             |------|----------------------|\n",
+        );
+
+        let mut written = 0u32;
+        for attack in pentest_corpus() {
+            if attack.expect != Expect::Neutralized {
+                continue;
+            }
+            let (result, output) = apply_redactions_impl(
+                &no_progress,
+                pdfium,
+                &attack.bytes,
+                &[full_page_region(1)],
+                &[SECRET.to_string()],
+                150.0,
+                &empty_engine(),
+                &not_cancelled(),
+            )
+            .unwrap_or_else(|e| panic!("[{}] redaction failed: {e}", attack.name));
+            assert!(
+                result.verified,
+                "[{}] redaction did not verify clean; refusing to write a leaky fixture",
+                attack.name
+            );
+            let out = output.expect("a neutralized attack must produce output");
+            let file = format!("{}.pdf", attack.name);
+            std::fs::write(dir.join(&file), &out).expect("write redacted pdf");
+            readme.push_str(&format!("| `{file}` | {} |\n", attack.category));
+            written += 1;
+        }
+        std::fs::write(dir.join("README.md"), readme).expect("write README");
+        println!("wrote {written} redacted attacks to {}", dir.display());
+    }
 }
