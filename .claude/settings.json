@@ -21,7 +21,9 @@
       "Bash(npx tsc *)",
       "PowerShell(npx tsc *)",
       "Bash(npx vitest *)",
-      "PowerShell(npx vitest *)"
+      "PowerShell(npx vitest *)",
+      "PowerShell(Select-String *)",
+      "PowerShell(Select-Object *)"
     ]
   }
 }

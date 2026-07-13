@@ -28,14 +28,14 @@ impl VectorCheck for MarkedContent {
 
     fn run(&self, ctx: &DocContext, query: &Query) -> CheckOutcome {
         let Some(doc) = ctx.lopdf else {
-            return CheckOutcome::unavailable("lopdf could not parse this document");
+            return ctx.lopdf_unavailable();
         };
         let mut findings: Vec<Finding> = Vec::new();
 
         // Page content streams (labelled with their page number).
         let page_nums = pdf::page_numbers(doc);
         for (page_id, page_num) in page_nums.iter().map(|(id, n)| (*id, *n)) {
-            for bytes in page_content_bytes(doc, page_id) {
+            for bytes in pdf::page_content_streams(doc, page_id) {
                 scan(&bytes, query, Some(page_num), &format!("page {page_num} content"), &mut findings);
             }
         }
@@ -43,14 +43,7 @@ impl VectorCheck for MarkedContent {
         // attribute to a page).
         for (id, obj) in &doc.objects {
             let Object::Stream(stream) = obj else { continue };
-            let is_form = stream
-                .dict
-                .get(b"Subtype")
-                .ok()
-                .and_then(|o| o.as_name().ok())
-                .map(|n| n == b"Form")
-                .unwrap_or(false);
-            if is_form {
+            if pdf::name_is(&stream.dict, b"Subtype", &[b"Form"]) {
                 if let Some(bytes) = pdf::stream_bytes(doc, *id) {
                     scan(&bytes, query, None, &format!("Form XObject {} {}", id.0, id.1), &mut findings);
                 }
@@ -60,39 +53,17 @@ impl VectorCheck for MarkedContent {
     }
 }
 
-/// The decompressed bytes of a page's `/Contents` (a stream, or an array of
-/// streams concatenated), each element returned separately.
-fn page_content_bytes(doc: &lopdf::Document, page_id: lopdf::ObjectId) -> Vec<Vec<u8>> {
-    let Ok(page) = doc.get_dictionary(page_id) else { return Vec::new() };
-    let Some(contents) = page.get(b"Contents").ok().and_then(|o| pdf::resolve(doc, o)) else {
-        return Vec::new();
-    };
-    match contents {
-        Object::Stream(_) => page
-            .get(b"Contents")
-            .ok()
-            .and_then(|o| o.as_reference().ok())
-            .and_then(|id| pdf::stream_bytes(doc, id))
-            .into_iter()
-            .collect(),
-        Object::Array(parts) => parts
-            .iter()
-            .filter_map(|p| p.as_reference().ok())
-            .filter_map(|id| pdf::stream_bytes(doc, id))
-            .collect(),
-        _ => Vec::new(),
-    }
-}
-
-/// Scans one content-stream blob for `/ActualText`- or `/Alt`-tagged strings.
+/// Scans one content-stream blob for `/ActualText`- or `/Alt`-tagged strings,
+/// labelling each finding with the key it actually came from.
 fn scan(bytes: &[u8], query: &Query, page: Option<u32>, where_: &str, findings: &mut Vec<Finding>) {
     for s in pdf::scan_content_strings(bytes) {
-        let tagged = matches!(
-            s.preceding_name.as_deref(),
-            Some(b"ActualText") | Some(b"Alt")
-        );
-        if tagged {
-            findings_in(&s.value, query, Vector::MarkedContent, &format!("/ActualText in {where_}"), page, findings);
+        let key: Option<&str> = match s.preceding_name.as_deref() {
+            Some(b"ActualText") => Some("ActualText"),
+            Some(b"Alt") => Some("Alt"),
+            _ => None,
+        };
+        if let Some(key) = key {
+            findings_in(&s.value, query, Vector::MarkedContent, &format!("/{key} in {where_}"), page, findings);
         }
     }
 }
@@ -121,7 +92,7 @@ mod tests {
         let catalog = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
         doc.trailer.set("Root", catalog);
 
-        let ctx = DocContext { bytes: &[], lopdf: Some(&doc), pdfium: None };
+        let ctx = DocContext::new(&[], Some(&doc), None);
         let q = Query::literal(["Zanzibar".to_string()], false, false).unwrap();
         let f = match MarkedContent.run(&ctx, &q) {
             CheckOutcome::Ran { findings, .. } => findings,

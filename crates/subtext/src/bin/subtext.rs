@@ -7,7 +7,7 @@ use pdfium_render::prelude::Pdfium;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use subtext::report::{CheckStatus, Report, RiskTone};
-use subtext::Query;
+use subtext::{CheckOptions, Query};
 
 /// Subtext — A Redaction Checker. Report every place a term still appears
 /// across a PDF's full leak-vector inventory.
@@ -29,6 +29,20 @@ struct Cli {
     /// Whole-word matching only.
     #[arg(long)]
     whole_word: bool,
+
+    /// Password for encrypted input files (applied to every FILE given).
+    #[arg(long, value_name = "PASSWORD")]
+    password: Option<String>,
+
+    /// Recurse into embedded PDFs (attachments), scanning each with the full
+    /// vector set (depth-capped).
+    #[arg(long)]
+    recurse_embedded: bool,
+
+    /// Run the rendered-image OCR pass (recovers image-of-text). Requires a
+    /// build compiled with `--features ocr`; otherwise the pass is unavailable.
+    #[arg(long)]
+    ocr: bool,
 
     /// Emit the machine-readable JSON report instead of the human summary.
     #[arg(long)]
@@ -59,6 +73,12 @@ fn main() -> ExitCode {
         }
     };
 
+    let options = CheckOptions {
+        password: cli.password.clone(),
+        recurse_embedded: cli.recurse_embedded,
+        ocr: cli.ocr,
+    };
+
     let mut any_leak = false;
     let mut any_error = false;
     for (i, file) in cli.files.iter().enumerate() {
@@ -74,7 +94,7 @@ fn main() -> ExitCode {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| file.display().to_string());
-        let report = subtext::check_pdf(&pdfium, &bytes, &name, &query);
+        let report = subtext::check_pdf(&pdfium, &bytes, &name, &query, &options);
         if report.risk_tone == RiskTone::Leak {
             any_leak = true;
         }
@@ -186,7 +206,14 @@ fn print_human(report: &Report) {
     if !report.findings.is_empty() {
         println!("\n  Findings:");
         for f in &report.findings {
-            println!("    • {} — \"{}\"", f.location, f.matched_text);
+            // Prefix the embedded-container path (--recurse-embedded) so a hit
+            // inside an attachment names where it came from; revision-stamped
+            // findings already carry the revision in their location text.
+            let location = match &f.container {
+                Some(container) => format!("{container} · {}", f.location),
+                None => f.location.clone(),
+            };
+            println!("    • {} — \"{}\"", location, f.matched_text);
             if !f.context.is_empty() {
                 println!("        {}", f.context);
             }

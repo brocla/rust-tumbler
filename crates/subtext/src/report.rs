@@ -54,16 +54,20 @@ impl QueryReport {
     }
 }
 
-/// Why a check was skipped — the two categories are scored differently by the
-/// risk rubric (§3.3). `Unavailable` is a *per-file* blind spot (encryption, an
-/// unsupported filter, an unreadable catalog): it caps a no-match report at
-/// warning, because the term could be hiding in a place this file prevented us
-/// from inspecting. `NotImplemented` is a *tool-phase* limitation (an extractor
-/// that has not shipped yet): disclosed honestly, but it does not imply the file
-/// is suspicious, so it must not force every clean file to warning/medium.
+/// Why a check was skipped — the categories are scored differently by the
+/// risk rubric (§3.3, §14.2). `Unavailable` is a *per-file* blind spot
+/// (encryption without a password, an unsupported filter, an unreadable
+/// catalog): it caps a no-match report at warning/medium, because the term
+/// could be hiding in a place this file prevented us from inspecting.
+/// `NotRequested` means the tool *can* run the pass but the user opted out
+/// this run (`--ocr` / `--recurse-embedded` not passed): disclosed, scored
+/// low. `NotImplemented` is a *tool-phase* limitation (an extractor that has
+/// not shipped in this build): disclosed honestly, but it does not imply the
+/// file is suspicious, so it must not force every clean file to warning/medium.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkipKind {
     Unavailable,
+    NotRequested,
     NotImplemented,
 }
 
@@ -152,6 +156,11 @@ pub enum CheckStatus {
 pub enum SignalKind {
     UnappliedRedactAnnotation,
     RenderExtractMismatch,
+    /// A sub-document (a prior revision or an embedded PDF) that one or more
+    /// vectors could not inspect — e.g. an encrypted or unparseable attachment.
+    /// Its own check rows never reach this report, so this signal carries the
+    /// blind spot up so the file cannot be certified clean (§14.9).
+    SubDocumentNotInspected,
 }
 
 /// One `Vector` variant per registered `VectorCheck` (§3.1). The `checks`
@@ -189,17 +198,24 @@ impl Report {
     /// `description`. Deterministic — no judgement beyond counting.
     pub fn finalize(&mut self) {
         let total = self.checks.len();
-        let skipped = || self.checks.iter().filter(|c| c.status == CheckStatus::Skipped);
-        // A per-file blind spot: the term could hide in a place THIS file
-        // prevented us from inspecting → caps a no-match report at warning.
-        let unavailable_skips = skipped()
-            .filter(|c| c.skip_kind == Some(SkipKind::Unavailable))
-            .count();
-        // Tool-phase limitations: an extractor not yet shipped (incl. the opt-in
-        // OCR pass). Disclosed, but not evidence the file is suspicious.
-        let unbuilt_skips = skipped()
-            .filter(|c| c.skip_kind == Some(SkipKind::NotImplemented))
-            .count();
+        // Partition the skips in one pass (§14.2):
+        //  - `unavailable_skips`: a per-file blind spot (encryption, unsupported
+        //    filter, unreadable catalog) → caps a no-match report at warning.
+        //  - `declined_skips`: a pass the user opted out of this run
+        //    (--ocr / --recurse-embedded not passed). Disclosed, scored low.
+        //  - `unbuilt_skips`: a tool-phase limitation — an extractor not shipped
+        //    in this build. Disclosed, but not evidence the file is suspicious.
+        let mut unavailable_skips = 0usize;
+        let mut declined_skips = 0usize;
+        let mut unbuilt_skips = 0usize;
+        for c in &self.checks {
+            match c.skip_kind {
+                Some(SkipKind::Unavailable) => unavailable_skips += 1,
+                Some(SkipKind::NotRequested) => declined_skips += 1,
+                Some(SkipKind::NotImplemented) => unbuilt_skips += 1,
+                None => {}
+            }
+        }
         let signals = self.signals.len();
         let terms = terms_phrase(&self.query.terms);
 
@@ -232,15 +248,26 @@ impl Report {
                     "No matches for {terms} in the vectors that ran, but {reasons} — the file cannot be certified. See the skipped checks and signals below."
                 ),
             )
-        } else if unbuilt_skips > 0 {
-            // Everything this build can inspect came back clean; some vectors are
-            // not yet implemented (e.g. the opt-in OCR pass, revisions).
+        } else if unbuilt_skips > 0 || declined_skips > 0 {
+            // Everything that ran came back clean, but coverage was not full:
+            // some vectors are not built in this binary, or the user opted out
+            // of an optional pass this run. Name each cause precisely (§14.2).
+            let mut causes = Vec::new();
+            if declined_skips > 0 {
+                causes.push(format!(
+                    "{declined_skips} optional pass(es) not run this time (see the skipped checks for the flag to re-run with)"
+                ));
+            }
+            if unbuilt_skips > 0 {
+                causes.push(format!("{unbuilt_skips} vector(s) not yet implemented"));
+            }
+            let causes = causes.join(" and ");
             (
                 RiskTone::Warning,
                 RiskScore::Low,
-                format!("No matches in any inspected vector; {unbuilt_skips} vector(s) not yet implemented."),
+                format!("No matches in any inspected vector; {causes}."),
                 format!(
-                    "No matches for {terms} across every vector this build inspects. {unbuilt_skips} vector(s) are not yet implemented (e.g. the opt-in --ocr pass), so this is not a full-coverage clean — see the skipped checks below."
+                    "No matches for {terms} across every vector that ran. However, {causes}, so this is not a full-coverage clean — see the skipped checks below."
                 ),
             )
         } else {
@@ -408,6 +435,38 @@ mod tests {
         );
         assert_eq!(r.risk_tone, RiskTone::Warning);
         assert_eq!(r.risk_score, RiskScore::Low);
+    }
+
+    #[test]
+    fn only_not_requested_skips_is_low_warning() {
+        // An optional pass the user declined this run (--ocr /
+        // --recurse-embedded not passed) → Low, same bucket as NotImplemented,
+        // and the wording points at the skipped checks (§14.2).
+        let r = report_with(
+            vec![
+                check(Vector::PageText, CheckStatus::CheckedClean),
+                skip_check(Vector::Attachments, SkipKind::NotRequested),
+            ],
+            vec![],
+            vec![],
+        );
+        assert_eq!(r.risk_tone, RiskTone::Warning);
+        assert_eq!(r.risk_score, RiskScore::Low);
+        assert!(r.title.contains("optional pass"), "{}", r.title);
+    }
+
+    #[test]
+    fn not_requested_skip_does_not_mask_a_real_unavailable_skip() {
+        let r = report_with(
+            vec![
+                check(Vector::PageText, CheckStatus::CheckedClean),
+                skip_check(Vector::Attachments, SkipKind::NotRequested),
+                skip_check(Vector::Metadata, SkipKind::Unavailable),
+            ],
+            vec![],
+            vec![],
+        );
+        assert_eq!(r.risk_score, RiskScore::Medium);
     }
 
     #[test]

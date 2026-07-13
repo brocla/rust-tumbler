@@ -243,6 +243,55 @@ pub fn page_numbers(doc: &Document) -> std::collections::HashMap<ObjectId, u32> 
         .collect()
 }
 
+/// The decompressed bytes of a page's `/Contents` — a single stream, or an
+/// array of streams each returned separately (the caller concatenates or scans
+/// them). Shared by the marked-content and revision page scans.
+pub fn page_content_streams(doc: &Document, page_id: ObjectId) -> Vec<Vec<u8>> {
+    let Ok(page) = doc.get_dictionary(page_id) else { return Vec::new() };
+    let Some(contents) = page.get(b"Contents").ok().and_then(|o| resolve(doc, o)) else {
+        return Vec::new();
+    };
+    match contents {
+        Object::Stream(_) => page
+            .get(b"Contents")
+            .ok()
+            .and_then(|o| o.as_reference().ok())
+            .and_then(|id| stream_bytes(doc, id))
+            .into_iter()
+            .collect(),
+        Object::Array(parts) => parts
+            .iter()
+            .filter_map(|p| p.as_reference().ok())
+            .filter_map(|id| stream_bytes(doc, id))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Concatenated show-operator text per page (1-based page number → text), from
+/// decompressed content streams. A lopdf-only approximation of page text for
+/// contexts where pdfium is not available (e.g. scanning a superseded
+/// revision). Adjacent show strings within a page are joined, so a word split
+/// across `Tj` operators still matches; it does NOT do pdfium's full geometric
+/// reading-order reassembly, so it is a best-effort fallback, not a replacement
+/// for the `PageText` extractor.
+pub fn page_show_text(doc: &Document) -> Vec<(u32, String)> {
+    let mut out: Vec<(u32, String)> = Vec::new();
+    for (page_id, page_num) in page_numbers(doc) {
+        let mut text = String::new();
+        for bytes in page_content_streams(doc, page_id) {
+            for s in scan_content_strings(&bytes) {
+                text.push_str(&s.value);
+            }
+        }
+        if !text.is_empty() {
+            out.push((page_num, text));
+        }
+    }
+    out.sort_by_key(|(n, _)| *n);
+    out
+}
+
 /// One string operand extracted from a content stream, with the `/Name` token
 /// (if any) that immediately preceded it — enough to tell a marked-content
 /// `/ActualText (…)` from an ordinary `(…) Tj` show operator.

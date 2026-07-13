@@ -27,7 +27,7 @@ impl VectorCheck for ArticleThreads {
 
     fn run(&self, ctx: &DocContext, query: &Query) -> CheckOutcome {
         let Some(doc) = ctx.lopdf else {
-            return CheckOutcome::unavailable("lopdf could not parse this document");
+            return ctx.lopdf_unavailable();
         };
         let Some(catalog) = pdf::catalog(doc) else {
             return CheckOutcome::unavailable("document catalog could not be read");
@@ -61,7 +61,7 @@ mod tests {
         let catalog = doc.add_object(dictionary! { "Type" => "Catalog", "Threads" => vec![Object::Reference(thread)] });
         doc.trailer.set("Root", catalog);
 
-        let ctx = DocContext { bytes: &[], lopdf: Some(&doc), pdfium: None };
+        let ctx = DocContext::new(&[], Some(&doc), None);
         let q = Query::literal(["Zanzibar".to_string()], false, false).unwrap();
         let f = match ArticleThreads.run(&ctx, &q) {
             CheckOutcome::Ran { findings, .. } => findings,

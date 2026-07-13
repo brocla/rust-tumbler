@@ -3,6 +3,21 @@ mod error;
 mod state;
 mod thumbnailer_reg;
 
+/// Narrow public re-export of the OCR seam that the `subtext` companion crate
+/// links against under its `ocr` feature (redaction-checker-design.md §6.1).
+/// This is the only Tumbler code Subtext calls directly; a named re-export keeps
+/// the boundary explicit instead of exposing all of `commands`.
+pub mod ocr_api {
+    pub use crate::commands::ocr::{
+        map_words, render_page_for_ocr, OcrEngine, OcrWord, WindowsOcrEngine,
+        OCR_UNAVAILABLE_MESSAGE,
+    };
+    pub use crate::commands::text::TextRect;
+    // The `OcrEngine` trait's error type. Re-exported so a consumer can both
+    // call the trait and implement a fake for tests (its signature names this).
+    pub use crate::error::AppError;
+}
+
 use pdfium_render::prelude::*;
 use state::AppState;
 use tauri::{Emitter, Manager};

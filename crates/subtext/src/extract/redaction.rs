@@ -30,7 +30,7 @@ impl VectorCheck for RedactionAnnotations {
 
     fn run(&self, ctx: &DocContext, query: &Query) -> CheckOutcome {
         let Some(doc) = ctx.lopdf else {
-            return CheckOutcome::unavailable("lopdf could not parse this document");
+            return ctx.lopdf_unavailable();
         };
         let mut findings: Vec<Finding> = Vec::new();
         let mut signals: Vec<Signal> = Vec::new();
@@ -92,7 +92,7 @@ mod tests {
     #[test]
     fn fires_signal_and_finds_overlay_text() {
         let doc = doc_with_redact();
-        let ctx = DocContext { bytes: &[], lopdf: Some(&doc), pdfium: None };
+        let ctx = DocContext::new(&[], Some(&doc), None);
         let q = Query::literal(["Zanzibar".to_string()], false, false).unwrap();
         match RedactionAnnotations.run(&ctx, &q) {
             CheckOutcome::Ran { findings, signals } => {
@@ -107,7 +107,7 @@ mod tests {
     #[test]
     fn signal_fires_even_when_query_absent() {
         let doc = doc_with_redact();
-        let ctx = DocContext { bytes: &[], lopdf: Some(&doc), pdfium: None };
+        let ctx = DocContext::new(&[], Some(&doc), None);
         let q = Query::literal(["Nonexistent".to_string()], false, false).unwrap();
         match RedactionAnnotations.run(&ctx, &q) {
             CheckOutcome::Ran { findings, signals } => {

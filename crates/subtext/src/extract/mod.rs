@@ -7,8 +7,8 @@
 //! drift from the set of implemented extractors.
 
 use crate::query::Query;
-use crate::report::{Finding, Signal, SkipKind, Vector};
-use pdfium_render::prelude::PdfDocument;
+use crate::report::{Check, CheckStatus, CheckTone, Finding, Signal, SignalKind, SkipKind, Vector};
+use pdfium_render::prelude::{PdfDocument, Pdfium};
 
 pub mod annotations;
 pub mod article_threads;
@@ -18,10 +18,14 @@ pub mod forms;
 pub mod marked_content;
 pub mod metadata;
 pub mod optional_content;
+pub mod orphans;
 pub mod outlines;
 pub mod page_labels;
 pub mod page_text;
+pub mod raw;
 pub mod redaction;
+pub mod rendered_ocr;
+pub mod revisions;
 pub mod scripts;
 pub mod signatures;
 pub mod structure;
@@ -66,6 +70,139 @@ impl CheckOutcome {
             reason: reason.into(),
             kind: SkipKind::NotImplemented,
         }
+    }
+
+    /// A skip because the user opted out of an optional pass this run
+    /// (`--ocr` / `--recurse-embedded` not passed) — §14.2.
+    pub fn not_requested(reason: impl Into<String>) -> Self {
+        CheckOutcome::Skipped {
+            reason: reason.into(),
+            kind: SkipKind::NotRequested,
+        }
+    }
+}
+
+/// The outcome of running a set of checks against one document view: the check
+/// rows (for the report's "everything inspected" list) plus the collected
+/// findings and signals. `check_pdf` runs the full `REGISTRY`; `Revisions` and
+/// `--recurse-embedded` run [`non_recursive_checks`] against a sub-document.
+pub struct RunResult {
+    pub checks: Vec<Check>,
+    pub findings: Vec<Finding>,
+    pub signals: Vec<Signal>,
+}
+
+/// Runs each of `checks` against `ctx`, mapping every outcome to a [`Check`]
+/// row and collecting findings + signals. The single per-check code path shared
+/// by the top-level scan and every sub-scan, so a prior revision or an embedded
+/// PDF is inspected exactly as the host document is.
+pub fn run_checks(checks: &[&dyn VectorCheck], ctx: &DocContext, query: &Query) -> RunResult {
+    let mut out_checks = Vec::with_capacity(checks.len());
+    let mut findings: Vec<Finding> = Vec::new();
+    let mut signals: Vec<Signal> = Vec::new();
+
+    for check in checks {
+        let (tone, status, detail, skip_kind) = match check.run(ctx, query) {
+            CheckOutcome::Ran {
+                findings: hits,
+                signals: mut sigs,
+            } => {
+                let n_sigs = sigs.len();
+                signals.append(&mut sigs);
+                if hits.is_empty() {
+                    if n_sigs > 0 {
+                        (
+                            CheckTone::Warning,
+                            CheckStatus::CheckedClean,
+                            format!("No matches, but {n_sigs} suspicious signal(s) — see signals"),
+                            None,
+                        )
+                    } else {
+                        (CheckTone::Passed, CheckStatus::CheckedClean, "No matches".to_string(), None)
+                    }
+                } else {
+                    let detail = summarize_hits(&hits);
+                    findings.extend(hits);
+                    (CheckTone::Leak, CheckStatus::Found, detail, None)
+                }
+            }
+            CheckOutcome::Skipped { reason, kind } => {
+                (CheckTone::Skipped, CheckStatus::Skipped, reason, Some(kind))
+            }
+        };
+        out_checks.push(Check {
+            id: check.id(),
+            label: check.label(),
+            vector: check.vector(),
+            method: check.method(),
+            tone,
+            status,
+            detail,
+            skip_kind,
+        });
+    }
+    RunResult { checks: out_checks, findings, signals }
+}
+
+/// A one-line summary of a check's hits for its `detail` field, e.g.
+/// "2 matches on pages 4, 7" or "1 match".
+fn summarize_hits(hits: &[Finding]) -> String {
+    let n = hits.len();
+    let noun = if n == 1 { "match" } else { "matches" };
+    let mut pages: Vec<u32> = hits.iter().filter_map(|h| h.page).collect();
+    pages.sort_unstable();
+    pages.dedup();
+    match pages.as_slice() {
+        [] => format!("{n} {noun}"),
+        [p] => format!("{n} {noun} on page {p}"),
+        many => {
+            let list = many.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ");
+            format!("{n} {noun} on pages {list}")
+        }
+    }
+}
+
+/// The vectors that must NOT run inside a per-revision or per-embedded sub-scan:
+/// they would recurse (`Revisions`, `OrphanObjects`, `RawDecompressed` operate
+/// on the whole file's raw bytes) or are too costly to repeat (`RenderedOcr`).
+pub fn is_recursive_vector(v: Vector) -> bool {
+    matches!(
+        v,
+        Vector::RenderedOcr | Vector::Revisions | Vector::OrphanObjects | Vector::RawDecompressed
+    )
+}
+
+/// The registry entries safe to run against a sub-document (a prior revision or
+/// an embedded PDF) — everything except the recursive/expensive vectors. Built
+/// at call time so the registry list is never duplicated.
+pub fn non_recursive_checks() -> Vec<&'static dyn VectorCheck> {
+    REGISTRY
+        .iter()
+        .copied()
+        .filter(|c| !is_recursive_vector(c.vector()))
+        .collect()
+}
+
+/// Stamps every finding with the superseded-revision index it came from. Used
+/// by `Revisions` after running the shared extractors on a prior revision —
+/// matching stays inside `findings_in`, only the provenance field is set here
+/// (resolves review item AL1 without letting the query modes diverge).
+pub(crate) fn stamp_revision(findings: &mut [Finding], rev: u32) {
+    for f in findings {
+        f.revision = Some(rev);
+    }
+}
+
+/// Stamps every finding with the embedded-container path it came from. Used by
+/// `--recurse-embedded` (§14.10). A finding already stamped by a deeper level
+/// keeps its inner path as a suffix, so a doubly-nested hit reads
+/// `attachment:outer.pdf › attachment:inner.pdf`.
+pub(crate) fn stamp_container(findings: &mut [Finding], path: &str) {
+    for f in findings {
+        f.container = Some(match f.container.take() {
+            Some(inner) => format!("{path} › {inner}"),
+            None => path.to_string(),
+        });
     }
 }
 
@@ -157,6 +294,24 @@ fn ceil_char_boundary(s: &str, i: usize) -> usize {
     i
 }
 
+/// Recursion state for `--recurse-embedded` (§14.10), threaded through
+/// [`DocContext`] so an embedded PDF's own `Attachments` pass can keep
+/// recursing until the depth cap. `Copy` so a sub-context is built by value.
+#[derive(Clone, Copy)]
+pub struct Recurse<'a> {
+    /// How many embedded-PDF levels deep this context already is (0 = the
+    /// top-level file). Recursion stops at [`Recurse::DEPTH_CAP`].
+    pub depth: u32,
+    /// Hashes of embedded-PDF bytes already scanned this run — guards cyclic
+    /// or duplicated (zip-bomb-style) attachments.
+    pub visited: &'a std::cell::RefCell<std::collections::HashSet<u64>>,
+}
+
+impl Recurse<'_> {
+    /// Maximum embedded-PDF nesting depth inspected (§14.10).
+    pub const DEPTH_CAP: u32 = 3;
+}
+
 /// Everything a check needs to inspect one document. The two parser views are
 /// each `Option`: a file may parse under pdfium but not lopdf (a recovered
 /// corrupt xref) or vice versa, so a check that needs a view it doesn't have
@@ -172,6 +327,121 @@ pub struct DocContext<'a, 'p> {
     /// scope than the binding lives — `PdfDocument<'p>` is invariant in `'p`, and
     /// collapsing the two lifetimes would pin `'a` to the whole process.
     pub pdfium: Option<&'a PdfDocument<'p>>,
+    /// The process-wide `Pdfium` binding itself, for checks that must load a
+    /// *sub*-document (an embedded PDF under `--recurse-embedded`). `None` in
+    /// contexts that cannot recurse (most unit tests).
+    pub pdfium_lib: Option<&'p Pdfium>,
+    /// True when the file carries `/Encrypt` — even if a view decrypted it.
+    /// The raw-byte passes (`Revisions`, `OrphanObjects`) skip on this: the
+    /// bytes they scan are ciphertext, so "no matches" there would be a lie.
+    pub encrypted: bool,
+    /// Why `lopdf` is `None`, when it is (e.g. "encrypted — supply
+    /// --password"). Checks report it via [`DocContext::lopdf_unavailable`].
+    pub lopdf_reason: &'static str,
+    /// Why `pdfium` is `None`, when it is.
+    pub pdfium_reason: &'static str,
+    /// `Some` when `--recurse-embedded` is active for this run.
+    pub recurse: Option<Recurse<'a>>,
+    /// True when `--ocr` was requested this run. Read by `RenderedOcr` to tell
+    /// `NotRequested` (opt-out) from a run; the `ocr` feature must also be
+    /// compiled for the pass to exist at all (§14.2, §14.8).
+    pub ocr_requested: bool,
+}
+
+impl<'a, 'p> DocContext<'a, 'p> {
+    /// A context over the given views with every Phase-3 option off — the
+    /// shape almost every unit test needs.
+    pub fn new(
+        bytes: &'a [u8],
+        lopdf: Option<&'a lopdf::Document>,
+        pdfium: Option<&'a PdfDocument<'p>>,
+    ) -> Self {
+        DocContext {
+            bytes,
+            lopdf,
+            pdfium,
+            pdfium_lib: None,
+            encrypted: false,
+            lopdf_reason: "lopdf could not parse this document",
+            pdfium_reason: "pdfium could not load this document",
+            recurse: None,
+            ocr_requested: false,
+        }
+    }
+
+    /// The skip a structural check returns when it needs the lopdf view and
+    /// this context doesn't have one. Centralized so the reason can name the
+    /// actual blocker (a parse failure vs. encryption without a password).
+    pub fn lopdf_unavailable(&self) -> CheckOutcome {
+        CheckOutcome::unavailable(self.lopdf_reason)
+    }
+
+    /// The skip a pdfium-backed check returns when the pdfium view is absent.
+    pub fn pdfium_unavailable(&self) -> CheckOutcome {
+        CheckOutcome::unavailable(self.pdfium_reason)
+    }
+}
+
+/// The lopdf structural view plus what loading it revealed about encryption.
+/// Produced by [`load_lopdf_view`] and consumed by both the top-level scan
+/// (`check_pdf`) and the embedded-PDF sub-scan (`recurse_embedded`), so an
+/// encrypted document is handled identically wherever it appears.
+pub(crate) struct LopdfView {
+    /// The view to scan, or `None` when the file is encrypted and could not be
+    /// decrypted (every string/stream would be ciphertext).
+    pub doc: Option<lopdf::Document>,
+    /// True when the file declares encryption, whether or not it decrypted.
+    pub encrypted: bool,
+}
+
+/// Loads the lopdf view and decides whether it is safe to scan (§14.9).
+///
+/// lopdf's loader returns `Ok` even for an encrypted PDF it cannot
+/// authenticate, leaving `/Encrypt` in the trailer and every string/stream as
+/// CIPHERTEXT. Scanning that would report honest-looking "no matches" over
+/// unreadable bytes, so this discards such a view (`doc = None`) and flags the
+/// file encrypted; the checks then skip with an encryption reason rather than
+/// false-clean. With a `password` it decrypts during parse (a post-hoc decrypt
+/// can't read the encrypted object streams); without one, `load_mem` still
+/// auto-unlocks an empty user password.
+pub(crate) fn load_lopdf_view(bytes: &[u8], password: Option<&str>) -> LopdfView {
+    let loaded = match password {
+        Some(pw) => {
+            lopdf::Document::load_mem_with_options(bytes, lopdf::LoadOptions::with_password(pw))
+        }
+        None => lopdf::Document::load_mem(bytes),
+    }
+    .ok();
+
+    let undecrypted = loaded
+        .as_ref()
+        .is_some_and(|d| d.trailer.get(b"Encrypt").is_ok());
+    let doc = if undecrypted { None } else { loaded };
+    let encrypted = undecrypted
+        || match doc.as_ref() {
+            Some(d) => d.encryption_state.is_some(),
+            // Nothing parsed at all — fall back to the raw bytes.
+            None => bytes.windows(8).any(|w| w == b"/Encrypt"),
+        };
+    LopdfView { doc, encrypted }
+}
+
+/// Builds a [`SignalKind::SubDocumentNotInspected`] signal when one or more
+/// vectors returned `Unavailable` while scanning a sub-document (a prior
+/// revision or an embedded PDF), so a partly- or wholly-unreadable
+/// sub-document is disclosed rather than silently counted clean (§14.9). The
+/// sub-scan's own check rows never reach the top-level report, so this signal
+/// is how a sub-document blind spot reaches `finalize`'s warning cap.
+pub(crate) fn sub_document_signal(location: &str, checks: &[Check]) -> Option<Signal> {
+    let n = checks
+        .iter()
+        .filter(|c| c.skip_kind == Some(SkipKind::Unavailable))
+        .count();
+    (n > 0).then(|| Signal {
+        kind: SignalKind::SubDocumentNotInspected,
+        location: location.to_string(),
+        detail: format!("{n} vector(s) could not be inspected in this sub-document"),
+    })
 }
 
 /// One registered extractor. Object-safe so the registry is a slice of
@@ -189,49 +459,12 @@ pub trait VectorCheck: Sync {
     fn run(&self, ctx: &DocContext, query: &Query) -> CheckOutcome;
 }
 
-/// A placeholder for a vector whose extractor has not landed yet. It always
-/// `Skipped`s with an honest reason, so the checks list stays complete (all 21
-/// vectors present) while later phases fill them in. Keeps the report honest:
-/// an un-implemented vector reads as "not inspected", never as clean.
-pub struct Pending {
-    pub id: &'static str,
-    pub label: &'static str,
-    pub vector: Vector,
-    pub method: &'static str,
-    /// Which phase lands this extractor (for the skip message).
-    pub phase: &'static str,
-}
-
-impl VectorCheck for Pending {
-    fn id(&self) -> &'static str {
-        self.id
-    }
-    fn label(&self) -> &'static str {
-        self.label
-    }
-    fn vector(&self) -> Vector {
-        self.vector
-    }
-    fn method(&self) -> &'static str {
-        self.method
-    }
-    fn run(&self, _ctx: &DocContext, _query: &Query) -> CheckOutcome {
-        CheckOutcome::not_implemented(format!("extractor not yet implemented ({})", self.phase))
-    }
-}
-
 /// The frozen registry (spec §4.1) — one entry per `Vector` variant, in report
-/// order. Phase 1 implements `PageText`; the rest are `Pending` until their
-/// phase. The report's checks list is built by iterating this slice.
+/// order. All 21 extractors are implemented; the report's checks list is built
+/// by iterating this slice, so it can never drift from the set of vectors.
 pub static REGISTRY: &[&dyn VectorCheck] = &[
     &page_text::PageText,
-    &Pending {
-        id: "rendered_ocr",
-        label: "Rendered-image OCR",
-        vector: Vector::RenderedOcr,
-        method: "OCR engine (feature \"ocr\")",
-        phase: "Phase 3, opt-in --ocr",
-    },
+    &rendered_ocr::RenderedOcr,
     &metadata::Metadata,
     &structure::StructureTree,
     &marked_content::MarkedContent,
@@ -248,27 +481,9 @@ pub static REGISTRY: &[&dyn VectorCheck] = &[
     &uris::Uris,
     &optional_content::OptionalContent,
     &signatures::Signatures,
-    &Pending {
-        id: "revisions",
-        label: "Superseded revisions",
-        vector: Vector::Revisions,
-        method: "per-revision reparse",
-        phase: "Phase 3",
-    },
-    &Pending {
-        id: "orphan_objects",
-        label: "Orphaned objects",
-        vector: Vector::OrphanObjects,
-        method: "N N obj + ObjStm brute-scan",
-        phase: "Phase 3",
-    },
-    &Pending {
-        id: "raw_decompressed",
-        label: "Raw decompressed scan",
-        vector: Vector::RawDecompressed,
-        method: "inflate-all + scan",
-        phase: "Phase 3",
-    },
+    &revisions::Revisions,
+    &orphans::OrphanObjects,
+    &raw::RawDecompressed,
 ];
 
 #[cfg(test)]
