@@ -38,6 +38,10 @@ pub struct CheckOptions {
     pub password: Option<String>,
     /// Recurse into embedded PDFs (`--recurse-embedded`), depth-capped.
     pub recurse_embedded: bool,
+    /// Run the rendered-image OCR pass (`--ocr`). Only has an effect in a build
+    /// compiled with the `ocr` feature; otherwise `RenderedOcr` stays a
+    /// `NotImplemented` stub (§14.2, §14.8).
+    pub ocr: bool,
 }
 
 /// Runs the full vector inventory against one PDF and returns its report.
@@ -91,6 +95,7 @@ pub fn check_pdf(
         let mut ctx = DocContext::new(bytes, lopdf_doc.as_ref(), pdfium_doc.as_ref());
         ctx.pdfium_lib = Some(pdfium);
         ctx.encrypted = encrypted;
+        ctx.ocr_requested = options.ocr;
         if encrypted {
             if ctx.lopdf.is_none() {
                 ctx.lopdf_reason = encrypted_reason;

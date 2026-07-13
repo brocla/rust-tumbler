@@ -24,6 +24,7 @@ pub mod page_labels;
 pub mod page_text;
 pub mod raw;
 pub mod redaction;
+pub mod rendered_ocr;
 pub mod revisions;
 pub mod scripts;
 pub mod signatures;
@@ -341,6 +342,10 @@ pub struct DocContext<'a, 'p> {
     pub pdfium_reason: &'static str,
     /// `Some` when `--recurse-embedded` is active for this run.
     pub recurse: Option<Recurse<'a>>,
+    /// True when `--ocr` was requested this run. Read by `RenderedOcr` to tell
+    /// `NotRequested` (opt-out) from a run; the `ocr` feature must also be
+    /// compiled for the pass to exist at all (§14.2, §14.8).
+    pub ocr_requested: bool,
 }
 
 impl<'a, 'p> DocContext<'a, 'p> {
@@ -360,6 +365,7 @@ impl<'a, 'p> DocContext<'a, 'p> {
             lopdf_reason: "lopdf could not parse this document",
             pdfium_reason: "pdfium could not load this document",
             recurse: None,
+            ocr_requested: false,
         }
     }
 
@@ -453,49 +459,12 @@ pub trait VectorCheck: Sync {
     fn run(&self, ctx: &DocContext, query: &Query) -> CheckOutcome;
 }
 
-/// A placeholder for a vector whose extractor has not landed yet. It always
-/// `Skipped`s with an honest reason, so the checks list stays complete (all 21
-/// vectors present) while later phases fill them in. Keeps the report honest:
-/// an un-implemented vector reads as "not inspected", never as clean.
-pub struct Pending {
-    pub id: &'static str,
-    pub label: &'static str,
-    pub vector: Vector,
-    pub method: &'static str,
-    /// Which phase lands this extractor (for the skip message).
-    pub phase: &'static str,
-}
-
-impl VectorCheck for Pending {
-    fn id(&self) -> &'static str {
-        self.id
-    }
-    fn label(&self) -> &'static str {
-        self.label
-    }
-    fn vector(&self) -> Vector {
-        self.vector
-    }
-    fn method(&self) -> &'static str {
-        self.method
-    }
-    fn run(&self, _ctx: &DocContext, _query: &Query) -> CheckOutcome {
-        CheckOutcome::not_implemented(format!("extractor not yet implemented ({})", self.phase))
-    }
-}
-
 /// The frozen registry (spec §4.1) — one entry per `Vector` variant, in report
-/// order. Phase 1 implements `PageText`; the rest are `Pending` until their
-/// phase. The report's checks list is built by iterating this slice.
+/// order. All 21 extractors are implemented; the report's checks list is built
+/// by iterating this slice, so it can never drift from the set of vectors.
 pub static REGISTRY: &[&dyn VectorCheck] = &[
     &page_text::PageText,
-    &Pending {
-        id: "rendered_ocr",
-        label: "Rendered-image OCR",
-        vector: Vector::RenderedOcr,
-        method: "OCR engine (feature \"ocr\")",
-        phase: "Phase 3, opt-in --ocr",
-    },
+    &rendered_ocr::RenderedOcr,
     &metadata::Metadata,
     &structure::StructureTree,
     &marked_content::MarkedContent,

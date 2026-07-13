@@ -39,6 +39,11 @@ struct Cli {
     #[arg(long)]
     recurse_embedded: bool,
 
+    /// Run the rendered-image OCR pass (recovers image-of-text). Requires a
+    /// build compiled with `--features ocr`; otherwise the pass is unavailable.
+    #[arg(long)]
+    ocr: bool,
+
     /// Emit the machine-readable JSON report instead of the human summary.
     #[arg(long)]
     json: bool,
@@ -71,6 +76,7 @@ fn main() -> ExitCode {
     let options = CheckOptions {
         password: cli.password.clone(),
         recurse_embedded: cli.recurse_embedded,
+        ocr: cli.ocr,
     };
 
     let mut any_leak = false;
