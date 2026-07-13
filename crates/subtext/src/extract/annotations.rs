@@ -30,7 +30,7 @@ impl VectorCheck for Annotations {
 
     fn run(&self, ctx: &DocContext, query: &Query) -> CheckOutcome {
         let Some(doc) = ctx.lopdf else {
-            return CheckOutcome::unavailable("lopdf could not parse this document");
+            return ctx.lopdf_unavailable();
         };
         let mut findings = Vec::new();
         let page_nums = pdf::page_numbers(doc);
@@ -122,7 +122,7 @@ mod tests {
     }
 
     fn run(doc: &Document, term: &str) -> Vec<Finding> {
-        let ctx = DocContext { bytes: &[], lopdf: Some(doc), pdfium: None };
+        let ctx = DocContext::new(&[], Some(doc), None);
         let q = Query::literal([term.to_string()], false, false).unwrap();
         match Annotations.run(&ctx, &q) {
             CheckOutcome::Ran { findings, .. } => findings,

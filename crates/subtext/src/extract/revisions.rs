@@ -40,6 +40,15 @@ impl VectorCheck for Revisions {
     }
 
     fn run(&self, ctx: &DocContext, query: &Query) -> CheckOutcome {
+        // An encrypted file's prior revisions are ciphertext in the raw bytes
+        // (string/stream decryption keys are per-object); reporting "no
+        // matches" over bytes we cannot read would be a lie (§14.9).
+        if ctx.encrypted {
+            return CheckOutcome::unavailable(
+                "file is encrypted — the raw-byte revision scan sees only ciphertext",
+            );
+        }
+
         // A linearized file's early %%EOF is not a prior revision — skip it so we
         // don't manufacture a phantom "prior revision" from the first-page xref.
         if ctx.lopdf.map(is_linearized).unwrap_or(false) {
@@ -61,7 +70,7 @@ impl VectorCheck for Revisions {
             let rev = (rev_index + 1) as u32;
 
             // Structural vectors on the prior revision (Info, XMP, annots, …).
-            let sub_ctx = DocContext { bytes: prefix, lopdf: Some(&prior), pdfium: None };
+            let sub_ctx = DocContext::new(prefix, Some(&prior), None);
             let mut sub = run_checks(&sub_checks, &sub_ctx, query);
             stamp_revision(&mut sub.findings, rev);
             findings.append(&mut sub.findings);

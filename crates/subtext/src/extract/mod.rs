@@ -8,7 +8,7 @@
 
 use crate::query::Query;
 use crate::report::{Check, CheckStatus, CheckTone, Finding, Signal, SkipKind, Vector};
-use pdfium_render::prelude::PdfDocument;
+use pdfium_render::prelude::{PdfDocument, Pdfium};
 
 pub mod annotations;
 pub mod article_threads;
@@ -68,6 +68,15 @@ impl CheckOutcome {
         CheckOutcome::Skipped {
             reason: reason.into(),
             kind: SkipKind::NotImplemented,
+        }
+    }
+
+    /// A skip because the user opted out of an optional pass this run
+    /// (`--ocr` / `--recurse-embedded` not passed) — §14.2.
+    pub fn not_requested(reason: impl Into<String>) -> Self {
+        CheckOutcome::Skipped {
+            reason: reason.into(),
+            kind: SkipKind::NotRequested,
         }
     }
 }
@@ -184,11 +193,15 @@ pub(crate) fn stamp_revision(findings: &mut [Finding], rev: u32) {
 }
 
 /// Stamps every finding with the embedded-container path it came from. Used by
-/// `--recurse-embedded` (§14.10).
-#[allow(dead_code)] // wired in §14.10
+/// `--recurse-embedded` (§14.10). A finding already stamped by a deeper level
+/// keeps its inner path as a suffix, so a doubly-nested hit reads
+/// `attachment:outer.pdf › attachment:inner.pdf`.
 pub(crate) fn stamp_container(findings: &mut [Finding], path: &str) {
     for f in findings {
-        f.container = Some(path.to_string());
+        f.container = Some(match f.container.take() {
+            Some(inner) => format!("{path} › {inner}"),
+            None => path.to_string(),
+        });
     }
 }
 
@@ -280,6 +293,24 @@ fn ceil_char_boundary(s: &str, i: usize) -> usize {
     i
 }
 
+/// Recursion state for `--recurse-embedded` (§14.10), threaded through
+/// [`DocContext`] so an embedded PDF's own `Attachments` pass can keep
+/// recursing until the depth cap. `Copy` so a sub-context is built by value.
+#[derive(Clone, Copy)]
+pub struct Recurse<'a> {
+    /// How many embedded-PDF levels deep this context already is (0 = the
+    /// top-level file). Recursion stops at [`Recurse::DEPTH_CAP`].
+    pub depth: u32,
+    /// Hashes of embedded-PDF bytes already scanned this run — guards cyclic
+    /// or duplicated (zip-bomb-style) attachments.
+    pub visited: &'a std::cell::RefCell<std::collections::HashSet<u64>>,
+}
+
+impl Recurse<'_> {
+    /// Maximum embedded-PDF nesting depth inspected (§14.10).
+    pub const DEPTH_CAP: u32 = 3;
+}
+
 /// Everything a check needs to inspect one document. The two parser views are
 /// each `Option`: a file may parse under pdfium but not lopdf (a recovered
 /// corrupt xref) or vice versa, so a check that needs a view it doesn't have
@@ -295,6 +326,54 @@ pub struct DocContext<'a, 'p> {
     /// scope than the binding lives — `PdfDocument<'p>` is invariant in `'p`, and
     /// collapsing the two lifetimes would pin `'a` to the whole process.
     pub pdfium: Option<&'a PdfDocument<'p>>,
+    /// The process-wide `Pdfium` binding itself, for checks that must load a
+    /// *sub*-document (an embedded PDF under `--recurse-embedded`). `None` in
+    /// contexts that cannot recurse (most unit tests).
+    pub pdfium_lib: Option<&'p Pdfium>,
+    /// True when the file carries `/Encrypt` — even if a view decrypted it.
+    /// The raw-byte passes (`Revisions`, `OrphanObjects`) skip on this: the
+    /// bytes they scan are ciphertext, so "no matches" there would be a lie.
+    pub encrypted: bool,
+    /// Why `lopdf` is `None`, when it is (e.g. "encrypted — supply
+    /// --password"). Checks report it via [`DocContext::lopdf_unavailable`].
+    pub lopdf_reason: &'static str,
+    /// Why `pdfium` is `None`, when it is.
+    pub pdfium_reason: &'static str,
+    /// `Some` when `--recurse-embedded` is active for this run.
+    pub recurse: Option<Recurse<'a>>,
+}
+
+impl<'a, 'p> DocContext<'a, 'p> {
+    /// A context over the given views with every Phase-3 option off — the
+    /// shape almost every unit test needs.
+    pub fn new(
+        bytes: &'a [u8],
+        lopdf: Option<&'a lopdf::Document>,
+        pdfium: Option<&'a PdfDocument<'p>>,
+    ) -> Self {
+        DocContext {
+            bytes,
+            lopdf,
+            pdfium,
+            pdfium_lib: None,
+            encrypted: false,
+            lopdf_reason: "lopdf could not parse this document",
+            pdfium_reason: "pdfium could not load this document",
+            recurse: None,
+        }
+    }
+
+    /// The skip a structural check returns when it needs the lopdf view and
+    /// this context doesn't have one. Centralized so the reason can name the
+    /// actual blocker (a parse failure vs. encryption without a password).
+    pub fn lopdf_unavailable(&self) -> CheckOutcome {
+        CheckOutcome::unavailable(self.lopdf_reason)
+    }
+
+    /// The skip a pdfium-backed check returns when the pdfium view is absent.
+    pub fn pdfium_unavailable(&self) -> CheckOutcome {
+        CheckOutcome::unavailable(self.pdfium_reason)
+    }
 }
 
 /// One registered extractor. Object-safe so the registry is a slice of

@@ -38,9 +38,7 @@ impl VectorCheck for PageText {
 
     fn run(&self, ctx: &DocContext, query: &Query) -> CheckOutcome {
         let Some(doc) = ctx.pdfium else {
-            return CheckOutcome::unavailable(
-                "pdfium could not load this document (needed for text extraction)",
-            );
+            return ctx.pdfium_unavailable();
         };
         CheckOutcome::ran(find_in_pages(doc, query))
     }

@@ -26,7 +26,7 @@ impl VectorCheck for Metadata {
 
     fn run(&self, ctx: &DocContext, query: &Query) -> CheckOutcome {
         let Some(doc) = ctx.lopdf else {
-            return CheckOutcome::unavailable("lopdf could not parse this document (needed for metadata)");
+            return ctx.lopdf_unavailable();
         };
         let mut findings = Vec::new();
 
@@ -108,7 +108,7 @@ mod tests {
     use lopdf::{dictionary, Document, Object, Stream};
 
     fn run(doc: &Document, term: &str) -> Vec<Finding> {
-        let ctx = DocContext { bytes: &[], lopdf: Some(doc), pdfium: None };
+        let ctx = DocContext::new(&[], Some(doc), None);
         let q = Query::literal([term.to_string()], false, false).unwrap();
         match Metadata.run(&ctx, &q) {
             CheckOutcome::Ran { findings, .. } => findings,

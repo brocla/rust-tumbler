@@ -35,7 +35,7 @@ impl VectorCheck for RawDecompressed {
 
     fn run(&self, ctx: &DocContext, query: &Query) -> CheckOutcome {
         let Some(doc) = ctx.lopdf else {
-            return CheckOutcome::unavailable("lopdf could not parse this document");
+            return ctx.lopdf_unavailable();
         };
         let mut findings: Vec<Finding> = Vec::new();
 
@@ -87,7 +87,7 @@ mod tests {
     use lopdf::{dictionary, Document, Stream};
 
     fn run(doc: &Document, term: &str) -> Vec<Finding> {
-        let ctx = DocContext { bytes: &[], lopdf: Some(doc), pdfium: None };
+        let ctx = DocContext::new(&[], Some(doc), None);
         let q = Query::literal([term.to_string()], false, false).unwrap();
         match RawDecompressed.run(&ctx, &q) {
             CheckOutcome::Ran { findings, .. } => findings,

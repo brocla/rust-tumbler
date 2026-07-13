@@ -30,7 +30,7 @@ impl VectorCheck for StructureTree {
 
     fn run(&self, ctx: &DocContext, query: &Query) -> CheckOutcome {
         let Some(doc) = ctx.lopdf else {
-            return CheckOutcome::unavailable("lopdf could not parse this document");
+            return ctx.lopdf_unavailable();
         };
         let Some(catalog) = pdf::catalog(doc) else {
             return CheckOutcome::unavailable("document catalog could not be read");
@@ -80,7 +80,7 @@ mod tests {
     use lopdf::dictionary;
 
     fn run(doc: &Document, term: &str) -> Vec<Finding> {
-        let ctx = DocContext { bytes: &[], lopdf: Some(doc), pdfium: None };
+        let ctx = DocContext::new(&[], Some(doc), None);
         let q = Query::literal([term.to_string()], false, false).unwrap();
         match StructureTree.run(&ctx, &q) {
             CheckOutcome::Ran { findings, .. } => findings,

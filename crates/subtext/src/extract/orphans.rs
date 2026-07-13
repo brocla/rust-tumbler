@@ -37,8 +37,15 @@ impl VectorCheck for OrphanObjects {
     }
 
     fn run(&self, ctx: &DocContext, query: &Query) -> CheckOutcome {
+        // An orphan's strings/streams in an encrypted file are ciphertext in
+        // the raw bytes; scanning them would false-clean (§14.9).
+        if ctx.encrypted {
+            return CheckOutcome::unavailable(
+                "file is encrypted — the raw-byte orphan scan sees only ciphertext",
+            );
+        }
         let Some(doc) = ctx.lopdf else {
-            return CheckOutcome::unavailable("lopdf could not parse this document");
+            return ctx.lopdf_unavailable();
         };
         let bytes = ctx.bytes;
         let re = Regex::new(r"(?m)(\d+)[ \t\r\n]+(\d+)[ \t\r\n]+obj").expect("valid regex");
@@ -105,7 +112,7 @@ mod tests {
         // Object 99 0 is not in doc.objects — it's an orphan in the raw bytes.
         let raw = b"%PDF-1.5\n99 0 obj\n(Zanzibar orphan)\nendobj\n%%EOF";
 
-        let ctx = DocContext { bytes: raw, lopdf: Some(&doc), pdfium: None };
+        let ctx = DocContext::new(raw, Some(&doc), None);
         let q = Query::literal(["Zanzibar".to_string()], false, false).unwrap();
         let f = match OrphanObjects.run(&ctx, &q) {
             CheckOutcome::Ran { findings, .. } => findings,
@@ -125,7 +132,7 @@ mod tests {
         doc.trailer.set("Root", catalog);
         let raw = format!("{} {} obj (Zanzibar current) endobj", id.0, id.1);
 
-        let ctx = DocContext { bytes: raw.as_bytes(), lopdf: Some(&doc), pdfium: None };
+        let ctx = DocContext::new(raw.as_bytes(), Some(&doc), None);
         let q = Query::literal(["Zanzibar".to_string()], false, false).unwrap();
         let f = match OrphanObjects.run(&ctx, &q) {
             CheckOutcome::Ran { findings, .. } => findings,
