@@ -8,6 +8,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Subtext — A Redaction Checker: read-only, tool-agnostic detection of redacted text that is still recoverable from a PDF."
 license = "MIT"
+readme = "README.md"
 
 [dependencies]
 # lopdf mirrors Tumbler's pin: 0.43.0's default `time` feature has a compile
