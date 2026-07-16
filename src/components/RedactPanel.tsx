@@ -92,6 +92,12 @@ export function RedactPanel() {
   if (!activeTab) return null;
   const docId = activeTab.docId;
   const regions = activeTab.redactRegions ?? [];
+  const metadataMatches = activeTab.redactMetadataMatches ?? [];
+  // Apply is enabled whenever a keyword redaction has been armed — a recorded
+  // "redact all" query — or there are page regions, even with no located hit:
+  // the wholesale underneath-scrub removes a keyword hiding in a vector the
+  // finder never searches (issue #87). Verify still gates Save As.
+  const canApply = regions.length > 0 || (activeTab.redactQueries?.length ?? 0) > 0;
 
   const handleFind = async () => {
     if (!query.trim()) return;
@@ -106,20 +112,35 @@ export function RedactPanel() {
       setFindCount(found.length);
       if (found.length > 0) {
         addRedactRegions(docId, found);
-        // Remember the query so verification can assert zero hits for it in
-        // the saved output — but only for a plain substring search. A
-        // match-case / whole-word / regex find deliberately marks a *subset*
-        // of occurrences, and the output check (a case-insensitive literal
-        // search) would flag the intentionally-kept ones as leaks and block
-        // the save.
-        const plainSearch = !matchCase && !wholeWord && !useRegex;
-        const queries = activeTab.redactQueries ?? [];
-        if (plainSearch && !queries.includes(query)) {
-          updateTab(activeTab.id, { redactQueries: [...queries, query] });
-        }
-        setResult(null);
-        setSaved(false);
       }
+
+      // A plain substring find drives the keyword redaction: remember the
+      // query so verification asserts zero hits for it, and search the visible
+      // metadata so a keyword that lives only there still redacts (issue #87).
+      // A match-case / whole-word / regex find deliberately marks a *subset* of
+      // occurrences; the output check (a case-insensitive literal search) would
+      // flag the intentionally-kept ones as leaks, so it does not become a
+      // verify query and does not enable the metadata path.
+      const plainSearch = !matchCase && !wholeWord && !useRegex;
+      const tabPatch: Partial<typeof activeTab> = {};
+      if (plainSearch) {
+        const queries = activeTab.redactQueries ?? [];
+        if (!queries.includes(query)) tabPatch.redactQueries = [...queries, query];
+        try {
+          tabPatch.redactMetadataMatches = await invoke<string[]>(
+            "find_redaction_metadata_matches",
+            { docId, queries: [query] },
+          );
+        } catch {
+          // A metadata read failure must not block a page redaction; the
+          // wholesale underneath-scrub still runs on Apply.
+          tabPatch.redactMetadataMatches = [];
+        }
+      }
+      if (Object.keys(tabPatch).length > 0) updateTab(activeTab.id, tabPatch);
+
+      setResult(null);
+      setSaved(false);
     } catch (err) {
       await message(String(err), { title: "Find Failed", kind: "error" });
     }
@@ -138,7 +159,7 @@ export function RedactPanel() {
   };
 
   const handleApply = async () => {
-    if (regions.length === 0) return;
+    if (!canApply) return;
     setRunning(true);
     setSaved(false);
     try {
@@ -244,9 +265,16 @@ export function RedactPanel() {
       </div>
       {findCount !== null && (
         <div className="redact-find-count">
-          {findCount === 0
-            ? "No matches found."
-            : `${findCount} occurrence${findCount === 1 ? "" : "s"} marked.`}
+          {findCount > 0
+            ? `${findCount} occurrence${findCount === 1 ? "" : "s"} marked.`
+            : metadataMatches.length > 0
+              ? "No page matches — metadata only."
+              : "No visible matches — Apply still scrubs hidden metadata."}
+          {metadataMatches.length > 0 && (
+            <div className="redact-metadata-match">
+              Found in: {metadataMatches.join(", ")} metadata.
+            </div>
+          )}
         </div>
       )}
 
@@ -324,7 +352,7 @@ export function RedactPanel() {
         <button
           className="redact-apply-button"
           onClick={handleApply}
-          disabled={running || regions.length === 0}
+          disabled={running || !canApply}
         >
           {running ? "Applying…" : "Apply redactions"}
         </button>

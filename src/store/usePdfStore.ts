@@ -70,6 +70,10 @@ export interface TabState {
   // Queries used by "find & redact all" — passed to apply_redactions so
   // verification can assert the saved output has zero hits for them.
   redactQueries?: string[];
+  // Visible metadata-panel fields the last "find & redact all" query hit
+  // (issue #87) — drives the "Found in: Author" summary. Regions can be empty
+  // while this is not, when the keyword lives only in metadata.
+  redactMetadataMatches?: string[];
   // Non-null after Apply: the viewer previews the staged redacted copy
   // (rendered via render_redacted_page — the buffer is untouched) and shows
   // the preview banner. `verified` gates Save As.
@@ -284,7 +288,9 @@ export const usePdfStore = create<PdfStore>((set, get) => ({
   clearRedactRegions: (docId) =>
     set((state) => ({
       tabs: state.tabs.map((t) =>
-        t.docId === docId ? { ...t, redactRegions: [], redactQueries: [] } : t,
+        t.docId === docId
+          ? { ...t, redactRegions: [], redactQueries: [], redactMetadataMatches: [] }
+          : t,
       ),
     })),
 
