@@ -483,15 +483,20 @@ fn scrub_acroform(doc: &mut Document) {
     }
 }
 
-/// Clears the editable Info fields (`/Title`, `/Author`, `/Subject`,
-/// `/Keywords`, `/Creator`) whose value contains one of the redaction
-/// `queries`, keeping the rest, and wipes the entire Info dictionary when there
-/// are no queries (a pure page redaction) — the metadata half of issue #87.
+/// Clears every Info field whose value contains one of the redaction `queries`,
+/// keeping the rest, and wipes the entire Info dictionary when there are no
+/// queries (a pure page redaction) — the metadata half of issue #87.
 /// Case-insensitive substring match, matching the finder and the verifier.
 ///
-/// The keyword redaction is *surgical* on the visible Info fields (a clean Title
-/// or the dates survive) but *wholesale* on everything underneath, where hidden
-/// duplicates lurk and the niceties aren't worth saving.
+/// The scrub covers **all** Info keys, not just the panel-editable five: the
+/// keyword can sit in `/Producer`, a date, or a custom key just as easily as in
+/// `/Author`, and [`verify_scrub_postconditions`] fails closed on *any*
+/// surviving occurrence — so scrubbing only the editable fields would leave a
+/// keyword in, say, `/Producer = "Adobe Acrobat"` that the verifier then
+/// (rightly) refuses to certify, permanently blocking Save As. The
+/// `REDACTABLE_INFO_FIELDS` list is a UI concept (which visible field to report
+/// a hit in); the scrub itself is thorough, so a clean Title or a non-matching
+/// date survives while the keyword is gone from every field.
 fn scrub_info_fields(doc: &mut Document, queries: &[String]) {
     let needles: Vec<String> = queries
         .iter()
@@ -522,21 +527,21 @@ fn scrub_info_fields(doc: &mut Document, queries: &[String]) {
         return;
     };
 
-    let to_clear: Vec<&str> = crate::commands::metadata::REDACTABLE_INFO_FIELDS
+    let to_clear: Vec<Vec<u8>> = info
         .iter()
-        .filter(|field| {
-            info.get(field.as_bytes())
+        .filter(|(_, value)| {
+            value
+                .as_str()
                 .ok()
-                .and_then(|o| o.as_str().ok())
                 .map(|raw| crate::commands::metadata::decode_pdf_text_string(raw).to_lowercase())
                 .is_some_and(|value| needles.iter().any(|n| value.contains(n)))
         })
-        .copied()
+        .map(|(key, _)| key.to_vec())
         .collect();
 
     if let Ok(dict) = doc.get_dictionary_mut(info_id) {
-        for field in to_clear {
-            dict.remove(field.as_bytes());
+        for field in &to_clear {
+            dict.remove(field);
         }
     }
 }
@@ -1560,6 +1565,54 @@ mod tests {
         assert!(
             !out.windows(needle.len()).any(|w| w == needle),
             "the author's name must not survive anywhere in the output bytes"
+        );
+    }
+
+    /// Issue #87 regression: a keyword in a **non-panel-editable** Info field —
+    /// `/Producer`, the near-universal one — must be cleared too. The scrub
+    /// covers every Info key, so verify (which fails closed on *any* surviving
+    /// occurrence) certifies instead of permanently blocking Save As.
+    #[test]
+    fn keyword_in_producer_is_cleared_and_verifies() {
+        let _guard = crate::test_pdfium_guard();
+        let pdfium = crate::test_pdfium();
+        let bytes = text_pdf_with_info(
+            &["nothing sensitive on the page"],
+            &[
+                ("Producer", "Adobe Acrobat Pro"),
+                ("Title", "Quarterly Review"),
+            ],
+        );
+
+        let (result, output) = apply_redactions_impl(
+            &no_progress,
+            pdfium,
+            &bytes,
+            &[], // no page regions — the keyword is only in /Producer
+            &["Acrobat".to_string()],
+            150.0,
+            &empty_engine(),
+            &not_cancelled(),
+        )
+        .expect("apply");
+
+        assert!(
+            result.verified,
+            "a keyword in /Producer must not block Save As; leaks: {:?}, violations: {:?}",
+            result.leaks, result.structural_violations
+        );
+
+        let out = output.expect("output bytes");
+        assert_eq!(info_field(&out, b"Producer"), "", "/Producer must be cleared");
+        assert_eq!(
+            info_field(&out, b"Title"),
+            "Quarterly Review",
+            "a non-matching Title must survive"
+        );
+        let needle = b"Acrobat";
+        assert!(
+            !out.windows(needle.len()).any(|w| w == needle),
+            "the keyword must not survive anywhere in the output bytes"
         );
     }
 
