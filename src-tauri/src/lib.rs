@@ -57,6 +57,7 @@ pub fn run() {
             commands::ocr::cancel_ocr,
             commands::metadata::get_metadata,
             commands::metadata::set_metadata,
+            commands::metadata::find_redaction_metadata_matches,
             commands::forms::get_form_fields,
             commands::forms::set_form_field_value,
             commands::forms::document_has_form,

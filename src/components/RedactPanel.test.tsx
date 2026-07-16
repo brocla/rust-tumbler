@@ -68,6 +68,7 @@ describe("RedactPanel", () => {
     vi.mocked(save).mockReset();
     vi.mocked(invoke).mockImplementation(async (cmd: string) => {
       if (cmd === "find_redaction_matches") return MATCHES;
+      if (cmd === "find_redaction_metadata_matches") return [];
       if (cmd === "apply_redactions") return VERIFIED_RESULT;
       if (cmd === "save_redacted_copy") return "C:\\out\\discovery-redacted.pdf";
       return undefined;
@@ -159,6 +160,56 @@ describe("RedactPanel", () => {
   it("Apply is disabled with no regions", () => {
     render(<RedactPanel />);
     expect((screen.getByText("Apply redactions") as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("a metadata-only hit enables Apply with zero page regions (issue #87)", async () => {
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === "find_redaction_matches") return [];
+      if (cmd === "find_redaction_metadata_matches") return ["Author"];
+      if (cmd === "apply_redactions") return { ...VERIFIED_RESULT, regions: 0, pagesFlattened: 0 };
+      return undefined;
+    });
+    render(<RedactPanel />);
+    fireEvent.change(screen.getByPlaceholderText(/find text to redact/i), {
+      target: { value: "Jon" },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByText("Redact all"));
+    });
+
+    // No page regions, but the query is armed and the metadata hit is recorded.
+    expect(activeTab().redactRegions ?? []).toEqual([]);
+    expect(activeTab().redactQueries).toEqual(["Jon"]);
+    expect(activeTab().redactMetadataMatches).toEqual(["Author"]);
+    expect(screen.getByText(/Found in: Author metadata/)).toBeTruthy();
+
+    const applyBtn = screen.getByText("Apply redactions") as HTMLButtonElement;
+    expect(applyBtn.disabled).toBe(false);
+
+    // Apply sends empty regions with the verify query — the scrub runs anyway.
+    await act(async () => {
+      fireEvent.click(applyBtn);
+    });
+    const call = vi.mocked(invoke).mock.calls.find((c) => c[0] === "apply_redactions");
+    expect(call![1]).toMatchObject({ docId: "doc-1", regions: [], verifyQueries: ["Jon"] });
+  });
+
+  it("with no page or metadata hit, Apply is still enabled once a query is armed", async () => {
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === "find_redaction_matches") return [];
+      if (cmd === "find_redaction_metadata_matches") return [];
+      return undefined;
+    });
+    render(<RedactPanel />);
+    fireEvent.change(screen.getByPlaceholderText(/find text to redact/i), {
+      target: { value: "Jon" },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByText("Redact all"));
+    });
+
+    expect(screen.getByText(/Apply still scrubs hidden metadata/)).toBeTruthy();
+    expect((screen.getByText("Apply redactions") as HTMLButtonElement).disabled).toBe(false);
   });
 
   it("a failed verification shows the loud banner and blocks Save As", async () => {

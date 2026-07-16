@@ -57,6 +57,28 @@ fn get_metadata_impl(state: &AppState, doc_id: String) -> Result<DocumentMetadat
     })
 }
 
+/// Which visible metadata-panel fields contain a redaction query — so the
+/// redaction UI can enable Apply and tell the user where the keyword hit even
+/// when it appears nowhere in the page text (issue #87).
+#[tauri::command]
+pub fn find_redaction_metadata_matches(
+    state: State<'_, AppState>,
+    doc_id: String,
+    queries: Vec<String>,
+) -> Result<Vec<String>, String> {
+    find_redaction_metadata_matches_impl(&state, doc_id, queries).map_err(String::from)
+}
+
+fn find_redaction_metadata_matches_impl(
+    state: &AppState,
+    doc_id: String,
+    queries: Vec<String>,
+) -> Result<Vec<String>, AppError> {
+    let entry = state.get_document(&doc_id)?;
+    let entry = lock_mutex(&entry)?;
+    Ok(metadata_field_matches(&entry.buffer, &queries))
+}
+
 fn read_meta_tag(meta: &PdfMetadata, tag: PdfDocumentMetadataTagType) -> String {
     meta.get(tag)
         .map(|t| t.value().to_string())
@@ -90,10 +112,42 @@ fn read_info_text(bytes: &[u8], key: &[u8]) -> String {
     }
 }
 
+/// The editable Info fields shown in the metadata panel. Producer and the dates
+/// are read-only and are never cleared by a keyword redaction. Kept as one list
+/// so the redaction *finder* (`metadata_field_matches`, here) and the redaction
+/// *scrub* (`scrub_info_fields` in `redact.rs`) agree on exactly which fields a
+/// keyword redaction clears.
+pub const REDACTABLE_INFO_FIELDS: [&str; 5] =
+    ["Title", "Author", "Subject", "Keywords", "Creator"];
+
+/// Returns the metadata-panel field names whose value contains any of `queries`
+/// (case-insensitive substring). Only the editable Info fields are considered.
+/// Reads from `bytes` via lopdf so it sees the current buffer, consistent with
+/// [`read_info_text`]. Used by the redaction UI to tell the user where a keyword
+/// hit and to drive the surgical Info clearing (issue #87).
+pub fn metadata_field_matches(bytes: &[u8], queries: &[String]) -> Vec<String> {
+    let needles: Vec<String> = queries
+        .iter()
+        .map(|q| q.trim().to_lowercase())
+        .filter(|q| !q.is_empty())
+        .collect();
+    if needles.is_empty() {
+        return Vec::new();
+    }
+    REDACTABLE_INFO_FIELDS
+        .iter()
+        .filter(|field| {
+            let value = read_info_text(bytes, field.as_bytes()).to_lowercase();
+            needles.iter().any(|n| value.contains(n))
+        })
+        .map(|field| field.to_string())
+        .collect()
+}
+
 /// Decodes the raw bytes of a PDF string object into a Rust `String`: UTF-16BE
 /// when byte-order-marked, otherwise byte-for-byte as Latin-1 (the ASCII path
 /// `pdf_text_string` writes for dates falls out of this unchanged).
-fn decode_pdf_text_string(raw: &[u8]) -> String {
+pub(crate) fn decode_pdf_text_string(raw: &[u8]) -> String {
     if raw.len() >= 2 && raw[0] == 0xFE && raw[1] == 0xFF {
         let units: Vec<u16> = raw[2..]
             .chunks_exact(2)
@@ -301,6 +355,35 @@ fn pdf_text_string(s: &str) -> Object {
 mod tests {
     use super::*;
     use crate::state::DocEntry;
+
+    /// `metadata_field_matches` reports which editable Info fields contain the
+    /// query (case-insensitive) and ignores the read-only Producer/date fields
+    /// (issue #87).
+    #[test]
+    fn metadata_field_matches_finds_editable_fields_case_insensitively() {
+        let bytes = {
+            let mut doc = lopdf::Document::load_mem(&std::fs::read(crate::fixture_path()).unwrap())
+                .expect("parse fixture");
+            let mut info = Dictionary::new();
+            info.set("Author", Object::string_literal("Jon Worthington"));
+            info.set("Title", Object::string_literal("Meeting Schedule"));
+            info.set("Producer", Object::string_literal("jon's tool"));
+            let info_id = doc.add_object(info);
+            doc.trailer.set("Info", info_id);
+            let mut out = Vec::new();
+            doc.save_to(&mut out).expect("serialize");
+            out
+        };
+
+        let hits = metadata_field_matches(&bytes, &["jon".to_string()]);
+        assert_eq!(hits, vec!["Author".to_string()], "Author matches; Producer is ignored");
+
+        assert!(
+            metadata_field_matches(&bytes, &["schedule".to_string()]) == vec!["Title".to_string()]
+        );
+        assert!(metadata_field_matches(&bytes, &["absent".to_string()]).is_empty());
+        assert!(metadata_field_matches(&bytes, &["   ".to_string()]).is_empty());
+    }
 
     /// Writes new metadata into a real PDF's bytes via lopdf, then confirms
     /// pdfium can still open the edited bytes and reads back the new values.

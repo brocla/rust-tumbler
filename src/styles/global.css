@@ -1829,6 +1829,12 @@ input[type="radio"].form-check:checked {
   color: var(--color-text-secondary);
 }
 
+.redact-metadata-match {
+  margin-top: 2px;
+  color: var(--color-text-secondary);
+  font-style: italic;
+}
+
 .redact-add-buttons {
   display: flex;
   gap: 6px;

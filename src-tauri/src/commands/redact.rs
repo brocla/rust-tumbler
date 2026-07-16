@@ -483,7 +483,66 @@ fn scrub_acroform(doc: &mut Document) {
     }
 }
 
-/// Scrubs the document-level leak vectors: the Info dictionary; the catalog's
+/// Clears the editable Info fields (`/Title`, `/Author`, `/Subject`,
+/// `/Keywords`, `/Creator`) whose value contains one of the redaction
+/// `queries`, keeping the rest, and wipes the entire Info dictionary when there
+/// are no queries (a pure page redaction) — the metadata half of issue #87.
+/// Case-insensitive substring match, matching the finder and the verifier.
+///
+/// The keyword redaction is *surgical* on the visible Info fields (a clean Title
+/// or the dates survive) but *wholesale* on everything underneath, where hidden
+/// duplicates lurk and the niceties aren't worth saving.
+fn scrub_info_fields(doc: &mut Document, queries: &[String]) {
+    let needles: Vec<String> = queries
+        .iter()
+        .map(|q| q.trim().to_lowercase())
+        .filter(|q| !q.is_empty())
+        .collect();
+
+    // No keyword to target — a pure page redaction. Preserve the original
+    // wholesale behavior: drop the entire Info dictionary.
+    if needles.is_empty() {
+        doc.trailer.remove(b"Info");
+        return;
+    }
+
+    let Some(info_id) = doc
+        .trailer
+        .get(b"Info")
+        .ok()
+        .and_then(|o| o.as_reference().ok())
+    else {
+        // An inline or absent Info dict — no reference to edit surgically; drop
+        // whatever is there rather than risk leaving a matching value behind.
+        doc.trailer.remove(b"Info");
+        return;
+    };
+    let Some(info) = doc.get_object(info_id).ok().and_then(|o| o.as_dict().ok()) else {
+        doc.trailer.remove(b"Info");
+        return;
+    };
+
+    let to_clear: Vec<&str> = crate::commands::metadata::REDACTABLE_INFO_FIELDS
+        .iter()
+        .filter(|field| {
+            info.get(field.as_bytes())
+                .ok()
+                .and_then(|o| o.as_str().ok())
+                .map(|raw| crate::commands::metadata::decode_pdf_text_string(raw).to_lowercase())
+                .is_some_and(|value| needles.iter().any(|n| value.contains(n)))
+        })
+        .copied()
+        .collect();
+
+    if let Ok(dict) = doc.get_dictionary_mut(info_id) {
+        for field in to_clear {
+            dict.remove(field.as_bytes());
+        }
+    }
+}
+
+/// Scrubs the document-level leak vectors: the Info dictionary (surgically for a
+/// keyword redaction — see [`scrub_info_fields`]); the catalog's
 /// XMP `/Metadata` and `/OpenAction`, the `/JavaScript` and `/EmbeddedFiles`
 /// name trees, page thumbnails (all via `step_strip_extras`); the structure
 /// tree, outlines, and catalog-level Associated Files; and AcroForm fields
@@ -509,9 +568,9 @@ fn scrub_acroform(doc: &mut Document) {
 /// tagged operators are removed along with everything else in its old content
 /// stream), but an OCG's `/Name` — a human label like "SSN — internal only" —
 /// can itself echo something sensitive, and nothing else scrubs it.
-fn scrub_leak_vectors(doc: &mut Document) {
+fn scrub_leak_vectors(doc: &mut Document, queries: &[String]) {
     crate::commands::optimize::step_strip_extras(doc);
-    doc.trailer.remove(b"Info");
+    scrub_info_fields(doc, queries);
     if let Ok(catalog) = doc.catalog_mut() {
         catalog.remove(b"StructTreeRoot");
         catalog.remove(b"MarkInfo");
@@ -530,13 +589,42 @@ fn scrub_leak_vectors(doc: &mut Document) {
 fn verify_scrub_postconditions(
     final_bytes: &[u8],
     flattened_pages: &HashSet<u32>,
+    queries: &[String],
 ) -> Result<Vec<String>, AppError> {
     let doc = Document::load_mem(final_bytes)
         .map_err(|e| AppError::lopdf("Failed to reparse redacted output", e))?;
     let mut violations = Vec::new();
 
-    if doc.trailer.get(b"Info").is_ok() {
-        violations.push("document Info dictionary present".to_string());
+    // Info dictionary (issue #87). A keyword redaction *keeps* a cleared Info
+    // (a clean Title or the dates may survive), so its mere presence is no
+    // longer a violation — instead no field may still carry a redacted term.
+    // A pure page redaction (no queries) drops the whole dict, so its continued
+    // presence still signals a scrub regression.
+    let needles: Vec<String> = queries
+        .iter()
+        .map(|q| q.trim().to_lowercase())
+        .filter(|q| !q.is_empty())
+        .collect();
+    let info = doc
+        .trailer
+        .get(b"Info")
+        .ok()
+        .and_then(|o| o.as_reference().ok())
+        .and_then(|id| doc.get_object(id).ok())
+        .and_then(|o| o.as_dict().ok());
+    if needles.is_empty() {
+        if doc.trailer.get(b"Info").is_ok() {
+            violations.push("document Info dictionary present".to_string());
+        }
+    } else if let Some(info) = info {
+        for (key, value) in info.iter() {
+            let Ok(raw) = value.as_str() else { continue };
+            let text = crate::commands::metadata::decode_pdf_text_string(raw).to_lowercase();
+            if needles.iter().any(|n| text.contains(n)) {
+                let name = String::from_utf8_lossy(key);
+                violations.push(format!("Info field /{name} still contains a redacted term"));
+            }
+        }
     }
     if let Ok(catalog) = doc.catalog() {
         for key in [
@@ -744,7 +832,7 @@ pub(crate) fn verify_redactions(
     // text-based checks above cannot see (structure tree, outlines, metadata,
     // widget-less form fields) must be absent from the output.
     let flattened: HashSet<u32> = by_page.keys().copied().collect();
-    let structural_violations = verify_scrub_postconditions(final_bytes, &flattened)?;
+    let structural_violations = verify_scrub_postconditions(final_bytes, &flattened, queries)?;
 
     Ok((leaks, ocr_check_ran, structural_violations))
 }
@@ -783,8 +871,15 @@ pub(crate) fn apply_redactions_impl(
     engine: &Arc<dyn OcrEngine>,
     cancel: &Arc<AtomicBool>,
 ) -> Result<(RedactionResult, Option<Vec<u8>>), AppError> {
-    if regions.is_empty() {
-        return Err(AppError::Other("No redaction regions provided".to_string()));
+    // A keyword redaction can legitimately have zero page regions — the keyword
+    // may live only in metadata or in an unsearched underneath vector (issue
+    // #87). Allow that as long as there is a verify query to drive the scrub;
+    // reject only the truly-empty call (no regions AND no queries).
+    let has_query = verify_queries.iter().any(|q| !q.trim().is_empty());
+    if regions.is_empty() && !has_query {
+        return Err(AppError::Other(
+            "No redaction regions or queries provided".to_string(),
+        ));
     }
     let dpi = target_dpi.clamp(MIN_DPI, MAX_DPI);
 
@@ -890,7 +985,7 @@ pub(crate) fn apply_redactions_impl(
     }
     drop(fdoc);
 
-    scrub_leak_vectors(&mut ldoc);
+    scrub_leak_vectors(&mut ldoc, verify_queries);
 
     let mut flattened = Vec::new();
     ldoc.save_to(&mut flattened)
@@ -1392,6 +1487,143 @@ mod tests {
         );
     }
 
+    /// Builds `text_pdf_bytes` with an Info dictionary of the given
+    /// `(key, value)` pairs — for the metadata-keyword redaction tests (#87).
+    fn text_pdf_with_info(page_texts: &[&str], info: &[(&str, &str)]) -> Vec<u8> {
+        let mut doc = Document::load_mem(&text_pdf_bytes(page_texts)).expect("parse");
+        let mut info_dict = Dictionary::new();
+        for (k, v) in info {
+            info_dict.set(*k, Object::string_literal(*v));
+        }
+        let info_id = doc.add_object(info_dict);
+        doc.trailer.set("Info", info_id);
+        let mut out = Vec::new();
+        doc.save_to(&mut out).expect("serialize");
+        out
+    }
+
+    /// Reads an Info field back out of redacted output bytes (empty if absent).
+    fn info_field(bytes: &[u8], key: &[u8]) -> String {
+        let doc = Document::load_mem(bytes).expect("parse output");
+        doc.trailer
+            .get(b"Info")
+            .ok()
+            .and_then(|o| o.as_reference().ok())
+            .and_then(|id| doc.get_object(id).ok())
+            .and_then(|o| o.as_dict().ok())
+            .and_then(|d| d.get(key).ok())
+            .and_then(|o| o.as_str().ok())
+            .map(crate::commands::metadata::decode_pdf_text_string)
+            .unwrap_or_default()
+    }
+
+    /// Issue #87: a keyword that lives only in the Author metadata — with **no
+    /// page regions** — still redacts. Apply runs with empty regions and a
+    /// verify query; the output clears Author, keeps a non-matching Title, and
+    /// verification certifies (nothing leaked).
+    #[test]
+    fn metadata_only_keyword_redaction_clears_author_and_verifies() {
+        let _guard = crate::test_pdfium_guard();
+        let pdfium = crate::test_pdfium();
+        let bytes = text_pdf_with_info(
+            &["nothing sensitive on the page"],
+            &[("Author", "Jon Worthington"), ("Title", "Meeting Schedule")],
+        );
+
+        let (result, output) = apply_redactions_impl(
+            &no_progress,
+            pdfium,
+            &bytes,
+            &[], // no page regions — the keyword is only in metadata
+            &["Jon".to_string()],
+            150.0,
+            &empty_engine(),
+            &not_cancelled(),
+        )
+        .expect("apply");
+
+        assert!(
+            result.verified,
+            "leaks: {:?}, violations: {:?}",
+            result.leaks, result.structural_violations
+        );
+        assert_eq!(result.pages_flattened, 0, "no pages should flatten");
+
+        let out = output.expect("output bytes");
+        assert_eq!(info_field(&out, b"Author"), "", "Author must be cleared");
+        assert_eq!(
+            info_field(&out, b"Title"),
+            "Meeting Schedule",
+            "a non-matching Title must survive"
+        );
+        let needle = b"Worthington";
+        assert!(
+            !out.windows(needle.len()).any(|w| w == needle),
+            "the author's name must not survive anywhere in the output bytes"
+        );
+    }
+
+    /// Issue #87: a keyword present in **both** the page and the metadata clears
+    /// both — pages flatten and the matching Info field is cleared.
+    #[test]
+    fn keyword_in_page_and_metadata_clears_both() {
+        let _guard = crate::test_pdfium_guard();
+        let pdfium = crate::test_pdfium();
+        let bytes = text_pdf_with_info(
+            &["SECRET data"],
+            &[("Subject", "the SECRET report"), ("Title", "public")],
+        );
+
+        let (result, output) = apply_redactions_impl(
+            &no_progress,
+            pdfium,
+            &bytes,
+            &[full_page_region(1)],
+            &["SECRET".to_string()],
+            150.0,
+            &empty_engine(),
+            &not_cancelled(),
+        )
+        .expect("apply");
+        assert!(
+            result.verified,
+            "leaks: {:?}, violations: {:?}",
+            result.leaks, result.structural_violations
+        );
+        assert_eq!(result.pages_flattened, 1);
+
+        let out = output.expect("output bytes");
+        assert_eq!(info_field(&out, b"Subject"), "", "matching Subject cleared");
+        assert_eq!(info_field(&out, b"Title"), "public", "clean Title kept");
+        let needle = b"SECRET";
+        assert!(
+            !out.windows(needle.len()).any(|w| w == needle),
+            "the keyword must not survive anywhere in the output bytes"
+        );
+    }
+
+    /// Issue #87: the truly-empty call — no regions and no verify queries — is
+    /// still rejected (nothing to redact).
+    #[test]
+    fn empty_regions_and_no_queries_is_rejected() {
+        let _guard = crate::test_pdfium_guard();
+        let pdfium = crate::test_pdfium();
+        let bytes = text_pdf_bytes(&["some text"]);
+
+        let err = apply_redactions_impl(
+            &no_progress,
+            pdfium,
+            &bytes,
+            &[],
+            &[],
+            150.0,
+            &empty_engine(),
+            &not_cancelled(),
+        )
+        .expect_err("must reject an empty call");
+        assert!(matches!(err, AppError::Other(_)));
+    }
+
     /// A fake "redaction" that only draws a cover rect without removing the
     /// text (i.e. verifying the ORIGINAL bytes) must report leaks and fail.
     #[test]
@@ -1467,7 +1699,18 @@ mod tests {
 
         let out = output.expect("output bytes");
         let doc = Document::load_mem(&out).expect("parse output");
-        assert!(doc.trailer.get(b"Info").is_err(), "Info must be removed");
+        // The Info dict may survive (issue #87 keeps cleared fields), but the
+        // keyword-bearing /Title must be gone.
+        if let Some(info) = doc
+            .trailer
+            .get(b"Info")
+            .ok()
+            .and_then(|o| o.as_reference().ok())
+            .and_then(|id| doc.get_object(id).ok())
+            .and_then(|o| o.as_dict().ok())
+        {
+            assert!(info.get(b"Title").is_err(), "the keyword-bearing /Title must be cleared");
+        }
         assert!(
             doc.catalog().expect("catalog").get(b"Metadata").is_err(),
             "XMP Metadata must be removed"
@@ -2224,10 +2467,11 @@ mod tests {
         let flattened: HashSet<u32> = HashSet::from([1]);
 
         let violations =
-            verify_scrub_postconditions(&bytes, &flattened).expect("postconditions");
+            verify_scrub_postconditions(&bytes, &flattened, &["ZANZIBAR".to_string()])
+                .expect("postconditions");
 
         for expected in [
-            "Info dictionary",
+            "Info field /Title", // keyword-bearing Info field (issue #87)
             "/Metadata",       // catalog XMP
             "/StructTreeRoot",
             "/MarkInfo",
