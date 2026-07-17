@@ -1,8 +1,10 @@
 use crate::commands::linearize::{Linearizer, QpdfLinearizer};
-use crate::commands::ocr::{cache_get, OcrCache, OcrEngine, OcrWord, WindowsOcrEngine};
+use crate::commands::ocr::{
+    cache_get, override_get, OcrCache, OcrEngine, OcrOverrides, OcrWord, WindowsOcrEngine,
+};
 use crate::error::AppError;
 use pdfium_render::prelude::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -184,6 +186,9 @@ pub struct AppState {
     /// pages without re-running recognition. Shared (`Arc`) so the blocking
     /// export task can hold a handle without borrowing `AppState`.
     ocr_cache: OcrCache,
+    /// Pages whose cached OCR words outrank their native text layer, because
+    /// the user force-re-OCR'd them (issue #97). Cleared with `ocr_cache`.
+    ocr_overrides: OcrOverrides,
     /// Linearization backend behind a trait seam so tests can inject a fake
     /// (the real `QpdfLinearizer` needs qpdf.dll, absent in CI). See
     /// `commands::linearize`.
@@ -203,6 +208,7 @@ impl AppState {
             compress_job: Mutex::new(None),
             ocr_engine: Arc::new(WindowsOcrEngine::new()),
             ocr_cache: Arc::new(Mutex::new(HashMap::new())),
+            ocr_overrides: Arc::new(Mutex::new(HashSet::new())),
             linearizer: Arc::new(QpdfLinearizer {
                 dll_path: std::path::PathBuf::from(crate::resolve_qpdf_path()),
             }),
@@ -231,9 +237,21 @@ impl AppState {
         self.ocr_cache.clone()
     }
 
+    /// A cloneable handle to the force-re-OCR override set, for code that can't
+    /// borrow `AppState` (e.g. the blocking OCR task).
+    pub fn ocr_overrides_handle(&self) -> OcrOverrides {
+        self.ocr_overrides.clone()
+    }
+
     /// Cached OCR words for a page, if any.
     pub fn get_ocr_words(&self, doc_id: &str, page: u32) -> Option<Vec<OcrWord>> {
         cache_get(&self.ocr_cache, doc_id, page)
+    }
+
+    /// True when the user force-re-OCR'd this page, so its cached OCR words
+    /// should be served *instead of* the native text layer (issue #97).
+    pub fn ocr_overrides_native_text(&self, doc_id: &str, page: u32) -> bool {
+        override_get(&self.ocr_overrides, doc_id, page)
     }
 
     #[cfg(test)]
@@ -241,12 +259,24 @@ impl AppState {
         crate::commands::ocr::cache_set(&self.ocr_cache, doc_id, page, words);
     }
 
-    /// Drops every cached page for a document. Called on close (and after an
-    /// edit/reload) so the cache neither grows unbounded nor serves words keyed
-    /// to a now-stale page layout.
+    #[cfg(test)]
+    pub fn set_ocr_override(&self, doc_id: &str, page: u32) {
+        crate::commands::ocr::override_set(&self.ocr_overrides, doc_id, page);
+    }
+
+    /// Drops every cached page for a document, and any force-re-OCR overrides
+    /// with it. Called on close (and after an edit/reload) so the cache neither
+    /// grows unbounded nor serves words keyed to a now-stale page layout.
+    ///
+    /// The two must be dropped together: an override outliving its cached words
+    /// would suppress the native text layer with nothing to put in its place,
+    /// leaving the page unselectable.
     pub fn clear_ocr_cache_for_doc(&self, doc_id: &str) {
         if let Ok(mut cache) = self.ocr_cache.lock() {
             cache.retain(|(d, _), _| d != doc_id);
+        }
+        if let Ok(mut overrides) = self.ocr_overrides.lock() {
+            overrides.retain(|(d, _)| d != doc_id);
         }
     }
 
