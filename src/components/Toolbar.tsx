@@ -214,6 +214,14 @@ export function Toolbar({ onOpenFile, onPrint }: ToolbarProps) {
 
   // Document-level "Make Searchable": OCR every page that has no text layer so
   // search, selection/copy, and a later text export all work on scanned pages.
+  //
+  // When every page already reports text there's normally nothing to do — but
+  // "has text" is not "has *useful* text". Scanners routinely emit an invisible
+  // OCR layer that is wrong, misplaced, or both (issue #97), and refusing to
+  // run would leave the user stuck with no way forward. So offer a forced run
+  // instead of declining: the user can see the text is junk, and Tumbler can't
+  // tell without guessing. Forcing is safe — OCR is session-only and nothing
+  // reaches disk unless they separately Add Text Layer and Save.
   const handleMakeSearchable = async () => {
     if (!activeTab) return;
 
@@ -226,19 +234,29 @@ export function Toolbar({ onOpenFile, onPrint }: ToolbarProps) {
       await message(String(err), { title: "Make Searchable", kind: "error" });
       return;
     }
+
+    let force = false;
     if (missing === 0) {
-      await message("Every page already has a text layer — nothing to OCR.", {
-        title: "Make Searchable",
-        kind: "info",
-      });
-      return;
+      force = await ask(
+        "Every page already has a text layer, so there's nothing to OCR.\n\n" +
+          "If that text is wrong — scanned files often carry a bad OCR layer " +
+          "you can't select — you can re-OCR every page anyway and use the " +
+          "result instead. Nothing is written to disk.",
+        {
+          title: "Make Searchable",
+          kind: "info",
+          okLabel: "Re-OCR anyway",
+          cancelLabel: "Cancel",
+        },
+      );
+      if (!force) return;
     }
 
     setOcrProgress({ page: 0, total: activeTab.pageCount });
     try {
       const result = await invoke<{ pagesOcred: number; cancelled: boolean }>(
         "ocr_document",
-        { docId: activeTab.docId },
+        { docId: activeTab.docId, force },
       );
       // Refresh the text overlay so the newly-recognized pages are selectable.
       updateTab(activeTab.id, { ocrEpoch: activeTab.ocrEpoch + 1 });
@@ -249,11 +267,21 @@ export function Toolbar({ onOpenFile, onPrint }: ToolbarProps) {
           } searchable.`,
           { title: "Make Searchable", kind: "info" },
         );
-      } else {
+      } else if (result.pagesOcred === 0) {
+        // Only reachable on a forced run: OCR read the pages and found no
+        // words. Say so plainly rather than claim success.
         await message(
-          `Made ${result.pagesOcred} page${
-            result.pagesOcred === 1 ? "" : "s"
-          } searchable. You can now search, select, and copy their text.`,
+          "Re-OCR finished, but no text was recognized on any page. The " +
+            "document's existing text layer is unchanged.",
+          { title: "Make Searchable", kind: "info" },
+        );
+      } else {
+        const pages = `${result.pagesOcred} page${result.pagesOcred === 1 ? "" : "s"}`;
+        await message(
+          force
+            ? `Re-OCR'd ${pages}. Search, selection, and copy now use the ` +
+                "recognized text instead of the layer already in the file."
+            : `Made ${pages} searchable. You can now search, select, and copy their text.`,
           { title: "Make Searchable", kind: "info" },
         );
       }

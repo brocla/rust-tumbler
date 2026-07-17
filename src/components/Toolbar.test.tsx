@@ -249,6 +249,7 @@ describe("Toolbar make searchable", () => {
     vi.mocked(invoke).mockReset();
     vi.mocked(message).mockReset();
     vi.mocked(message).mockResolvedValue(undefined as never);
+    vi.mocked(ask).mockReset();
   });
 
   it("OCRs the document and bumps ocrEpoch when pages lack text", async () => {
@@ -262,7 +263,13 @@ describe("Toolbar make searchable", () => {
     renderToolbar();
     await clickMakeSearchable();
 
-    expect(invoke).toHaveBeenCalledWith("ocr_document", { docId: "doc-1" });
+    // Pages genuinely lack text, so no confirmation is needed and the run is
+    // unforced — the existing-layer question never arises.
+    expect(ask).not.toHaveBeenCalled();
+    expect(invoke).toHaveBeenCalledWith("ocr_document", {
+      docId: "doc-1",
+      force: false,
+    });
     expect(message).toHaveBeenCalledWith(
       expect.stringContaining("Made 2 pages searchable"),
       expect.objectContaining({ title: "Make Searchable" }),
@@ -271,7 +278,37 @@ describe("Toolbar make searchable", () => {
     expect(usePdfStore.getState().tabs[0].ocrEpoch).toBe(1);
   });
 
-  it("does nothing but inform when every page already has text", async () => {
+  // Issue #97: a document whose every page has text isn't necessarily done —
+  // the layer may be junk. Offer the forced run rather than refusing.
+  it("offers a forced re-OCR when every page already has text", async () => {
+    vi.mocked(ask).mockResolvedValue(true as never);
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === "count_pages_without_text") return Promise.resolve(0);
+      if (cmd === "ocr_document")
+        return Promise.resolve({ pagesOcred: 3, cancelled: false });
+      return Promise.resolve(undefined);
+    });
+
+    renderToolbar();
+    await clickMakeSearchable();
+
+    expect(ask).toHaveBeenCalledWith(
+      expect.stringContaining("re-OCR every page anyway"),
+      expect.objectContaining({ title: "Make Searchable" }),
+    );
+    expect(invoke).toHaveBeenCalledWith("ocr_document", {
+      docId: "doc-1",
+      force: true,
+    });
+    expect(message).toHaveBeenCalledWith(
+      expect.stringContaining("Re-OCR'd 3 pages"),
+      expect.objectContaining({ title: "Make Searchable" }),
+    );
+    expect(usePdfStore.getState().tabs[0].ocrEpoch).toBe(1);
+  });
+
+  it("does not OCR when the forced re-OCR offer is declined", async () => {
+    vi.mocked(ask).mockResolvedValue(false as never);
     vi.mocked(invoke).mockImplementation((cmd: string) => {
       if (cmd === "count_pages_without_text") return Promise.resolve(0);
       return Promise.resolve(undefined);
@@ -280,12 +317,28 @@ describe("Toolbar make searchable", () => {
     renderToolbar();
     await clickMakeSearchable();
 
+    expect(ask).toHaveBeenCalled();
     expect(invoke).not.toHaveBeenCalledWith("ocr_document", expect.anything());
+    expect(usePdfStore.getState().tabs[0].ocrEpoch).toBe(0);
+  });
+
+  // A forced run that recognizes nothing must not claim success.
+  it("reports honestly when a forced re-OCR finds no text", async () => {
+    vi.mocked(ask).mockResolvedValue(true as never);
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === "count_pages_without_text") return Promise.resolve(0);
+      if (cmd === "ocr_document")
+        return Promise.resolve({ pagesOcred: 0, cancelled: false });
+      return Promise.resolve(undefined);
+    });
+
+    renderToolbar();
+    await clickMakeSearchable();
+
     expect(message).toHaveBeenCalledWith(
-      expect.stringContaining("already has a text layer"),
+      expect.stringContaining("no text was recognized"),
       expect.objectContaining({ title: "Make Searchable" }),
     );
-    expect(usePdfStore.getState().tabs[0].ocrEpoch).toBe(0);
   });
 });
 

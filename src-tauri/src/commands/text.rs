@@ -105,6 +105,18 @@ pub(crate) fn extract_page_text_impl(
     let page_height = pdf_page.height().value;
     let (origin_x, origin_y) = page_origin(&pdf_page);
 
+    // A force-re-OCR'd page (issue #97) serves its recognized words *instead
+    // of* the native layer — the user has told us that layer is junk, so the
+    // usual "native text wins" rule is exactly backwards here.
+    if state.ocr_overrides_native_text(&doc_id, page) {
+        if let Some(words) = state.get_ocr_words(&doc_id, page) {
+            return Ok(ocr_words_to_lines(&words)
+                .iter()
+                .map(|line| ocr_line_to_text_item(line, page_height))
+                .collect());
+        }
+    }
+
     let text = pdf_page
         .text()
         .map_err(|e| AppError::pdfium("Failed to get text", e))?;
@@ -276,9 +288,18 @@ pub(crate) fn search_document_impl(
             Err(_) => continue,
         };
 
+        let page_num = (page_idx + 1) as u32;
         let mut page_rects = Vec::new();
 
-        if let Some(ref re) = regex_pattern {
+        // A force-re-OCR'd page (issue #97): the user has declared its native
+        // text layer junk, so don't search that layer at all. Leaving
+        // `page_rects` empty routes the page into the cached-OCR block below,
+        // which is the same path a plain scan takes.
+        let search_native = !state.ocr_overrides_native_text(&doc_id, page_num);
+
+        if !search_native {
+            // Nothing to do — the OCR fallback below owns this page.
+        } else if let Some(ref re) = regex_pattern {
             // Regex mode: extract the full page text, find all matches,
             // then use pdfium's text.search() on each unique literal matched
             // string to obtain the highlight rectangles.
@@ -344,10 +365,10 @@ pub(crate) fn search_document_impl(
             }
         }
 
-        // Fallback: no native hits on this page. If OCR words are cached for
-        // it (a scanned page made searchable), match the query against them.
+        // No native hits on this page — either it has no text layer, or its
+        // layer was skipped as junk above. If OCR words are cached for it (a
+        // scanned page made searchable), match the query against them.
         if page_rects.is_empty() {
-            let page_num = (page_idx + 1) as u32;
             if let Some(words) = state.get_ocr_words(&doc_id, page_num) {
                 if let Some(ref re) = regex_pattern {
                     // Regex mode: reconstruct page text with per-word byte
@@ -414,7 +435,7 @@ pub(crate) fn search_document_impl(
 
         if !page_rects.is_empty() {
             results.push(SearchResult {
-                page: (page_idx + 1) as u32,
+                page: page_num,
                 rects: page_rects,
             });
         }
@@ -726,6 +747,70 @@ mod tests {
         .expect("search");
 
         assert!(results.is_empty());
+    }
+
+    /// The heart of issue #97: normally a native text layer wins and the OCR
+    /// cache is only a fallback. On a force-re-OCR'd page that rule inverts —
+    /// otherwise the junk layer the user rejected would keep being served and
+    /// forcing would change nothing they can see.
+    #[test]
+    fn extract_page_text_prefers_ocr_words_over_native_text_when_forced() {
+        let _guard = crate::test_pdfium_guard();
+        let pdfium = crate::test_pdfium();
+        let state = AppState::new(pdfium, None);
+        open_fixture(&state, "doc1");
+
+        // Stand-in for a junk layer's replacement: the fixture's page has real
+        // native text ("Test Fixture"), and OCR disagrees with it.
+        state.set_ocr_words("doc1", 1, vec![ocr_word("Scanned")]);
+
+        // Without an override the native layer still wins.
+        let items = extract_page_text_impl(&state, "doc1".to_string(), 1).expect("extract");
+        let text: String = items.iter().map(|i| i.text.as_str()).collect();
+        assert!(text.contains("Test Fixture"), "native text should win: {text}");
+
+        // Forced: the recognized words are served instead.
+        state.set_ocr_override("doc1", 1);
+        let items = extract_page_text_impl(&state, "doc1".to_string(), 1).expect("extract");
+        let text: String = items.iter().map(|i| i.text.as_str()).collect();
+        assert_eq!(text, "Scanned", "forced page must serve OCR words");
+        assert!(!text.contains("Test Fixture"), "junk layer leaked through");
+    }
+
+    /// Search must follow the same override, or a forced page would highlight
+    /// hits from the very layer the user rejected.
+    #[test]
+    fn search_document_uses_ocr_words_over_native_text_when_forced() {
+        let _guard = crate::test_pdfium_guard();
+        let pdfium = crate::test_pdfium();
+        let state = AppState::new(pdfium, None);
+        open_fixture(&state, "doc1");
+        state.set_ocr_words("doc1", 1, vec![ocr_word("Scanned")]);
+
+        let find = |query: &str| {
+            search_document_impl(
+                &state,
+                "doc1".to_string(),
+                query.to_string(),
+                false, // match_case
+                false, // whole_word
+                false, // use_regex
+            )
+            .expect("search")
+            .len()
+        };
+
+        // Unforced, the native layer is searched. (Cached words stay reachable
+        // too — the per-page fallback fires whenever the native search misses,
+        // which predates this feature and is harmless.)
+        assert_eq!(find("Fixture"), 1);
+
+        state.set_ocr_override("doc1", 1);
+
+        // Forced: the native layer is out of the picture, and only the
+        // recognized words answer.
+        assert_eq!(find("Fixture"), 0, "junk layer still searchable after force");
+        assert_eq!(find("Scanned"), 1, "OCR words not searchable after force");
     }
 
     fn ocr_word(text: &str) -> OcrWord {

@@ -3,7 +3,7 @@ use crate::state::{lock_mutex, AppState, DocEntry};
 use crate::commands::text::{page_text_in_document_order, TextRect};
 use pdfium_render::prelude::*;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, State, WebviewWindow};
@@ -11,6 +11,33 @@ use tauri::{Emitter, State, WebviewWindow};
 /// Recognized words per `(doc_id, page_1based)`, shared (`Arc`) so a blocking
 /// task that can't borrow `&AppState` (e.g. text export) can still read/write it.
 pub type OcrCache = Arc<Mutex<HashMap<(String, u32), Vec<OcrWord>>>>;
+
+/// Pages the user has force-re-OCR'd, as `(doc_id, page_1based)` (issue #97).
+///
+/// Normally the OCR cache is only a *fallback*: it's consulted when a page has
+/// no native text. That's wrong for a scan carrying a junk OCR layer — the junk
+/// is "text", so it wins and the cache is never read. A page listed here
+/// inverts that rule: its cached words take precedence over the native layer,
+/// because the user has explicitly declared the native layer useless.
+///
+/// Session-only and keyed to the current page layout, exactly like `OcrCache`;
+/// `AppState::clear_ocr_cache_for_doc` drops both together.
+pub type OcrOverrides = Arc<Mutex<HashSet<(String, u32)>>>;
+
+/// Marks a page's cached OCR words as authoritative over its native text layer.
+pub fn override_set(overrides: &OcrOverrides, doc_id: &str, page: u32) {
+    if let Ok(mut o) = overrides.lock() {
+        o.insert((doc_id.to_string(), page));
+    }
+}
+
+/// Whether the user has force-re-OCR'd this page.
+pub fn override_get(overrides: &OcrOverrides, doc_id: &str, page: u32) -> bool {
+    overrides
+        .lock()
+        .map(|o| o.contains(&(doc_id.to_string(), page)))
+        .unwrap_or(false)
+}
 
 /// DPI used to rasterize a page before handing it to the OCR engine.
 /// Recognition quality scales with input resolution; 300 DPI is the standard
@@ -269,8 +296,25 @@ pub fn ocr_page_into_cache(
     engine: &Arc<dyn OcrEngine>,
     cache: &OcrCache,
 ) -> Result<Vec<OcrWord>, AppError> {
-    if let Some(cached) = cache_get(cache, doc_id, page) {
-        return Ok(cached);
+    ocr_page_into_cache_forced(entry, doc_id, page, engine, cache, false)
+}
+
+/// `ocr_page_into_cache`, but `force` re-recognizes even when the page is
+/// already cached, replacing the cached words (issue #97). A forced run is the
+/// user saying "the text you have for this page is wrong", so honoring the
+/// cache would defeat the whole point.
+pub fn ocr_page_into_cache_forced(
+    entry: &Arc<Mutex<DocEntry>>,
+    doc_id: &str,
+    page: u32,
+    engine: &Arc<dyn OcrEngine>,
+    cache: &OcrCache,
+    force: bool,
+) -> Result<Vec<OcrWord>, AppError> {
+    if !force {
+        if let Some(cached) = cache_get(cache, doc_id, page) {
+            return Ok(cached);
+        }
     }
 
     let (rgba, bmp_w, bmp_h, page_w, page_h) = {
@@ -304,15 +348,22 @@ pub struct OcrDocumentResult {
 /// Document-level "Make Searchable": OCRs every page with no native text layer
 /// into the cache, so search, selection/copy, and a later export all benefit.
 /// Nothing is written to disk — this is the ephemeral tier.
+///
+/// `force` re-OCRs *every* page even where a native text layer exists, and
+/// makes the results authoritative over that layer (issue #97). It's the escape
+/// hatch for scans carrying a junk OCR layer — text that is present, so the
+/// normal skip-if-text rule declines to help, but wrong.
 #[tauri::command]
 pub async fn ocr_document(
     window: WebviewWindow,
     state: State<'_, AppState>,
     doc_id: String,
+    force: bool,
 ) -> Result<OcrDocumentResult, String> {
     let entry = state.get_document(&doc_id).map_err(String::from)?;
     let engine = state.ocr_engine.clone();
     let cache = state.ocr_cache_handle();
+    let overrides = state.ocr_overrides_handle();
     let cancel = Arc::new(AtomicBool::new(false));
     state.set_ocr_job(cancel.clone());
 
@@ -321,7 +372,7 @@ pub async fn ocr_document(
     };
 
     let result = tauri::async_runtime::spawn_blocking(move || {
-        ocr_document_impl(emit, entry, doc_id, engine, cache, cancel)
+        ocr_document_impl(emit, entry, doc_id, engine, cache, overrides, cancel, force)
     })
     .await
     .map_err(|e| e.to_string());
@@ -330,13 +381,16 @@ pub async fn ocr_document(
     result?.map_err(String::from)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn ocr_document_impl(
     emit_progress: impl Fn(u32, u32),
     entry: Arc<Mutex<DocEntry>>,
     doc_id: String,
     engine: Arc<dyn OcrEngine>,
     cache: OcrCache,
+    overrides: OcrOverrides,
     cancel: Arc<AtomicBool>,
+    force: bool,
 ) -> Result<OcrDocumentResult, AppError> {
     let page_count = lock_mutex(&entry)?.document.pages().len() as u32;
     let mut pages_ocred = 0u32;
@@ -352,27 +406,37 @@ fn ocr_document_impl(
         }
         emit_progress(page_num, page_count);
 
-        // Skip pages that already have a native text layer — only scans need OCR.
-        let native_empty = {
-            let entry = lock_mutex(&entry)?;
-            let page = entry
-                .document
-                .pages()
-                .get(i as i32)
-                .map_err(|e| AppError::pdfium(format!("Failed to get page {page_num}"), e))?;
-            page.text()
-                .map(|t| page_text_in_document_order(&t))
-                .unwrap_or_default()
-                .trim()
-                .is_empty()
-        };
-        if !native_empty {
-            continue;
+        // Skip pages that already have a native text layer — only scans need
+        // OCR. A forced run skips this check: the whole point is that the
+        // existing layer is junk.
+        if !force {
+            let native_empty = {
+                let entry = lock_mutex(&entry)?;
+                let page = entry
+                    .document
+                    .pages()
+                    .get(i as i32)
+                    .map_err(|e| AppError::pdfium(format!("Failed to get page {page_num}"), e))?;
+                page.text()
+                    .map(|t| page_text_in_document_order(&t))
+                    .unwrap_or_default()
+                    .trim()
+                    .is_empty()
+            };
+            if !native_empty {
+                continue;
+            }
         }
 
-        let words = ocr_page_into_cache(&entry, &doc_id, page_num, &engine, &cache)?;
+        let words =
+            ocr_page_into_cache_forced(&entry, &doc_id, page_num, &engine, &cache, force)?;
         if !words.is_empty() {
             pages_ocred += 1;
+            // Recognition found something, so prefer it over whatever the
+            // native layer claims for this page.
+            if force {
+                override_set(&overrides, &doc_id, page_num);
+            }
         }
     }
 
@@ -669,7 +733,9 @@ mod tests {
             "blank".to_string(),
             state.ocr_engine.clone(),
             cache.clone(),
+            state.ocr_overrides_handle(),
             Arc::new(AtomicBool::new(false)),
+            false, // force
         )
         .expect("ocr document");
 
@@ -677,6 +743,148 @@ mod tests {
         assert!(!result.cancelled);
         assert!(cache_get(&cache, "blank", 1).is_some());
         assert!(cache_get(&cache, "blank", 2).is_some());
+    }
+
+    /// The unforced run is the regression guard for the bug that motivated
+    /// force (issue #97): a page with a native text layer is skipped, so a
+    /// junk layer is never replaced unless the user asks.
+    #[test]
+    fn ocr_document_unforced_skips_pages_with_native_text() {
+        let _guard = crate::test_pdfium_guard();
+        let pdfium = crate::test_pdfium();
+        let fake: Arc<dyn OcrEngine> = Arc::new(FakeOcrEngine {
+            words: vec![word("scanned")],
+            call_count: AtomicUsize::new(0),
+        });
+        let state = AppState::new(pdfium, None).with_ocr_engine(fake);
+        open_fixture(&state, "fixture");
+
+        let cache = state.ocr_cache_handle();
+        let result = ocr_document_impl(
+            no_progress,
+            state.get_document("fixture").expect("get"),
+            "fixture".to_string(),
+            state.ocr_engine.clone(),
+            cache.clone(),
+            state.ocr_overrides_handle(),
+            Arc::new(AtomicBool::new(false)),
+            false, // force
+        )
+        .expect("ocr document");
+
+        assert_eq!(result.pages_ocred, 0, "native text should have been left alone");
+        assert!(cache_get(&cache, "fixture", 1).is_none());
+        assert!(!state.ocr_overrides_native_text("fixture", 1));
+    }
+
+    /// Forcing OCRs a page *despite* its native text layer and marks the
+    /// result authoritative, so the reader paths serve OCR words instead of
+    /// the layer the user rejected (issue #97).
+    #[test]
+    fn ocr_document_forced_ocrs_page_with_native_text_and_sets_override() {
+        let _guard = crate::test_pdfium_guard();
+        let pdfium = crate::test_pdfium();
+        let fake: Arc<dyn OcrEngine> = Arc::new(FakeOcrEngine {
+            words: vec![word("scanned")],
+            call_count: AtomicUsize::new(0),
+        });
+        let state = AppState::new(pdfium, None).with_ocr_engine(fake);
+        open_fixture(&state, "fixture");
+
+        let cache = state.ocr_cache_handle();
+        let result = ocr_document_impl(
+            no_progress,
+            state.get_document("fixture").expect("get"),
+            "fixture".to_string(),
+            state.ocr_engine.clone(),
+            cache.clone(),
+            state.ocr_overrides_handle(),
+            Arc::new(AtomicBool::new(false)),
+            true, // force
+        )
+        .expect("ocr document");
+
+        assert_eq!(result.pages_ocred, 1);
+        assert!(cache_get(&cache, "fixture", 1).is_some());
+        assert!(
+            state.ocr_overrides_native_text("fixture", 1),
+            "forced page must outrank its native text layer"
+        );
+    }
+
+    /// Forcing re-runs recognition even on an already-cached page: the cached
+    /// words may be the very thing the user is trying to replace.
+    #[test]
+    fn ocr_document_forced_bypasses_the_cache() {
+        let _guard = crate::test_pdfium_guard();
+        let pdfium = crate::test_pdfium();
+        let fake = Arc::new(FakeOcrEngine {
+            words: vec![word("scanned")],
+            call_count: AtomicUsize::new(0),
+        });
+        let state = AppState::new(pdfium, None).with_ocr_engine(fake.clone());
+        open_blank_doc(&state, "blank", 1);
+
+        let run = |force| {
+            ocr_document_impl(
+                no_progress,
+                state.get_document("blank").expect("get"),
+                "blank".to_string(),
+                state.ocr_engine.clone(),
+                state.ocr_cache_handle(),
+                state.ocr_overrides_handle(),
+                Arc::new(AtomicBool::new(false)),
+                force,
+            )
+            .expect("ocr document");
+        };
+
+        run(false);
+        assert_eq!(fake.call_count.load(Ordering::SeqCst), 1);
+
+        // Unforced: the cache answers, the engine stays idle.
+        run(false);
+        assert_eq!(fake.call_count.load(Ordering::SeqCst), 1);
+
+        // Forced: recognition runs again.
+        run(true);
+        assert_eq!(fake.call_count.load(Ordering::SeqCst), 2);
+    }
+
+    /// An override must never outlive the cached words it points at: dropping
+    /// the cache (close, or any buffer edit) drops the override too, or the
+    /// page would suppress its native text with nothing to replace it.
+    #[test]
+    fn clearing_the_ocr_cache_clears_force_overrides() {
+        let _guard = crate::test_pdfium_guard();
+        let pdfium = crate::test_pdfium();
+        let fake: Arc<dyn OcrEngine> = Arc::new(FakeOcrEngine {
+            words: vec![word("scanned")],
+            call_count: AtomicUsize::new(0),
+        });
+        let state = AppState::new(pdfium, None).with_ocr_engine(fake);
+        open_fixture(&state, "fixture");
+
+        ocr_document_impl(
+            no_progress,
+            state.get_document("fixture").expect("get"),
+            "fixture".to_string(),
+            state.ocr_engine.clone(),
+            state.ocr_cache_handle(),
+            state.ocr_overrides_handle(),
+            Arc::new(AtomicBool::new(false)),
+            true, // force
+        )
+        .expect("ocr document");
+        assert!(state.ocr_overrides_native_text("fixture", 1));
+
+        state.clear_ocr_cache_for_doc("fixture");
+
+        assert!(state.get_ocr_words("fixture", 1).is_none());
+        assert!(
+            !state.ocr_overrides_native_text("fixture", 1),
+            "override outlived the cached words it depends on"
+        );
     }
 
     /// A pre-set cancel token stops the run before any page is processed.
@@ -694,7 +902,9 @@ mod tests {
             "blank".to_string(),
             state.ocr_engine.clone(),
             state.ocr_cache_handle(),
+            state.ocr_overrides_handle(),
             Arc::new(AtomicBool::new(true)),
+            false, // force
         )
         .expect("ocr document");
 
