@@ -34,16 +34,16 @@ Built with Tauri v2
 - open password protected files
 - Detect ISO Standard
 - Verify Digital Signatures
+- Web Optimization - Linearize
+- Redaction
 
 
 ## Futures
 
 Planned enhancements:
 
-- **Web Optimization** - Linearize
 - **CLI**
 - **Encrypt** files and add password
-- **Redaction**
 
  
 
