@@ -26,12 +26,13 @@ Built with Tauri v2
 - Page operations: delete, rotate, reorder (drag-and-drop), merge, and split pages
 - Text layer with copy-to-clipboard and full-document search
 - OCR for scanned pages — make image-only pages searchable, selectable, copyable, and savable
+- Typewriter — type text anywhere on the page (fill ad-hoc forms with underline blanks)
 - Extract text to a file
 - View and Edit metadata
 - Native Windows printing
 - Form Filling
 - File compression
-- open password protected files
+- Open password-protected files; add, change, or remove a password (AES-256)
 - Detect ISO Standard
 - Verify Digital Signatures
 - Web Optimization - Linearize
@@ -43,7 +44,6 @@ Built with Tauri v2
 Planned enhancements:
 
 - **CLI**
-- **Encrypt** files and add password
 
  
 
@@ -98,6 +98,16 @@ Click the **pocket-knife icon** in the left rail to open the Pages panel.
 
 All operations save the document immediately and reload every open tab that shares the same file.
 
+### Typewriter
+
+Click the **type icon** in the left rail to open the Typewriter panel. This is for filling ad-hoc forms that use plain underline blanks instead of real form fields.
+
+Opening the panel arms the tool (leaving it disarms). Click anywhere on the page to drop a text box and start typing; drag the box's handle to move it or its corner to resize. Choose the **font** (Helvetica, Times, or Courier), **size**, **color**, and **bold/italic** in the panel — the controls apply to the note you're editing. Click away to finish, or double-click a note to edit it again.
+
+Notes are added as a buffer edit — nothing is written until you **Save / Save As** (or discard by closing without saving). Each note is stored as a standard PDF text annotation, so it prints and opens correctly in other readers, and its text is selectable and searchable in Tumbler.
+
+> Note: so your typed notes show as a single clean layer, Tumbler's viewer does not paint annotation *markup* authored in other tools (highlights, sticky notes, stamps). That markup still prints and appears in other PDF readers.
+
 ## Tech stack
 
 | Layer | Technology |
@@ -123,10 +133,17 @@ rust-tumbler/
 │   │   ├── PageSlot.tsx          # Per-page render + canvas
 │   │   ├── TextLayer.tsx         # Selectable/copyable text overlay
 │   │   ├── HighlightLayer.tsx    # Search-result highlighting
+│   │   ├── FormLayer.tsx         # Interactive AcroForm controls
+│   │   ├── RedactLayer.tsx       # Redaction region overlay
+│   │   ├── TypewriterLayer.tsx   # Typewriter note overlay (editable)
 │   │   ├── ThumbnailPanel.tsx    # Page thumbnail strip
 │   │   ├── SearchPanel.tsx       # Full-text search UI
 │   │   ├── MetadataPanel.tsx     # Document info editor
-│   │   └── PagesPanel.tsx        # Page operations (delete/rotate/reorder/merge/split)
+│   │   ├── PagesPanel.tsx        # Page operations (delete/rotate/reorder/merge/split)
+│   │   ├── OptimizePanel.tsx     # Compression + Web Optimization
+│   │   ├── RedactPanel.tsx       # Redaction find/apply/save
+│   │   ├── TypewriterPanel.tsx   # Typewriter font/size/color controls
+│   │   └── StatusBar.tsx         # Page/zoom, signature & format badges
 │   ├── store/
 │   │   └── usePdfStore.ts        # Zustand global state (tabs, zoom, etc.)
 │   ├── utils/                    # Bitmap conversion, render cache, etc.
@@ -138,11 +155,21 @@ rust-tumbler/
 │   ├── src/
 │   │   ├── commands/
 │   │   │   ├── document.rs       # open/close document
+│   │   │   ├── encryption.rs     # decrypt-on-open, re-encrypt on save, set/remove password
 │   │   │   ├── render.rs         # page rendering
 │   │   │   ├── text.rs           # text extraction + search (with OCR fallback)
 │   │   │   ├── ocr.rs            # OCR via Windows.Media.Ocr (Make Searchable)
+│   │   │   ├── text_layer.rs     # embed an invisible OCR text layer
 │   │   │   ├── metadata.rs       # metadata read/write (lopdf)
 │   │   │   ├── pages.rs          # page operations (delete/rotate/reorder/merge/split)
+│   │   │   ├── forms.rs          # AcroForm field discovery + value writes
+│   │   │   ├── typewriter.rs     # free-text "typewriter" notes (FreeText annotations)
+│   │   │   ├── redact.rs         # redaction (flatten + verify)
+│   │   │   ├── optimize.rs       # compression pipeline
+│   │   │   ├── linearize.rs      # Web Optimization (qpdf)
+│   │   │   ├── signature.rs      # digital-signature verification
+│   │   │   ├── conformance.rs    # ISO sub-format detection (PDF/A, /X, …)
+│   │   │   ├── save.rs           # Save / Save As (only disk writers)
 │   │   │   ├── print.rs          # native printing (GDI)
 │   │   │   ├── theme.rs          # Windows accent color
 │   │   │   └── startup.rs        # file-association startup path
@@ -213,10 +240,13 @@ cargo test         # backend (from src-tauri/)
 
 ## Updating the app version
 
-Version is set in three places — keep them in sync:
+Run `npm version <patch|minor|major>` on `main` after a PR merges. A sync
+script propagates the new version to all three files and creates the
+`vX.Y.Z` tag:
 
 - `package.json` → `"version"`
 - `src-tauri/tauri.conf.json` → `"version"`
 - `src-tauri/Cargo.toml` → `version`
 
-THe output 
+Push with `git push --follow-tags` — pushing the tag triggers the Release
+workflow, which builds the Windows installers and publishes a GitHub Release.
