@@ -21,85 +21,31 @@ Built with Tauri v2
 
 </div>
 
+Tumbler is a PDF viewer and toolbox. It is born from my frustration with apps that suddenly want money to do the next little bit. They almost get the job done, but not quite. 
+
+This app has lots of tools for manipulating PDFs. Almost everything I could think of, short of a full editor. It never asks for money. 
+
+This is the new world of AI. Anyone can make their own software, just the way they like it. That is what this is; my PDF toolbox, just the way I like it. That is why you will not find a Settings menu.
+
+
+
 ## Features
 
 - Page operations: delete, rotate, reorder (drag-and-drop), merge, and split pages
 - Text layer with copy-to-clipboard and full-document search
-- OCR for scanned pages — make image-only pages searchable, selectable, copyable, and savable
-- Typewriter — type text anywhere on the page (fill ad-hoc forms with underline blanks)
+- OCR — make image-only pages searchable, selectable, copyable, and savable
+- Form Filling
+- Typewriter — type text anywhere on the page 
 - Extract text to a file
 - View and Edit metadata
 - Native Windows printing
-- Form Filling
 - File compression
 - Open password-protected files; add, change, or remove a password (AES-256)
-- Detect ISO Standard
+- Detect ISO Standards
 - Verify Digital Signatures
 - Web Optimization - Linearize
 - Redaction
 
-
-
-## UI
-
-### Search
-
-Click the **magnifying-glass icon** in the left rail to open the search panel. Type a query — search runs as you type (300 ms debounce) across the whole document, listing every page that has a hit with its match count and jumping to the first result. Step through matches with **Enter / Shift+Enter** (or the up/down arrows); each match is highlighted on the page.
-
-**OCR for scans:** search reads the PDF's text layer, so a scanned, image-only page has nothing to match. When a search returns no results, an inline prompt appears for the page you're currently viewing:
-
-> Page *N* may be a scan with no text.
-> **[ Run OCR on this page ]**
-
-Click it to recognize text on that page — roughly 1–3 seconds (the page is rendered at 300 DPI and handed to the Windows OCR engine). The search then re-runs automatically, so any matches now show up in the results, and the recognized words also become selectable/copyable in the text layer.
-
-Results are cached for the rest of the session, so re-searching that page is instant and the prompt won't reappear for a page you've already processed. Nothing is written to the PDF file — this OCR text lives only inside Tumbler. (To bake recognized text into the exported file, see **Export Text** below.)
-
-**Requirements:** OCR uses the engine built into Windows 10/11, which needs a language pack installed. If none is available you'll see:
-
-> OCR failed: OCR is not available — install an OCR language pack in Windows Settings → Time & Language → Language.
-
-Add one under **Settings → Time & Language → Language → (your language) → Language options → Optional features**.
-
-### Make Searchable (whole document)
-
-The per-page prompt above handles one scan at a time. To OCR an entire scanned document at once, click the **Make Text Searchable** button (scan-with-magnifier icon) in the toolbar, left of the Export Text button. Tumbler first checks how many pages lack a text layer; if there are none it says so and stops, otherwise it OCRs every text-less page, showing the same **OCR page X of Y** progress overlay with a **Cancel** button.
-
-Once a document has been made searchable, Export Text reuses those cached results — so it won't prompt you to run OCR again, and the exported `.txt` includes the recognized text automatically.
-
-When it finishes, those pages are searchable, and their text is selectable and copyable directly on the page — drag to select, then Ctrl+C (copied text preserves line breaks). As with per-page OCR this is in-app only and cached for the session; nothing is written to the PDF until you use Export Text or (in a future release) save a searchable copy.
-
-### Export Text
-
-Click the **scroll icon** in the toolbar (left of the print button) to export the document's text layer to a `.txt` file.
-
-A save dialog opens defaulting to the same folder as the source PDF. Each page is written with a `--- Page N ---` header.
-
-**OCR for scanned pages:** if the document has pages with no text layer (likely scans), after you choose the destination Tumbler asks whether to run OCR on those pages so their recognized text is included in the export. (OCR takes ~1–3s per page, so a progress overlay with a **Cancel** button appears while it runs.) Pages where OCR still finds nothing — and all text-less pages when you decline OCR — get a `[no extractable text]` placeholder so every page is accounted for. OCR results are also cached, so search and copy light up for those pages afterward. A confirmation shows the number of pages exported (and how many came from OCR) when done.
-
-### Page operations
-
-Click the **pocket-knife icon** in the left rail to open the Pages panel.
-
-- **Navigate** — Click any thumbnail to jump to that page.
-- **Select pages** — Click a checkbox on any thumbnail to toggle selection. Use **Select All / Deselect All** in the action bar to bulk-select. The trash and rotate actions are enabled only when at least one page is selected. (Reorder is drag-based and needs no selection.)
-- **Delete** — Select one or more pages and click the trash icon. The last remaining page cannot be deleted.
-- **Rotate** — Select pages and click the rotate-clockwise or rotate-counter-clockwise icon to spin them 90°. Each click adds another 90°.
-- **Merge** — Click the import icon to pick a PDF file. Its pages are appended after the last page of the current document.
-- **Split** — Click the scissors icon in the action bar, enter a **first** and **last** page number in the fields that appear, then click **Save…** to choose where the extracted pages are written. The original document is not modified.
-- **Reorder** — Grab the grip handle on the left of any thumbnail and drag it to a new position. The document is saved in the new order.
-
-All operations save the document immediately and reload every open tab that shares the same file.
-
-### Typewriter
-
-Click the **type icon** in the left rail to open the Typewriter panel. This is for filling ad-hoc forms that use plain underline blanks instead of real form fields.
-
-Opening the panel arms the tool (leaving it disarms). Click anywhere on the page to drop a text box and start typing; drag the box's handle to move it or its corner to resize. Choose the **font** (Helvetica, Times, or Courier), **size**, **color**, and **bold/italic** in the panel — the controls apply to the note you're editing. Click away to finish, or double-click a note to edit it again.
-
-Notes are added as a buffer edit — nothing is written until you **Save / Save As** (or discard by closing without saving). Each note is stored as a standard PDF text annotation, so it prints and opens correctly in other readers, and its text is selectable and searchable in Tumbler.
-
-> Note: so your typed notes show as a single clean layer, Tumbler's viewer does not paint annotation *markup* authored in other tools (highlights, sticky notes, stamps). That markup still prints and appears in other PDF readers.
 
 ## Tech stack
 
@@ -112,6 +58,21 @@ Notes are added as a buffer edit — nothing is written until you **Save / Save 
 | Testing | Vitest + jsdom (frontend), `cargo test` (backend) |
 
 ## Getting started
+
+### Install (prebuilt)
+
+The quickest way to run Tumbler is to grab a prebuilt Windows installer from the
+[**latest release**](https://github.com/brocla/rust-tumbler/releases/latest)
+(all releases are listed on the
+[Releases page](https://github.com/brocla/rust-tumbler/releases)). Each release
+attaches two installers — use whichever you prefer:
+
+- **NSIS** — `Tumbler_<version>_x64-setup.exe`
+- **MSI** — `Tumbler_<version>_x64_en-US.msi`
+
+These are self-contained (the required `pdfium.dll` and `qpdf.dll` are bundled),
+so nothing else needs to be installed. The rest of this section is only for
+building from source.
 
 ### Prerequisites
 
