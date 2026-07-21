@@ -13,6 +13,7 @@ pub mod redact;
 pub mod render;
 pub mod save;
 pub mod text_layer;
+pub mod typewriter;
 pub mod signature;
 pub mod startup;
 pub mod text;

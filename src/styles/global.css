@@ -1672,6 +1672,234 @@ input[type="radio"].form-check:checked {
   pointer-events: none;
 }
 
+/* ── Typewriter notes (issue #99) ─────────────────────────────────────────── */
+
+/* Sits above the other overlays so notes are visible and interactive; pointer
+   events are toggled inline (armed / editing) so clicks otherwise pass through
+   to the text layer. */
+.typewriter-layer {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  z-index: 4;
+}
+
+.typewriter-layer.armed {
+  cursor: text;
+}
+
+.typewriter-note {
+  box-sizing: border-box;
+  overflow: hidden;
+  /* A zero line-height (inherited from .page-slot) makes overlaid textareas
+     uneditable in WebView2 — force a normal one for the note and its input,
+     the same fix .form-field uses. */
+  line-height: normal;
+}
+
+.typewriter-note.active {
+  overflow: visible;
+  /* A very light yellow editing surface so a just-placed (empty) note is
+     unmistakable and the typed text stays legible in either theme. This is an
+     editing affordance only — the saved annotation has no background fill. */
+  background: rgba(255, 253, 240, 0.4);
+  outline: 1px solid var(--color-accent);
+}
+
+.typewriter-text {
+  width: 100%;
+  height: 100%;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  line-height: normal;
+  cursor: text;
+}
+
+.typewriter-input {
+  display: block;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  resize: none;
+  overflow: hidden;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  line-height: normal;
+  cursor: text;
+}
+
+.typewriter-input:focus {
+  outline: none;
+}
+
+/* Move/delete controls float just above the active box. */
+.typewriter-toolbar {
+  position: absolute;
+  top: -22px;
+  left: 0;
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.typewriter-move {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: var(--radius-sm);
+  background: var(--color-accent);
+  color: var(--color-on-accent);
+  cursor: move;
+  user-select: none;
+  font-size: 12px;
+}
+
+.typewriter-delete {
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-secondary);
+  color: var(--color-text);
+  cursor: pointer;
+  line-height: 1;
+}
+
+.typewriter-delete:hover {
+  background: var(--color-bg-tertiary);
+}
+
+.typewriter-resize {
+  position: absolute;
+  right: -4px;
+  bottom: -4px;
+  width: 10px;
+  height: 10px;
+  border: 1px solid var(--color-accent);
+  background: var(--color-bg);
+  cursor: nwse-resize;
+}
+
+/* ── Typewriter panel ─────────────────────────────────────────────────────── */
+
+.typewriter-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px 8px;
+  font-size: var(--font-size-sm);
+  overflow-y: auto;
+}
+
+.typewriter-explainer {
+  color: var(--color-text-secondary);
+  font-size: 16px;
+  line-height: 1.4;
+}
+
+.typewriter-style {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: flex-end;
+}
+
+.typewriter-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  color: var(--color-text-secondary);
+}
+
+.typewriter-field select,
+.typewriter-field input[type="number"] {
+  height: 30px;
+  padding: 0 6px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-family);
+}
+
+.typewriter-field input[type="number"] {
+  width: 60px;
+}
+
+.typewriter-field input[type="color"] {
+  width: 40px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg);
+  cursor: pointer;
+}
+
+.typewriter-style-toggles {
+  display: flex;
+  gap: 4px;
+}
+
+.typewriter-note-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.typewriter-note-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--color-text-secondary);
+}
+
+.typewriter-note-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 3px 4px;
+  border: 1px solid var(--color-border-light);
+  border-radius: 2px;
+  cursor: pointer;
+}
+
+.typewriter-note-row.active {
+  border-color: var(--color-accent);
+}
+
+.typewriter-note-snippet {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.typewriter-note-row button,
+.typewriter-clear-button {
+  min-height: 26px;
+  padding: 0 8px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-secondary);
+  color: var(--color-text);
+  font-family: var(--font-family);
+  cursor: pointer;
+}
+
+.typewriter-note-row button:hover,
+.typewriter-clear-button:hover {
+  background: var(--color-bg-tertiary);
+}
+
 /* Banner shown while previewing the staged redacted copy. Floats over the
    top of the viewer area (which is position: relative). */
 .redact-preview-banner {

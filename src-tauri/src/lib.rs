@@ -52,6 +52,8 @@ pub fn run() {
             commands::text::export_text,
             commands::text::count_pages_without_text,
             commands::text_layer::add_text_layer,
+            commands::typewriter::apply_typewriter,
+            commands::typewriter::read_typewriter,
             commands::ocr::ocr_page,
             commands::ocr::ocr_document,
             commands::ocr::cancel_ocr,
