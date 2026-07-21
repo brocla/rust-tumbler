@@ -40,9 +40,48 @@ export function TypewriterLayer({ docId, pageNumber, zoom }: TypewriterLayerProp
   const setActiveTypewriter = usePdfStore((s) => s.setActiveTypewriter);
 
   const layerRef = useRef<HTMLDivElement>(null);
+  const activeTextareaRef = useRef<HTMLTextAreaElement>(null);
   const scale = zoom / 100;
   const pageAnnots = annots.filter((a) => a.page === pageNumber);
   const activeOnThisPage = pageAnnots.some((a) => a.id === activeId);
+
+  // Focus the active note's textarea whenever it becomes active. `autoFocus`
+  // alone is unreliable here — the note mounts during the placing mousedown,
+  // whose default we prevent — so focus it explicitly.
+  useEffect(() => {
+    if (activeOnThisPage) activeTextareaRef.current?.focus();
+  }, [activeId, activeOnThisPage]);
+
+  // Self-heal a stale active id: if it references no existing note (e.g. left
+  // over after a hot reload), clear it so placement isn't permanently blocked.
+  useEffect(() => {
+    if (activeId && !annots.some((a) => a.id === activeId)) {
+      setActiveTypewriter(null);
+    }
+  }, [activeId, annots, setActiveTypewriter]);
+
+  // Double-click a committed note to re-edit it. When the tool is disarmed the
+  // note boxes are click-through (so page text under them stays selectable), so
+  // the double-click can't land on the box itself — hit-test it here instead.
+  // `dblclick` bubbles to the window regardless of what handled the selection.
+  useEffect(() => {
+    if (armed || pageAnnots.length === 0) return;
+    const onDblClick = (e: MouseEvent) => {
+      const rect = layerRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      if (e.clientX < rect.left || e.clientX > rect.right || e.clientY < rect.top || e.clientY > rect.bottom) {
+        return;
+      }
+      const x = (e.clientX - rect.left) / scale;
+      const y = (e.clientY - rect.top) / scale;
+      const hit = pageAnnots.find(
+        (a) => x >= a.x && x <= a.x + a.width && y >= a.y && y <= a.y + a.height,
+      );
+      if (hit) setActiveTypewriter(hit.id);
+    };
+    window.addEventListener("dblclick", onDblClick);
+    return () => window.removeEventListener("dblclick", onDblClick);
+  }, [armed, pageAnnots, scale, setActiveTypewriter]);
 
   const toPoints = (e: React.MouseEvent) => {
     const rect = layerRef.current?.getBoundingClientRect();
@@ -69,10 +108,19 @@ export function TypewriterLayer({ docId, pageNumber, zoom }: TypewriterLayerProp
     if (!activeOnThisPage) return;
     const onMouseDown = (e: MouseEvent) => {
       const target = e.target as HTMLElement;
-      // Keep the note active while interacting with it or with the panel's
-      // style controls (which edit the selected note); commit on any other
-      // click.
-      if (target.closest(".typewriter-note") || target.closest(".typewriter-panel")) return;
+      // Clicks on the note, the page overlay, or the panel are handled where
+      // they land (the layer's own handler / the panel controls). Only a click
+      // truly elsewhere (toolbar, tab bar, another region) commits the note.
+      // Excluding the overlay is also what prevents the placing mousedown —
+      // which React flushes synchronously before this listener is even
+      // attached — from being caught here and closing the note it just opened.
+      if (
+        target.closest(".typewriter-note") ||
+        target.closest(".typewriter-layer") ||
+        target.closest(".typewriter-panel")
+      ) {
+        return;
+      }
       deactivate();
     };
     window.addEventListener("mousedown", onMouseDown);
@@ -83,9 +131,18 @@ export function TypewriterLayer({ docId, pageNumber, zoom }: TypewriterLayerProp
   // Place a new note on an empty-space click while armed. When a note is active,
   // the window handler above deactivates it first (this click just dismisses).
   const handleLayerMouseDown = (e: React.MouseEvent) => {
-    if (!armed || e.button !== 0) return;
-    if (e.target !== layerRef.current) return; // clicked a note — let it handle
-    if (usePdfStore.getState().activeTypewriterId) return; // dismiss, don't place
+    if (e.button !== 0) return;
+    // Clicked on an existing note — the note handles its own editing.
+    if ((e.target as HTMLElement).closest(".typewriter-note")) return;
+    // Clicking the page while a note is being edited commits it (click-away to
+    // finish) rather than placing another. A stale id with no matching note
+    // (e.g. after a hot reload) is ignored so placement still works.
+    const curActive = usePdfStore.getState().activeTypewriterId;
+    if (curActive && annots.some((a) => a.id === curActive)) {
+      deactivate();
+      return;
+    }
+    if (!armed) return;
     const p = toPoints(e);
     if (!p) return;
     e.preventDefault();
@@ -169,7 +226,10 @@ export function TypewriterLayer({ docId, pageNumber, zoom }: TypewriterLayerProp
             key={annot.id}
             className={`typewriter-note${active ? " active" : ""}`}
             data-testid={`typewriter-note-${annot.id}`}
-            style={{ ...box, pointerEvents: "auto" }}
+            // Interactive while editing or while the tool is armed; otherwise
+            // click-through so the invisible page text under it stays
+            // selectable (re-edit then goes through the window dblclick handler).
+            style={{ ...box, pointerEvents: active || armed ? "auto" : "none" }}
             onDoubleClick={() => setActiveTypewriter(annot.id)}
           >
             {active ? (
@@ -192,6 +252,7 @@ export function TypewriterLayer({ docId, pageNumber, zoom }: TypewriterLayerProp
                 </div>
                 <textarea
                   className="typewriter-input"
+                  ref={activeTextareaRef}
                   autoFocus
                   value={annot.text}
                   onChange={(e) =>

@@ -321,7 +321,7 @@ fn page_geometry(doc: &Document, page_id: ObjectId) -> (f32, f32, i64) {
 /// every existing resource (images, other fonts) whether the page owns its
 /// `/Resources` or inherits them. Returned owned so it can be set after the
 /// mutable page borrow begins.
-fn merged_resources_with_font(
+pub(crate) fn merged_resources_with_font(
     doc: &Document,
     page_id: ObjectId,
     font_name: &str,
@@ -348,7 +348,7 @@ fn merged_resources_with_font(
 
 /// The stream references in a page's `/Contents`, normalized across its possible
 /// shapes (single `Reference`, `Array` of references, or missing → empty).
-fn contents_refs(doc: &Document, page_id: ObjectId) -> Vec<ObjectId> {
+pub(crate) fn contents_refs(doc: &Document, page_id: ObjectId) -> Vec<ObjectId> {
     let Some(page) = doc.get_object(page_id).ok().and_then(|o| o.as_dict().ok()) else {
         return Vec::new();
     };

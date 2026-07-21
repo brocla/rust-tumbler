@@ -28,8 +28,18 @@ fn render_page_impl(
         .get(page.saturating_sub(1) as i32)
         .map_err(|e| AppError::pdfium(format!("Failed to get page {page}"), e))?;
 
+    // Render the page content and form-field values, but NOT annotation
+    // appearances. Tumbler draws its own interactive overlays on top — text
+    // selection, form controls, and typewriter notes (issue #99). Typewriter
+    // notes are stored as FreeText annotations so they print and open correctly
+    // in other readers; letting pdfium paint that appearance here too would
+    // double it against the HTML overlay. (Printing keeps annotations on via
+    // its own FPDF_ANNOT path, so notes still print.) Trade-off: annotation
+    // markup authored elsewhere — highlights, sticky notes, stamps — is not
+    // shown in the viewer, though it still prints and appears in other readers.
     let config = PdfRenderConfig::new()
-        .set_target_width(width as Pixels);
+        .set_target_width(width as Pixels)
+        .render_annotations(false);
 
     let bitmap = pdf_page
         .render_with_config(&config)

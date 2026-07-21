@@ -1691,11 +1691,19 @@ input[type="radio"].form-check:checked {
 .typewriter-note {
   box-sizing: border-box;
   overflow: hidden;
+  /* A zero line-height (inherited from .page-slot) makes overlaid textareas
+     uneditable in WebView2 — force a normal one for the note and its input,
+     the same fix .form-field uses. */
+  line-height: normal;
 }
 
 .typewriter-note.active {
   overflow: visible;
-  outline: 1px dashed var(--color-accent);
+  /* A very light yellow editing surface so a just-placed (empty) note is
+     unmistakable and the typed text stays legible in either theme. This is an
+     editing affordance only — the saved annotation has no background fill. */
+  background: rgba(255, 253, 240, 0.4);
+  outline: 1px solid var(--color-accent);
 }
 
 .typewriter-text {
@@ -1703,10 +1711,12 @@ input[type="radio"].form-check:checked {
   height: 100%;
   white-space: pre-wrap;
   overflow-wrap: break-word;
+  line-height: normal;
   cursor: text;
 }
 
 .typewriter-input {
+  display: block;
   width: 100%;
   height: 100%;
   margin: 0;
@@ -1717,6 +1727,8 @@ input[type="radio"].form-check:checked {
   overflow: hidden;
   white-space: pre-wrap;
   overflow-wrap: break-word;
+  line-height: normal;
+  cursor: text;
 }
 
 .typewriter-input:focus {
@@ -1789,30 +1801,6 @@ input[type="radio"].form-check:checked {
   color: var(--color-text-secondary);
   font-size: 16px;
   line-height: 1.4;
-}
-
-.typewriter-arm-button {
-  height: 40px;
-  padding: 0 14px;
-  border: 1px solid transparent;
-  border-radius: var(--radius-sm);
-  background: var(--color-bg-secondary);
-  color: var(--color-text);
-  border-color: var(--color-border);
-  font-family: var(--font-family);
-  font-size: var(--font-size-md);
-  cursor: pointer;
-}
-
-.typewriter-arm-button.active {
-  border-color: transparent;
-  background: var(--color-accent);
-  color: var(--color-on-accent);
-  font-weight: 600;
-}
-
-.typewriter-arm-button:hover:not(.active) {
-  background: var(--color-bg-tertiary);
 }
 
 .typewriter-style {

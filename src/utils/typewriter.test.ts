@@ -100,6 +100,16 @@ describe("commitTypewriter", () => {
     expect(args.annots[0].id).toBe("a");
   });
 
+  it("bumps ocrEpoch so the selectable text layer re-extracts", async () => {
+    usePdfStore.getState().setTypewriterAnnots("doc-1", [
+      { id: "a", page: 1, x: 0, y: 0, width: 100, height: 20, text: "hi", fontFamily: "Helvetica", bold: false, italic: false, fontSize: 12, color: [0, 0, 0] },
+    ]);
+
+    await commitTypewriter("doc-1");
+
+    expect(usePdfStore.getState().tabs[0].ocrEpoch).toBe(1);
+  });
+
   it("surfaces a failure as a notice instead of throwing", async () => {
     invoke.mockRejectedValue("boom");
     usePdfStore.getState().setTypewriterAnnots("doc-1", [

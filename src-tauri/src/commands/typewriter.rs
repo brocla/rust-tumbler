@@ -22,7 +22,9 @@
 //! unrotated page is authored correctly.
 
 use crate::commands::save::dirty_changed_payload;
-use crate::commands::text_layer::{encode_for_font, helvetica_width_1000};
+use crate::commands::text_layer::{
+    contents_refs, encode_for_font, helvetica_width_1000, merged_resources_with_font,
+};
 use crate::error::AppError;
 use crate::state::{lock_mutex, AppState};
 use lopdf::content::{Content, Operation};
@@ -48,6 +50,13 @@ const ASCENT_RATIO: f32 = 0.8;
 /// Resource name of the note's font within its appearance stream (each note's
 /// XObject has its own resource dictionary, so a fixed name never collides).
 const FONT_RES: &str = "F0";
+
+/// Font resource name for the invisible page-text layer (see
+/// [`add_tumbler_text_layer`]). Prefixed so it can't collide with a page font.
+const TEXT_LAYER_FONT_RES: &str = "TumblerTWFont";
+/// Private key marking a content stream as Tumbler's invisible typewriter text
+/// layer, so a re-apply removes and rebuilds it rather than stacking copies.
+const TEXT_LAYER_TAG: &[u8] = b"TumblerTW";
 
 /// One typewriter note. Mirrors the frontend `TypewriterAnnot` (serde
 /// camelCase). The rect is PDF points, top-left origin, per (1-based) page.
@@ -435,20 +444,196 @@ fn add_tumbler_annots(doc: &mut Document, annots: &[TypewriterAnnot]) -> Result<
     Ok(())
 }
 
+// ── Invisible page-text layer (search + selection) ───────────────────────────
+//
+// A FreeText annotation's text is not part of the page content stream, so
+// pdfium — which drives Tumbler's search and text selection — never sees it.
+// To make notes searchable and selectable we also embed each note's text into
+// the page as an **invisible** (text render mode 3) content run, exactly like
+// the OCR "sandwich" (see [`crate::commands::text_layer`]): pdfium extracts it
+// but never paints it, so it doesn't double the visible overlay/appearance. A
+// non-Helvetica note's run still uses Helvetica metrics — invisible text is
+// only ever extracted, never seen, so the exact glyph shapes don't matter.
+
+/// Builds the invisible content stream for all notes on one page: one run per
+/// wrapped line, positioned in page user space so its extraction box lands on
+/// the visible note text. Empty when no note has representable text.
+fn build_text_layer_content(
+    annots: &[&TypewriterAnnot],
+    page_height: f32,
+    ox: f32,
+    oy: f32,
+) -> Result<Vec<u8>, AppError> {
+    // `q`/`ET`-wrapped so our text state can't leak into (or inherit from) the
+    // page's own content beyond a balanced default state.
+    let mut ops = vec![
+        Operation::new("q", vec![]),
+        Operation::new("BT", vec![]),
+        Operation::new("Tr", vec![Object::Integer(3)]), // invisible
+    ];
+    let mut any = false;
+    for annot in annots {
+        let lines = wrap_lines(&annot.text, &annot.font_family, annot.font_size, annot.width);
+        let leading = annot.font_size * LINE_HEIGHT_RATIO;
+        ops.push(Operation::new(
+            "Tf",
+            vec![
+                Object::Name(TEXT_LAYER_FONT_RES.as_bytes().to_vec()),
+                Object::Real(annot.font_size),
+            ],
+        ));
+        for (i, line) in lines.iter().enumerate() {
+            if line.is_empty() {
+                continue;
+            }
+            any = true;
+            let y_tl = annot.y + INSET + annot.font_size * ASCENT_RATIO + i as f32 * leading;
+            let x = ox + annot.x + INSET;
+            let y = oy + page_height - y_tl;
+            ops.push(Operation::new(
+                "Tm",
+                vec![
+                    Object::Real(1.0), Object::Real(0.0), Object::Real(0.0),
+                    Object::Real(1.0), Object::Real(x), Object::Real(y),
+                ],
+            ));
+            ops.push(Operation::new(
+                "Tj",
+                vec![Object::String(line.clone(), StringFormat::Literal)],
+            ));
+        }
+    }
+    ops.push(Operation::new("ET", vec![]));
+    ops.push(Operation::new("Q", vec![]));
+    if !any {
+        return Ok(Vec::new());
+    }
+    Content { operations: ops }
+        .encode()
+        .map_err(|e| AppError::lopdf("Failed to encode typewriter text layer", e))
+}
+
+/// Removes the invisible typewriter text layer from every page (our tagged
+/// content streams), leaving the page's own content intact. Returns how many
+/// were removed.
+fn remove_tumbler_text_layer(doc: &mut Document) -> usize {
+    let page_ids: Vec<ObjectId> = doc.get_pages().values().copied().collect();
+    let mut removed = 0usize;
+    let mut to_delete: Vec<ObjectId> = Vec::new();
+    let mut page_updates: Vec<(ObjectId, Vec<ObjectId>)> = Vec::new();
+
+    for page_id in page_ids {
+        let refs = contents_refs(doc, page_id);
+        if refs.is_empty() {
+            continue;
+        }
+        let mut kept = Vec::new();
+        let mut changed = false;
+        for r in refs {
+            let ours = doc
+                .get_object(r)
+                .ok()
+                .and_then(|o| o.as_stream().ok())
+                .map(|s| s.dict.has(TEXT_LAYER_TAG))
+                .unwrap_or(false);
+            if ours {
+                removed += 1;
+                changed = true;
+                to_delete.push(r);
+            } else {
+                kept.push(r);
+            }
+        }
+        if changed {
+            page_updates.push((page_id, kept));
+        }
+    }
+
+    for (page_id, kept) in page_updates {
+        if let Ok(page) = doc.get_object_mut(page_id).and_then(|o| o.as_dict_mut()) {
+            match kept.len() {
+                0 => { page.remove(b"Contents"); }
+                1 => { page.set("Contents", Object::Reference(kept[0])); }
+                _ => {
+                    page.set("Contents", Object::Array(kept.into_iter().map(Object::Reference).collect()));
+                }
+            }
+        }
+    }
+    for id in to_delete {
+        doc.objects.remove(&id);
+    }
+    removed
+}
+
+/// Appends the invisible text layer for the given notes, one tagged content
+/// stream per page, and merges the shared invisible font into each page's
+/// resources.
+fn add_tumbler_text_layer(doc: &mut Document, annots: &[TypewriterAnnot]) -> Result<(), AppError> {
+    let pages = doc.get_pages();
+    let mut by_page: HashMap<u32, Vec<&TypewriterAnnot>> = HashMap::new();
+    for annot in annots {
+        if pages.contains_key(&annot.page) {
+            by_page.entry(annot.page).or_default().push(annot);
+        }
+    }
+    if by_page.is_empty() {
+        return Ok(());
+    }
+
+    let font_id = doc.add_object(dictionary! {
+        "Type" => "Font",
+        "Subtype" => "Type1",
+        "BaseFont" => "Helvetica",
+        "Encoding" => "WinAnsiEncoding",
+    });
+
+    for (page_num, page_annots) in by_page {
+        let page_id = pages[&page_num];
+        let (ox, oy, _w, h) = page_media_box(doc, page_id);
+        let content = build_text_layer_content(&page_annots, h, ox, oy)?;
+        if content.is_empty() {
+            continue;
+        }
+        let resources = merged_resources_with_font(doc, page_id, TEXT_LAYER_FONT_RES, font_id);
+        let existing = contents_refs(doc, page_id);
+
+        let mut stream_dict = Dictionary::new();
+        stream_dict.set(TEXT_LAYER_TAG, Object::Boolean(true));
+        let stream_id = doc.add_object(Object::Stream(Stream::new(stream_dict, content)));
+
+        let mut refs: Vec<Object> = existing.into_iter().map(Object::Reference).collect();
+        refs.push(Object::Reference(stream_id));
+
+        let page = doc
+            .get_object_mut(page_id)
+            .and_then(|o| o.as_dict_mut())
+            .map_err(|e| AppError::lopdf("Failed to update page /Contents", e))?;
+        page.set("Contents", Object::Array(refs));
+        page.set("Resources", Object::Dictionary(resources));
+    }
+    Ok(())
+}
+
 /// Replaces Tumbler's typewriter notes in `buffer` with `annots`, returning the
 /// new document bytes — or `None` when nothing changed (no notes to add and none
 /// of ours to remove), so the caller can skip a needless dirtying reserialize.
+///
+/// Each note is written twice: as a visible FreeText annotation (for other
+/// readers) and as an invisible page-text run (so Tumbler's search and text
+/// selection, which read the page content stream, find it).
 pub fn write_typewriter_annots(
     buffer: &[u8],
     annots: &[TypewriterAnnot],
 ) -> Result<Option<Vec<u8>>, AppError> {
     let mut doc = Document::load_mem(buffer)
         .map_err(|e| AppError::lopdf("Failed to parse PDF for typewriter", e))?;
-    let removed = remove_tumbler_annots(&mut doc);
+    let removed = remove_tumbler_annots(&mut doc) + remove_tumbler_text_layer(&mut doc);
     if annots.is_empty() && removed == 0 {
         return Ok(None);
     }
     add_tumbler_annots(&mut doc, annots)?;
+    add_tumbler_text_layer(&mut doc, annots)?;
     let mut out = Vec::new();
     doc.save_to(&mut out)
         .map_err(|e| AppError::io("Failed to serialize typewriter annotations", e))?;
@@ -652,6 +837,43 @@ mod tests {
         assert_eq!(dict.get(b"Subtype").unwrap().as_name().unwrap(), b"FreeText");
         assert!(dict.has(TW_ID_KEY));
         assert!(dict.get(b"AP").is_ok(), "has an appearance stream");
+    }
+
+    #[test]
+    fn note_text_is_extractable_by_pdfium() {
+        // The invisible page-text layer is what makes a note searchable and
+        // selectable: pdfium (which drives both) must extract the note's text.
+        let bytes = write_typewriter_annots(&fixture_bytes(), &[sample_annot()])
+            .expect("write")
+            .expect("some bytes");
+
+        let pdfium = crate::test_pdfium();
+        let _guard = crate::test_pdfium_guard();
+        let doc = pdfium
+            .load_pdf_from_byte_vec(bytes, None)
+            .expect("pdfium opens edited bytes");
+        let page = doc.pages().get(0).expect("page 0");
+        let text = page.text().expect("page text").all();
+        assert!(text.contains("Hello world"), "note text missing from extraction: {text:?}");
+    }
+
+    #[test]
+    fn clearing_notes_removes_the_extractable_text() {
+        let with_note = write_typewriter_annots(&fixture_bytes(), &[sample_annot()])
+            .expect("write")
+            .expect("bytes");
+        let cleared = write_typewriter_annots(&with_note, &[])
+            .expect("clear")
+            .expect("bytes");
+
+        let pdfium = crate::test_pdfium();
+        let _guard = crate::test_pdfium_guard();
+        let doc = pdfium.load_pdf_from_byte_vec(cleared, None).expect("open");
+        let page = doc.pages().get(0).expect("page 0");
+        let text = page.text().expect("page text").all();
+        assert!(!text.contains("Hello world"), "note text should be gone: {text:?}");
+        // The page's own text survives.
+        assert!(text.contains("Test Fixture"), "original text lost: {text:?}");
     }
 
     #[test]

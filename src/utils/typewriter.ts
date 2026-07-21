@@ -78,6 +78,12 @@ export async function commitTypewriter(docId: string): Promise<void> {
   const annots = (tab.typewriterAnnots ?? []).filter((a) => a.text.trim().length > 0);
   try {
     await invoke("apply_typewriter", { docId, annots });
+    // The note text is now embedded as an invisible page-text run, so nudge the
+    // selectable text overlay to re-extract it (the same epoch the OCR layer
+    // bumps). Search reads the backend live and needs no nudge.
+    const store = usePdfStore.getState();
+    const t = store.tabs.find((tab) => tab.docId === docId);
+    if (t) store.updateTab(t.id, { ocrEpoch: (t.ocrEpoch ?? 0) + 1 });
   } catch (err) {
     usePdfStore.getState().showNotice(`Could not save typewriter text: ${String(err)}`);
   }

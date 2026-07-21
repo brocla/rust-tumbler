@@ -14,7 +14,6 @@ const FONT_FAMILIES: TypewriterAnnot["fontFamily"][] = ["Helvetica", "Times", "C
  */
 export function TypewriterPanel() {
   const activeTab = usePdfStore((s) => s.tabs.find((t) => t.id === s.activeTabId));
-  const armed = usePdfStore((s) => s.typewriterMode);
   const style = usePdfStore((s) => s.typewriterStyle);
   const activeId = usePdfStore((s) => s.activeTypewriterId);
   const setTypewriterMode = usePdfStore((s) => s.setTypewriterMode);
@@ -26,15 +25,15 @@ export function TypewriterPanel() {
 
   const docId = activeTab?.docId;
 
-  // Reset per-document state when the active document changes (the panel stays
-  // mounted across tab switches — mirror RedactPanel).
+  // The panel being open *is* the tool: while it's mounted the viewer is armed
+  // for placing notes; leaving the panel (tool switched away) disarms. Re-arm
+  // and clear the selection when the active document changes.
   useEffect(() => {
-    setTypewriterMode(false);
+    setTypewriterMode(true);
     setActiveTypewriter(null);
   }, [docId, setTypewriterMode, setActiveTypewriter]);
 
-  // Disarm when the panel unmounts (tool switched away) so the viewer isn't
-  // left placing notes.
+  // Disarm when the panel unmounts so the viewer isn't left placing notes.
   useEffect(
     () => () => {
       usePdfStore.getState().setTypewriterMode(false);
@@ -83,18 +82,11 @@ export function TypewriterPanel() {
   return (
     <div className="typewriter-panel">
       <div className="typewriter-explainer">
-        Type text anywhere on the page — handy for filling forms that use plain
-        underline blanks. Click <strong>Add text</strong>, then click where you
-        want to type. Double-click a note to edit it again. Notes are saved with
-        the document when you Save.
+        Click anywhere on the page to type — handy for filling forms that use
+        plain underline blanks. Double-click a note to edit it again. Notes are
+        saved with the document when you Save. Close this panel when you&#8217;re
+        done.
       </div>
-
-      <button
-        className={`typewriter-arm-button${armed ? " active" : ""}`}
-        onClick={() => setTypewriterMode(!armed)}
-      >
-        {armed ? "Placing — click to stop" : "Add text"}
-      </button>
 
       <div className="typewriter-style">
         <label className="typewriter-field">

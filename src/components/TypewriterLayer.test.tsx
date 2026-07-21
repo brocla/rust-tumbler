@@ -122,11 +122,25 @@ describe("TypewriterLayer", () => {
     expect(usePdfStore.getState().tabs[0].typewriterAnnots![0].text).toBe("Typed");
   });
 
-  it("double-clicking a note activates it for editing", () => {
+  it("double-clicking a note activates it for editing (armed)", () => {
+    usePdfStore.setState({ typewriterMode: true });
     usePdfStore.getState().setTypewriterAnnots("doc-1", [makeAnnot()]);
     const { getByTestId } = render(<TypewriterLayer docId="doc-1" pageNumber={1} zoom={100} />);
 
     fireEvent.doubleClick(getByTestId("typewriter-note-note-1"));
+    expect(usePdfStore.getState().activeTypewriterId).toBe("note-1");
+  });
+
+  it("double-clicking a committed note re-activates it via hit-test when disarmed", () => {
+    usePdfStore.setState({ typewriterMode: false, activeTypewriterId: null });
+    usePdfStore.getState().setTypewriterAnnots("doc-1", [
+      makeAnnot({ x: 10, y: 20, width: 100, height: 30 }),
+    ]);
+    const { getByTestId } = render(<TypewriterLayer docId="doc-1" pageNumber={1} zoom={100} />);
+    stubRect(getByTestId("typewriter-layer-1"), 200);
+
+    // A point inside the note box (x 10–110, y 20–50) at scale 1.
+    fireEvent.dblClick(window, { clientX: 30, clientY: 30 });
     expect(usePdfStore.getState().activeTypewriterId).toBe("note-1");
   });
 
