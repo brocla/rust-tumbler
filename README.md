@@ -39,13 +39,6 @@ Built with Tauri v2
 - Redaction
 
 
-## Futures
-
-Planned enhancements:
-
-- **CLI**
-
- 
 
 ## UI
 
@@ -118,75 +111,6 @@ Notes are added as a buffer edit — nothing is written until you **Save / Save 
 | Printing/theming | `windows` crate (GDI, `PrintDlgExW`, `UISettings`) |
 | Testing | Vitest + jsdom (frontend), `cargo test` (backend) |
 
-## Project structure
-
-```
-rust-tumbler/
-├── src/                          # React frontend
-│   ├── components/
-│   │   ├── Toolbar.tsx           # Navigation, zoom, print, make searchable, export text, display mode
-│   │   ├── TabBar.tsx            # Multi-document tabs
-│   │   ├── IconRail.tsx          # Sidebar tool switcher
-│   │   ├── Sidebar.tsx           # Tab container for panels
-│   │   ├── ViewerArea.tsx        # Viewer container
-│   │   ├── ContinuousViewer.tsx  # Scrollable page list
-│   │   ├── PageSlot.tsx          # Per-page render + canvas
-│   │   ├── TextLayer.tsx         # Selectable/copyable text overlay
-│   │   ├── HighlightLayer.tsx    # Search-result highlighting
-│   │   ├── FormLayer.tsx         # Interactive AcroForm controls
-│   │   ├── RedactLayer.tsx       # Redaction region overlay
-│   │   ├── TypewriterLayer.tsx   # Typewriter note overlay (editable)
-│   │   ├── ThumbnailPanel.tsx    # Page thumbnail strip
-│   │   ├── SearchPanel.tsx       # Full-text search UI
-│   │   ├── MetadataPanel.tsx     # Document info editor
-│   │   ├── PagesPanel.tsx        # Page operations (delete/rotate/reorder/merge/split)
-│   │   ├── OptimizePanel.tsx     # Compression + Web Optimization
-│   │   ├── RedactPanel.tsx       # Redaction find/apply/save
-│   │   ├── TypewriterPanel.tsx   # Typewriter font/size/color controls
-│   │   └── StatusBar.tsx         # Page/zoom, signature & format badges
-│   ├── store/
-│   │   └── usePdfStore.ts        # Zustand global state (tabs, zoom, etc.)
-│   ├── utils/                    # Bitmap conversion, render cache, etc.
-│   ├── styles/
-│   │   └── global.css            # Design tokens and layout
-│   ├── App.tsx
-│   └── main.tsx
-├── src-tauri/                    # Rust/Tauri backend
-│   ├── src/
-│   │   ├── commands/
-│   │   │   ├── document.rs       # open/close document
-│   │   │   ├── encryption.rs     # decrypt-on-open, re-encrypt on save, set/remove password
-│   │   │   ├── render.rs         # page rendering
-│   │   │   ├── text.rs           # text extraction + search (with OCR fallback)
-│   │   │   ├── ocr.rs            # OCR via Windows.Media.Ocr (Make Searchable)
-│   │   │   ├── text_layer.rs     # embed an invisible OCR text layer
-│   │   │   ├── metadata.rs       # metadata read/write (lopdf)
-│   │   │   ├── pages.rs          # page operations (delete/rotate/reorder/merge/split)
-│   │   │   ├── forms.rs          # AcroForm field discovery + value writes
-│   │   │   ├── typewriter.rs     # free-text "typewriter" notes (FreeText annotations)
-│   │   │   ├── redact.rs         # redaction (flatten + verify)
-│   │   │   ├── optimize.rs       # compression pipeline
-│   │   │   ├── linearize.rs      # Web Optimization (qpdf)
-│   │   │   ├── signature.rs      # digital-signature verification
-│   │   │   ├── conformance.rs    # ISO sub-format detection (PDF/A, /X, …)
-│   │   │   ├── save.rs           # Save / Save As (only disk writers)
-│   │   │   ├── print.rs          # native printing (GDI)
-│   │   │   ├── theme.rs          # Windows accent color
-│   │   │   └── startup.rs        # file-association startup path
-│   │   ├── state.rs              # AppState, document map
-│   │   ├── error.rs               # AppError
-│   │   ├── lib.rs
-│   │   └── main.rs
-│   ├── tauri.conf.json
-│   └── Cargo.toml
-├── .github/
-│   └── workflows/
-│       └── ci.yml                # Frontend tests + cargo check
-├── index.html
-├── vite.config.ts
-└── package.json
-```
-
 ## Getting started
 
 ### Prerequisites
@@ -238,15 +162,3 @@ npm test           # frontend (Vitest)
 cargo test         # backend (from src-tauri/)
 ```
 
-## Updating the app version
-
-Run `npm version <patch|minor|major>` on `main` after a PR merges. A sync
-script propagates the new version to all three files and creates the
-`vX.Y.Z` tag:
-
-- `package.json` → `"version"`
-- `src-tauri/tauri.conf.json` → `"version"`
-- `src-tauri/Cargo.toml` → `version`
-
-Push with `git push --follow-tags` — pushing the tag triggers the Release
-workflow, which builds the Windows installers and publishes a GitHub Release.
