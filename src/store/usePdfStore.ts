@@ -78,6 +78,11 @@ export interface TabState {
   // (rendered via render_redacted_page — the buffer is untouched) and shows
   // the preview banner. `verified` gates Save As.
   redactPreview?: { verified: boolean } | null;
+  // Typewriter notes placed on the document (issue #99). The editable overlay
+  // (TypewriterLayer) is authoritative; committing them writes FreeText
+  // annotations into the buffer via apply_typewriter. Hydrated from the file on
+  // open (read_typewriter) so notes stay re-editable across sessions.
+  typewriterAnnots?: TypewriterAnnot[];
 }
 
 /**
@@ -102,6 +107,36 @@ export interface SearchResult {
 export interface RedactRegion {
   page: number;
   rect: { x: number; y: number; width: number; height: number };
+}
+
+/**
+ * A typewriter note (issue #99), mirroring the backend `TypewriterAnnot`
+ * (serde camelCase). The rect is PDF points, top-left origin, per (1-based)
+ * page — the same coordinate space as search/redaction rects. `color` is RGB
+ * with each component in 0.0..=1.0.
+ */
+export interface TypewriterAnnot {
+  id: string;
+  page: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  text: string;
+  fontFamily: "Helvetica" | "Times" | "Courier";
+  bold: boolean;
+  italic: boolean;
+  fontSize: number;
+  color: [number, number, number];
+}
+
+/** The style applied to the next new typewriter note (issue #99). */
+export interface TypewriterStyle {
+  fontFamily: "Helvetica" | "Times" | "Courier";
+  bold: boolean;
+  italic: boolean;
+  fontSize: number;
+  color: [number, number, number];
 }
 
 /** Progress of an in-flight redaction run (Tauri `redact-progress` events). */
@@ -150,7 +185,15 @@ interface PdfStore {
   activeTabId: string | null;
 
   // Global state
-  activeSidebarTool: "thumbnails" | "search" | "metadata" | "pages" | "optimize" | "redact" | null;
+  activeSidebarTool:
+    | "thumbnails"
+    | "search"
+    | "metadata"
+    | "pages"
+    | "optimize"
+    | "redact"
+    | "typewriter"
+    | null;
   sidebarWidth: number;
   // Progress of an in-flight document-wide OCR run — "Make Searchable" or
   // Export Text's OCR pass (driven by Tauri `ocr-progress` events). Null when
@@ -171,6 +214,15 @@ interface PdfStore {
   // True while the Redact panel's "Draw region" mode is armed: RedactLayer
   // captures a marquee drag on the page instead of text selection.
   redactDrawMode: boolean;
+  // True while the Typewriter tool is armed: clicking empty page space in
+  // TypewriterLayer places a new note. (issue #99)
+  typewriterMode: boolean;
+  // The style the next new typewriter note is created with; the panel's font
+  // controls edit this (or the active note, when one is selected). (issue #99)
+  typewriterStyle: TypewriterStyle;
+  // The note currently selected/being edited, or null. Drives which note the
+  // panel's font controls target and which shows its editing box. (issue #99)
+  activeTypewriterId: string | null;
   // Non-null while an unsaved-changes prompt is showing (close guards await it).
   unsavedPrompt: UnsavedPrompt | null;
   // Non-null while a password prompt is showing for an encrypted PDF being
@@ -199,6 +251,16 @@ interface PdfStore {
   removeRedactRegion: (docId: string, index: number) => void;
   clearRedactRegions: (docId: string) => void;
 
+  // Typewriter note management, keyed by docId (issue #99). TypewriterLayer
+  // lives per page and knows the docId, not the tab id.
+  setTypewriterMode: (on: boolean) => void;
+  setTypewriterStyle: (patch: Partial<TypewriterStyle>) => void;
+  setActiveTypewriter: (id: string | null) => void;
+  addTypewriterAnnot: (docId: string, annot: TypewriterAnnot) => void;
+  updateTypewriterAnnot: (docId: string, id: string, patch: Partial<TypewriterAnnot>) => void;
+  removeTypewriterAnnot: (docId: string, id: string) => void;
+  setTypewriterAnnots: (docId: string, annots: TypewriterAnnot[]) => void;
+
   showNotice: (message: string) => void;
   clearNotice: () => void;
   bumpFormEpoch: (docId: string) => void;
@@ -225,6 +287,15 @@ export const usePdfStore = create<PdfStore>((set, get) => ({
   redactProgress: null,
   linearizeProgress: false,
   redactDrawMode: false,
+  typewriterMode: false,
+  typewriterStyle: {
+    fontFamily: "Helvetica",
+    bold: false,
+    italic: false,
+    fontSize: 12,
+    color: [0, 0, 0],
+  },
+  activeTypewriterId: null,
   unsavedPrompt: null,
   passwordPrompt: null,
   notice: null,
@@ -291,6 +362,52 @@ export const usePdfStore = create<PdfStore>((set, get) => ({
         t.docId === docId
           ? { ...t, redactRegions: [], redactQueries: [], redactMetadataMatches: [] }
           : t,
+      ),
+    })),
+
+  setTypewriterMode: (on) => set({ typewriterMode: on }),
+
+  setTypewriterStyle: (patch) =>
+    set((state) => ({ typewriterStyle: { ...state.typewriterStyle, ...patch } })),
+
+  setActiveTypewriter: (id) => set({ activeTypewriterId: id }),
+
+  addTypewriterAnnot: (docId, annot) =>
+    set((state) => ({
+      tabs: state.tabs.map((t) =>
+        t.docId === docId
+          ? { ...t, typewriterAnnots: [...(t.typewriterAnnots ?? []), annot] }
+          : t,
+      ),
+    })),
+
+  updateTypewriterAnnot: (docId, id, patch) =>
+    set((state) => ({
+      tabs: state.tabs.map((t) =>
+        t.docId === docId
+          ? {
+              ...t,
+              typewriterAnnots: (t.typewriterAnnots ?? []).map((a) =>
+                a.id === id ? { ...a, ...patch } : a,
+              ),
+            }
+          : t,
+      ),
+    })),
+
+  removeTypewriterAnnot: (docId, id) =>
+    set((state) => ({
+      tabs: state.tabs.map((t) =>
+        t.docId === docId
+          ? { ...t, typewriterAnnots: (t.typewriterAnnots ?? []).filter((a) => a.id !== id) }
+          : t,
+      ),
+    })),
+
+  setTypewriterAnnots: (docId, annots) =>
+    set((state) => ({
+      tabs: state.tabs.map((t) =>
+        t.docId === docId ? { ...t, typewriterAnnots: annots } : t,
       ),
     })),
 

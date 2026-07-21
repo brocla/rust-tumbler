@@ -62,6 +62,7 @@ rust-tumbler/
 | `save.rs` | Save / Save As — the only commands that write the in-memory buffer to disk |
 | `optimize.rs` | five-step compression pipeline (lopdf) |
 | `text_layer.rs` | embed an invisible OCR text layer into the document buffer (lopdf; issue #4) |
+| `typewriter.rs` | place free-text "typewriter" notes anywhere on a page as FreeText annotations with a generated appearance stream (lopdf on the buffer; re-hydrated on open; issue #99) |
 | `forms.rs` | AcroForm field discovery + inline value writes (lopdf on the buffer; issue #2) |
 | `signature.rs` | digital-signature integrity verification, read-only (lopdf `/ByteRange` parse; CMS parsed via Windows CryptoAPI `CryptMsg*`, which handles Adobe's BER encoding; issues #17, #39) |
 | `conformance.rs` | declared ISO sub-format detection — PDF/A, PDF/X, PDF/E, PDF/UA — from the XMP packet (lopdf) |

@@ -14,7 +14,12 @@ import { PasswordPrompt } from "./components/PasswordPrompt";
 import { Notice } from "./components/Notice";
 import { saveTab, saveTabAs, confirmCloseDirtyTab } from "./utils/saveDocument";
 import { usePdfStore, suppressedReloadDocs } from "./store/usePdfStore";
-import type { PageDimension, CompressProgress, RedactProgress } from "./store/usePdfStore";
+import type {
+  PageDimension,
+  CompressProgress,
+  RedactProgress,
+  TypewriterAnnot,
+} from "./store/usePdfStore";
 import { discardRedaction } from "./utils/redactSave";
 import type { SignatureInfo } from "./utils/signature";
 import { contrastTextColor } from "./utils/color";
@@ -135,6 +140,17 @@ function App() {
         linearized: info.linearized,
       });
       refreshSignatureStatus(info.docId, tabId);
+
+      // Re-hydrate any typewriter notes stored in the file (issue #99) so they
+      // stay re-editable across sessions. Best-effort — a read failure just
+      // leaves the overlay empty.
+      invoke<TypewriterAnnot[]>("read_typewriter", { docId: info.docId })
+        .then((notes) => {
+          if (notes.length > 0) {
+            usePdfStore.getState().setTypewriterAnnots(info.docId, notes);
+          }
+        })
+        .catch(() => {});
     } catch (err) {
       await message(String(err), { title: "Failed to Open PDF", kind: "error" });
     }

@@ -1,4 +1,4 @@
-import { Layers, Search, Info, PocketKnife, Minimize2, EyeOff } from "lucide-react";
+import { Layers, Search, Info, PocketKnife, Minimize2, EyeOff, Type } from "lucide-react";
 import { usePdfStore } from "../store/usePdfStore";
 
 export function IconRail() {
@@ -54,6 +54,13 @@ export function IconRail() {
       >
         {/* Mirrored: the slash reads better rising left-to-right. */}
         <EyeOff size={20} style={{ transform: "scaleX(-1)" }} />
+      </button>
+      <button
+        className={`rail-button ${activeTool === "typewriter" ? "active" : ""}`}
+        onClick={() => setSidebarTool("typewriter")}
+        title="Typewriter"
+      >
+        <Type size={20} />
       </button>
     </div>
   );

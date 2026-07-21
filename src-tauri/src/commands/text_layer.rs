@@ -71,7 +71,7 @@ pub struct AddTextLayerResult {
 /// the horizontal scaling stretches it to exactly the OCR box — the backend
 /// equivalent of the frontend text layer's canvas width measurement. Bytes
 /// outside the table (rare WinAnsi punctuation) fall back to a mid-range 556.
-fn helvetica_width_1000(byte: u8) -> u16 {
+pub(crate) fn helvetica_width_1000(byte: u8) -> u16 {
     match byte {
         b' ' => 278, b'!' => 278, b'"' => 355, b'#' => 556, b'$' => 556, b'%' => 889,
         b'&' => 667, b'\'' => 191, b'(' => 333, b')' => 333, b'*' => 389, b'+' => 584,
@@ -183,7 +183,7 @@ fn win_ansi_byte(c: char) -> Option<u8> {
 }
 
 /// Encodes text for the standard WinAnsi font, dropping unrepresentable chars.
-fn encode_for_font(text: &str) -> Vec<u8> {
+pub(crate) fn encode_for_font(text: &str) -> Vec<u8> {
     text.chars().filter_map(win_ansi_byte).collect()
 }
 

@@ -6,6 +6,7 @@ import { TextLayer } from "./TextLayer";
 import { FormLayer } from "./FormLayer";
 import { HighlightLayer } from "./HighlightLayer";
 import { RedactLayer } from "./RedactLayer";
+import { TypewriterLayer } from "./TypewriterLayer";
 
 interface HighlightRect {
   x: number;
@@ -181,6 +182,11 @@ export function PageSlot({
             zoom={zoom}
           />
           <RedactLayer
+            docId={docId}
+            pageNumber={pageNumber}
+            zoom={zoom}
+          />
+          <TypewriterLayer
             docId={docId}
             pageNumber={pageNumber}
             zoom={zoom}
