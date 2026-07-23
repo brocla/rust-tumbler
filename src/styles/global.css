@@ -1274,6 +1274,110 @@ input[type="radio"].form-check:checked {
   opacity: 0.6;
 }
 
+/* Margins Panel (Expand Margins) */
+.margins-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 12px;
+}
+
+.margins-explainer {
+  color: var(--color-text-secondary);
+  font-size: 14px;
+  line-height: 1.4;
+  margin-bottom: 26px;
+}
+
+.margins-status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+}
+
+.margins-cancel-button {
+  height: 24px;
+  padding: 0 10px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-family);
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+}
+
+.margins-cancel-button:hover {
+  background: var(--color-bg-secondary);
+}
+
+.margins-readout {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: 10px;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+}
+
+.margins-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.margins-gain {
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.margins-slider {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+}
+
+.margins-slider input[type="range"] {
+  width: 100%;
+}
+
+.margins-apply-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  align-self: flex-start;
+  height: 30px;
+  padding: 0 16px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: var(--color-accent);
+  color: var(--color-on-accent);
+  font-family: var(--font-family);
+  font-size: var(--font-size-md);
+  cursor: pointer;
+}
+
+.margins-apply-button:hover:not(:disabled) {
+  background: var(--color-accent-dim);
+}
+
+.margins-apply-button:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.margins-applied {
+  font-size: var(--font-size-md);
+  font-weight: 600;
+  color: var(--color-accent);
+}
+
 /* Pages Panel */
 .pages-panel {
   display: flex;

@@ -191,6 +191,7 @@ interface PdfStore {
     | "metadata"
     | "pages"
     | "optimize"
+    | "margins"
     | "redact"
     | "typewriter"
     | null;

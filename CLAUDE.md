@@ -61,6 +61,7 @@ rust-tumbler/
 | `pages.rs` | delete, rotate, reorder, merge, split pages (**pdfium** — mutates the `PdfDocument` then `save_to_bytes()`) |
 | `save.rs` | Save / Save As — the only commands that write the in-memory buffer to disk |
 | `optimize.rs` | five-step compression pipeline (lopdf) |
+| `margins.rs` | Expand Margins: detect each page's ink bounding box (pdfium raster scan) and scale content uniformly to fill the page (lopdf `q cm … Q` wrap; annotations ride along) |
 | `text_layer.rs` | embed an invisible OCR text layer into the document buffer (lopdf; issue #4) |
 | `typewriter.rs` | place free-text "typewriter" notes anywhere on a page as FreeText annotations with a generated appearance stream (lopdf on the buffer; re-hydrated on open; issue #99) |
 | `forms.rs` | AcroForm field discovery + inline value writes (lopdf on the buffer; issue #2) |
