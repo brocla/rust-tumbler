@@ -144,11 +144,141 @@ body {
 }
 
 /* Birthday dedication (Margins panel easter egg) — sits on the left while the
-   badges stay right-justified. */
+   badges stay right-justified. Slides in with a few swings, then re-wiggles
+   every 9s to draw the eye; a gold shimmer sweeps the glyphs continuously. */
 .birthday-egg {
   margin-right: auto;
   font-weight: 600;
   color: var(--color-accent);
+  animation:
+    birthday-slide-in 1.1s cubic-bezier(0.22, 1, 0.36, 1),
+    birthday-wiggle 9s ease-in-out 3s infinite;
+}
+
+/* Shimmer needs the text painted by a gradient; the plain accent color above
+   stays as the fallback where background-clip: text isn't available. */
+@supports (-webkit-background-clip: text) {
+  .birthday-egg {
+    background: linear-gradient(
+      100deg,
+      var(--color-accent) 38%,
+      #e8b94a 47%,
+      #fdf3d0 50%,
+      #e8b94a 53%,
+      var(--color-accent) 62%
+    );
+    background-size: 250% 100%;
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    animation:
+      birthday-slide-in 1.1s cubic-bezier(0.22, 1, 0.36, 1),
+      birthday-wiggle 9s ease-in-out 3s infinite,
+      birthday-shimmer 2.8s linear infinite;
+  }
+}
+
+@keyframes birthday-slide-in {
+  0% {
+    transform: translateX(-140px);
+    opacity: 0;
+  }
+  55% {
+    transform: translateX(10px);
+    opacity: 1;
+  }
+  75% {
+    transform: translateX(-6px);
+  }
+  90% {
+    transform: translateX(3px);
+  }
+  100% {
+    transform: translateX(0);
+  }
+}
+
+/* The wiggle lives in the first ~12% of the cycle, so a 9s duration reads as
+   "nudge for a second, rest, repeat". */
+@keyframes birthday-wiggle {
+  0%,
+  12%,
+  100% {
+    transform: translateX(0);
+  }
+  2% {
+    transform: translateX(7px);
+  }
+  5% {
+    transform: translateX(-6px);
+  }
+  8% {
+    transform: translateX(4px);
+  }
+  10% {
+    transform: translateX(-2px);
+  }
+}
+
+@keyframes birthday-shimmer {
+  0% {
+    background-position: 125% 0;
+  }
+  100% {
+    background-position: -25% 0;
+  }
+}
+
+/* Full-window, pointer-transparent stage for the rising musical notes. Sits
+   under the app's modal overlays (z-index 1000). */
+.birthday-notes {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 999;
+}
+
+.birthday-note {
+  position: absolute;
+  bottom: 20px;
+  opacity: 0;
+  color: var(--color-accent);
+  animation-name: birthday-note-rise;
+  animation-timing-function: cubic-bezier(0.3, 0, 0.6, 1);
+  animation-fill-mode: forwards;
+}
+
+/* Per-note wander and tumble come from --drift/--spin inline properties. */
+@keyframes birthday-note-rise {
+  0% {
+    transform: translate(0, 0) rotate(0deg);
+    opacity: 0;
+  }
+  12% {
+    opacity: 1;
+  }
+  70% {
+    opacity: 0.9;
+  }
+  100% {
+    transform: translate(var(--drift), -78vh) rotate(var(--spin));
+    opacity: 0;
+  }
+}
+
+/* Celebration, not vestibular discomfort: with reduced motion the greeting
+   simply appears (accent-colored, no slide/wiggle/shimmer) and the notes
+   stay home. Placed after the @supports block so it wins there too. */
+@media (prefers-reduced-motion: reduce) {
+  .birthday-egg {
+    animation: none;
+    background: none;
+    color: var(--color-accent);
+  }
+  .birthday-notes {
+    display: none;
+  }
 }
 
 .signature-badge {

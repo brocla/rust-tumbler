@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { Lock, Zap } from "lucide-react";
 import { usePdfStore } from "../store/usePdfStore";
 import { signatureBadge } from "../utils/signature";
+import { BirthdayNotes } from "./BirthdayNotes";
 
 /**
  * Thin bottom border strip, right-justified. Shows (right to left): the app
@@ -30,8 +31,15 @@ export function StatusBar() {
   return (
     <div className="app-status-bar">
       {/* Easter egg (see MarginsPanel): the Expand Margins tool was a
-          birthday gift — triple-clicking its explainer summons this. */}
-      {birthdayEgg && <span className="birthday-egg">Happy Birthday Julie! 🎂</span>}
+          birthday gift — triple-clicking its explainer summons this. The
+          greeting slides in and shimmers (CSS) while a burst of musical
+          notes rises from the bar. */}
+      {birthdayEgg && (
+        <>
+          <span className="birthday-egg">Happy Birthday Julie! 🎂</span>
+          <BirthdayNotes />
+        </>
+      )}
       {encrypted && (
         <span
           className="encrypted-badge"
