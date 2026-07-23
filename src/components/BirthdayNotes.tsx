@@ -9,7 +9,7 @@ const RED_SHARE = 0.4;
 const RED = "#d3212d";
 // Longest launch delay plus rise time; the overlay unmounts itself after this
 // so no invisible nodes linger for the rest of the greeting's 30 seconds.
-const BURST_MS = 9000;
+const BURST_MS = 16000;
 
 interface Note {
   id: number;
@@ -30,7 +30,7 @@ function makeNotes(): Note[] {
     left: 4 + Math.random() * 92,
     size: 28 + Math.random() * 24,
     delay: Math.random() * 1.8,
-    duration: 3.5 + Math.random() * 3,
+    duration: 7 + Math.random() * 6,
     drift: (Math.random() - 0.5) * 120,
     spin: (Math.random() - 0.5) * 60,
     color: Math.random() < RED_SHARE ? RED : undefined,
