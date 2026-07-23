@@ -191,6 +191,7 @@ interface PdfStore {
     | "metadata"
     | "pages"
     | "optimize"
+    | "margins"
     | "redact"
     | "typewriter"
     | null;
@@ -231,6 +232,9 @@ interface PdfStore {
   // A transient status message shown as a dismissible toast (e.g. clicking a
   // form button whose scripted action Tumbler can't run). Null when none.
   notice: string | null;
+  // True while the status bar shows the birthday dedication (the Margins
+  // panel's easter egg — the tool was a birthday gift; see MarginsPanel).
+  birthdayEgg: boolean;
 
   // Actions
   setActiveTab: (id: string) => void;
@@ -263,6 +267,7 @@ interface PdfStore {
 
   showNotice: (message: string) => void;
   clearNotice: () => void;
+  setBirthdayEgg: (on: boolean) => void;
   bumpFormEpoch: (docId: string) => void;
 
   addTab: (tab: TabState) => void;
@@ -299,11 +304,13 @@ export const usePdfStore = create<PdfStore>((set, get) => ({
   unsavedPrompt: null,
   passwordPrompt: null,
   notice: null,
+  birthdayEgg: false,
 
   setActiveTab: (id) => set({ activeTabId: id }),
 
   showNotice: (message) => set({ notice: message }),
   clearNotice: () => set({ notice: null }),
+  setBirthdayEgg: (on) => set({ birthdayEgg: on }),
 
   bumpFormEpoch: (docId) =>
     set((state) => ({

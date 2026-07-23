@@ -58,6 +58,21 @@ describe("StatusBar", () => {
     expect(screen.queryByText("Encrypted")).toBeNull();
   });
 
+  it("shows the birthday dedication and note burst while the easter egg is lit", () => {
+    usePdfStore.setState({ tabs: [makeTab()], activeTabId: "tab-1", birthdayEgg: true });
+    const { container } = render(<StatusBar />);
+    expect(screen.getByText(/Happy Birthday Julie!/)).toBeTruthy();
+    const notes = container.querySelectorAll(".birthday-note");
+    expect(notes.length).toBeGreaterThan(0);
+  });
+
+  it("shows no dedication or notes by default", () => {
+    usePdfStore.setState({ tabs: [makeTab()], activeTabId: "tab-1", birthdayEgg: false });
+    const { container } = render(<StatusBar />);
+    expect(screen.queryByText(/Happy Birthday/)).toBeNull();
+    expect(container.querySelector(".birthday-notes")).toBeNull();
+  });
+
   it("shows the Linearized badge for a linearized active tab (issue #3)", () => {
     usePdfStore.setState({
       tabs: [makeTab({ linearized: true })],

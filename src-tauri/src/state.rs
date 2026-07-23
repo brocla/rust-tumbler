@@ -178,6 +178,9 @@ pub struct AppState {
     /// Cancel token for the current compression run (the Compress panel's "Run"),
     /// so the modal progress overlay's Cancel button can stop it mid-pass.
     compress_job: Mutex<Option<Arc<AtomicBool>>>,
+    /// Cancel token for the current margin-analysis run (the Margins panel's
+    /// per-page ink-bounding-box detection pass).
+    margins_job: Mutex<Option<Arc<AtomicBool>>>,
     /// OCR backend behind a trait seam so tests can inject a fake (the real
     /// `WindowsOcrEngine` needs a WinRT language pack). See `commands::ocr`.
     pub ocr_engine: Arc<dyn OcrEngine>,
@@ -206,6 +209,7 @@ impl AppState {
             print_job: Mutex::new(None),
             ocr_job: Mutex::new(None),
             compress_job: Mutex::new(None),
+            margins_job: Mutex::new(None),
             ocr_engine: Arc::new(WindowsOcrEngine::new()),
             ocr_cache: Arc::new(Mutex::new(HashMap::new())),
             ocr_overrides: Arc::new(Mutex::new(HashSet::new())),
@@ -310,6 +314,24 @@ impl AppState {
 
     pub fn cancel_compress_job(&self) {
         if let Ok(guard) = self.compress_job.lock() {
+            if let Some(token) = guard.as_ref() {
+                token.store(true, Ordering::Relaxed);
+            }
+        }
+    }
+
+    pub fn set_margins_job(&self, token: Arc<AtomicBool>) {
+        if let Ok(mut guard) = self.margins_job.lock() {
+            *guard = Some(token);
+        }
+    }
+
+    pub fn take_margins_job(&self) -> Option<Arc<AtomicBool>> {
+        self.margins_job.lock().ok()?.take()
+    }
+
+    pub fn cancel_margins_job(&self) {
+        if let Ok(guard) = self.margins_job.lock() {
             if let Some(token) = guard.as_ref() {
                 token.store(true, Ordering::Relaxed);
             }

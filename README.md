@@ -33,6 +33,9 @@ This is the new world of AI. Anyone can make their own software, just the way th
 
 - Page operations: delete, rotate, reorder (drag-and-drop), merge, and split pages
 - Text layer with copy-to-clipboard and full-document search
+- Expand Margins — enlarge the page content to fill the margins. Sheet music is
+  often engraved small inside wide borders; this scales every page up by one
+  uniform factor so the notes get bigger without the layout shifting
 - OCR — make image-only pages searchable, selectable, copyable, and savable
 - Form Filling
 - Typewriter — type text anywhere on the page 

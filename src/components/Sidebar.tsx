@@ -5,6 +5,7 @@ import { ThumbnailPanel } from "./ThumbnailPanel";
 import { MetadataPanel } from "./MetadataPanel";
 import { PagesPanel } from "./PagesPanel";
 import { OptimizePanel } from "./OptimizePanel";
+import { MarginsPanel } from "./MarginsPanel";
 import { RedactPanel } from "./RedactPanel";
 import { TypewriterPanel } from "./TypewriterPanel";
 
@@ -76,6 +77,7 @@ export function Sidebar() {
         {activeTool === "metadata" && <MetadataPanel />}
         {activeTool === "pages" && <PagesPanel />}
         {activeTool === "optimize" && <OptimizePanel />}
+        {activeTool === "margins" && <MarginsPanel />}
         {activeTool === "redact" && <RedactPanel />}
         {activeTool === "typewriter" && <TypewriterPanel />}
       </div>

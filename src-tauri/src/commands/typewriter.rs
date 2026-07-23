@@ -230,7 +230,7 @@ fn decode_pdf_text_string(obj: &Object) -> String {
 
 // ── Page geometry ────────────────────────────────────────────────────────────
 
-fn object_as_f32(obj: &Object) -> f32 {
+pub(crate) fn object_as_f32(obj: &Object) -> f32 {
     match obj {
         Object::Integer(i) => *i as f32,
         Object::Real(r) => *r,
@@ -278,7 +278,7 @@ fn page_media_box(doc: &Document, page_id: ObjectId) -> (f32, f32, f32, f32) {
 /// The indirect references in a page's `/Annots`, normalized across its shapes
 /// (a `Reference` to an array, an inline `Array`, or missing → empty). Inline
 /// annotation dictionaries — which we never author — are skipped.
-fn page_annot_refs(doc: &Document, page_id: ObjectId) -> Vec<ObjectId> {
+pub(crate) fn page_annot_refs(doc: &Document, page_id: ObjectId) -> Vec<ObjectId> {
     let Some(page) = doc.get_object(page_id).ok().and_then(|o| o.as_dict().ok()) else {
         return Vec::new();
     };

@@ -1,4 +1,4 @@
-import { Layers, Search, Info, PocketKnife, Minimize2, EyeOff, Type } from "lucide-react";
+import { Layers, Search, Info, PocketKnife, Minimize2, Expand, EyeOff, Type } from "lucide-react";
 import { usePdfStore } from "../store/usePdfStore";
 
 export function IconRail() {
@@ -46,6 +46,13 @@ export function IconRail() {
         title="Web Optimization"
       >
         <Minimize2 size={20} />
+      </button>
+      <button
+        className={`rail-button ${activeTool === "margins" ? "active" : ""}`}
+        onClick={() => setSidebarTool("margins")}
+        title="Expand Margins"
+      >
+        <Expand size={20} />
       </button>
       <button
         className={`rail-button ${activeTool === "redact" ? "active" : ""}`}
