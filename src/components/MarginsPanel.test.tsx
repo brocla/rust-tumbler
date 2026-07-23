@@ -139,6 +139,18 @@ describe("MarginsPanel", () => {
     );
   });
 
+  it("lights the birthday easter egg on a triple-click of the explainer", async () => {
+    usePdfStore.setState({ birthdayEgg: false });
+    render(<MarginsPanel />);
+    const explainer = screen.getByText(/Enlarges the page content/);
+
+    fireEvent.click(explainer, { detail: 1 });
+    expect(usePdfStore.getState().birthdayEgg).toBe(false);
+
+    fireEvent.click(explainer, { detail: 3 });
+    expect(usePdfStore.getState().birthdayEgg).toBe(true);
+  });
+
   it("offers a retry after a cancelled analysis", async () => {
     vi.mocked(invoke).mockImplementationOnce(async () => ({ pages: [], cancelled: true }));
     render(<MarginsPanel />);

@@ -143,6 +143,14 @@ body {
   font-size: 12px;
 }
 
+/* Birthday dedication (Margins panel easter egg) — sits on the left while the
+   badges stay right-justified. */
+.birthday-egg {
+  margin-right: auto;
+  font-weight: 600;
+  color: var(--color-accent);
+}
+
 .signature-badge {
   display: inline-flex;
   align-items: center;

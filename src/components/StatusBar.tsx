@@ -16,6 +16,7 @@ export function StatusBar() {
   const status = tab?.signatureStatus;
   const encrypted = !!tab?.encrypted;
   const linearized = !!tab?.linearized;
+  const birthdayEgg = usePdfStore((s) => s.birthdayEgg);
 
   const badge = signatureBadge(status);
 
@@ -28,6 +29,9 @@ export function StatusBar() {
 
   return (
     <div className="app-status-bar">
+      {/* Easter egg (see MarginsPanel): the Expand Margins tool was a
+          birthday gift — triple-clicking its explainer summons this. */}
+      {birthdayEgg && <span className="birthday-egg">Happy Birthday Julie! 🎂</span>}
       {encrypted && (
         <span
           className="encrypted-badge"

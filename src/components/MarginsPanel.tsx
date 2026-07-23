@@ -87,6 +87,18 @@ function inches(pt: number): string {
 // Below this the fit is a no-op (or a shrink) — nothing worth applying.
 const MIN_GAIN = 1.005;
 
+// How long the birthday dedication stays in the status bar once summoned.
+const EGG_MS = 30_000;
+let eggTimer: number | undefined;
+
+/// Easter egg: this tool was a birthday gift. Triple-clicking the panel's
+/// explainer text shows the dedication in the status bar for a little while.
+function celebrate() {
+  usePdfStore.getState().setBirthdayEgg(true);
+  window.clearTimeout(eggTimer);
+  eggTimer = window.setTimeout(() => usePdfStore.getState().setBirthdayEgg(false), EGG_MS);
+}
+
 export function MarginsPanel() {
   const activeTab = usePdfStore((s) => s.tabs.find((t) => t.id === s.activeTabId));
 
@@ -187,7 +199,12 @@ export function MarginsPanel() {
 
   return (
     <div className="margins-panel">
-      <div className="margins-explainer">
+      <div
+        className="margins-explainer"
+        onClick={(e) => {
+          if (e.detail === 3) celebrate();
+        }}
+      >
         Enlarges the page content to fill the margins — useful for sheet music
         engraved small inside wide borders. Every page is scaled by the same
         factor (limited by the fullest page), re-centered, and top-aligned. The
