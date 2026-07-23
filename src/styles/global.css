@@ -144,15 +144,19 @@ body {
 }
 
 /* Birthday dedication (Margins panel easter egg) — sits on the left while the
-   badges stay right-justified. Slides in with a few swings, then re-wiggles
-   every 9s to draw the eye; a gold shimmer sweeps the glyphs continuously. */
+   badges stay right-justified. Slides in with a few swings, then patrols the
+   full width of the bar and back on repeat; a gold shimmer sweeps the glyphs
+   continuously. The patrol is pure transform, so its layout slot stays at the
+   left; position/z-index let it glide *over* the right-hand badges. */
 .birthday-egg {
+  position: relative;
+  z-index: 1;
   margin-right: auto;
   font-weight: 600;
   color: var(--color-accent);
   animation:
     birthday-slide-in 1.1s cubic-bezier(0.22, 1, 0.36, 1),
-    birthday-wiggle 9s ease-in-out 3s infinite;
+    birthday-patrol 8s ease-in-out 1.2s infinite;
 }
 
 /* Shimmer needs the text painted by a gradient; the plain accent color above
@@ -173,7 +177,7 @@ body {
     color: transparent;
     animation:
       birthday-slide-in 1.1s cubic-bezier(0.22, 1, 0.36, 1),
-      birthday-wiggle 9s ease-in-out 3s infinite,
+      birthday-patrol 8s ease-in-out 1.2s infinite,
       birthday-shimmer 2.8s linear infinite;
   }
 }
@@ -198,25 +202,23 @@ body {
   }
 }
 
-/* The wiggle lives in the first ~12% of the cycle, so a 9s duration reads as
-   "nudge for a second, rest, repeat". */
-@keyframes birthday-wiggle {
+/* Full-width patrol: dash to the far right edge of the window, linger a beat,
+   glide home, rest, repeat. `100%` in translateX is the element's own width
+   and the bar has 10px side padding, so `100vw - 100% - 20px` parks the text
+   flush against the right edge whatever the window size. Each 8s cycle is one
+   round trip; over the greeting's 30s it crosses a few times. */
+@keyframes birthday-patrol {
   0%,
-  12%,
-  100% {
+  6% {
     transform: translateX(0);
   }
-  2% {
-    transform: translateX(7px);
+  32%,
+  40% {
+    transform: translateX(calc(100vw - 100% - 20px));
   }
-  5% {
-    transform: translateX(-6px);
-  }
-  8% {
-    transform: translateX(4px);
-  }
-  10% {
-    transform: translateX(-2px);
+  66%,
+  100% {
+    transform: translateX(0);
   }
 }
 
