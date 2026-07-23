@@ -1,7 +1,12 @@
 import { useEffect, useState } from "react";
 
 const GLYPHS = ["🎵", "🎶", "♪", "♫", "♬"];
-const NOTE_COUNT = 14;
+const NOTE_COUNT = 28;
+// Roughly this share of notes go red. Only the text glyphs (♪♫♬) actually
+// take the color — the emoji ones (🎵🎶) paint themselves — which mixes the
+// palette nicely.
+const RED_SHARE = 0.4;
+const RED = "#d3212d";
 // Longest launch delay plus rise time; the overlay unmounts itself after this
 // so no invisible nodes linger for the rest of the greeting's 30 seconds.
 const BURST_MS = 9000;
@@ -15,6 +20,7 @@ interface Note {
   duration: number; // s
   drift: number; // px of sideways wander over the rise
   spin: number; // deg
+  color?: string; // overrides the accent color (some notes go red)
 }
 
 function makeNotes(): Note[] {
@@ -22,11 +28,12 @@ function makeNotes(): Note[] {
     id: i,
     glyph: GLYPHS[i % GLYPHS.length],
     left: 4 + Math.random() * 92,
-    size: 14 + Math.random() * 12,
+    size: 28 + Math.random() * 24,
     delay: Math.random() * 1.8,
     duration: 3.5 + Math.random() * 3,
     drift: (Math.random() - 0.5) * 120,
     spin: (Math.random() - 0.5) * 60,
+    color: Math.random() < RED_SHARE ? RED : undefined,
   }));
 }
 
@@ -57,6 +64,7 @@ export function BirthdayNotes() {
             {
               left: `${n.left}%`,
               fontSize: `${n.size}px`,
+              ...(n.color ? { color: n.color } : {}),
               animationDelay: `${n.delay}s`,
               animationDuration: `${n.duration}s`,
               "--drift": `${n.drift}px`,

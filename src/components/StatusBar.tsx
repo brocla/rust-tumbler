@@ -36,7 +36,7 @@ export function StatusBar() {
           notes rises from the bar. */}
       {birthdayEgg && (
         <>
-          <span className="birthday-egg">Happy Birthday Julie! 🎂</span>
+          <span className="birthday-egg">🎂🎂🎂 Happy Birthday Julie! 🎂🎂🎂</span>
           <BirthdayNotes />
         </>
       )}
