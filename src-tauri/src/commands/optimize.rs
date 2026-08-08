@@ -302,6 +302,36 @@ fn is_indexed(dict: &Dictionary, doc: &Document) -> bool {
     }
 }
 
+/// True when the image carries a `/Decode` array that isn't the identity
+/// mapping (`[0 1]` per component).
+///
+/// It matters because our raw-sample path reads stored samples directly and
+/// never applies `/Decode`, so re-encoding such an image would bake in values
+/// the viewer was supposed to remap — the output would not match what the page
+/// used to look like. (The DCTDecode path is exempt: there the only `/Decode`
+/// seen in practice is the inverted `[1 0 …]` Adobe CMYK JPEGs carry, which is
+/// the same inversion the JPEG decoder already performs from the APP14 marker.)
+fn has_non_default_decode(dict: &Dictionary, doc: &Document) -> bool {
+    let obj = match dict.get(b"Decode") {
+        Ok(Object::Reference(id)) => match doc.get_object(*id) {
+            Ok(o) => o,
+            // Unresolvable — assume the worst rather than re-encode blindly.
+            Err(_) => return true,
+        },
+        Ok(o) => o,
+        Err(_) => return false, // absent means the identity mapping
+    };
+    let arr = match obj.as_array() {
+        Ok(a) => a,
+        Err(_) => return true,
+    };
+    arr.chunks(2).any(|pair| {
+        let lo = pair.first().and_then(|o| o.as_float().ok()).unwrap_or(0.0);
+        let hi = pair.get(1).and_then(|o| o.as_float().ok()).unwrap_or(1.0);
+        lo != 0.0 || hi != 1.0
+    })
+}
+
 /// True if the image's DecodeParms request a PNG/TIFF predictor. We don't
 /// reverse predictors in this first cut, so such FlateDecode images are skipped
 /// rather than decoded into garbage.
@@ -418,6 +448,11 @@ fn plan_one(
             if has_predictor(dict, doc) {
                 return PlanResult::Skip("predictor");
             }
+            // We read the stored samples verbatim, so a non-identity /Decode
+            // would be silently dropped and the colours would change.
+            if has_non_default_decode(dict, doc) {
+                return PlanResult::Skip("decode_array");
+            }
             let raw = match inflate(&stream.content) {
                 Some(r) => r,
                 None => return PlanResult::Skip("decode"),
@@ -511,6 +546,14 @@ fn step_recompress_images(
             stream.dict.set("Filter", "DCTDecode");
             stream.dict.remove(b"DecodeParms");
             stream.dict.remove(b"DP");
+            // The re-encoded samples are already final values in the new
+            // colourspace, so any /Decode the original carried no longer
+            // applies. Leaving it behind is not cosmetic: Adobe CMYK JPEGs
+            // ship an inverted `/Decode [1 0 1 0 1 0 1 0]`, and keeping that
+            // four-component array on a now-three-component /DeviceRGB image
+            // is both structurally invalid and renders as a colour negative.
+            stream.dict.remove(b"Decode");
+            stream.dict.remove(b"D");
             stream.dict.set("Width", w as i64);
             stream.dict.set("Height", h as i64);
             stream.dict.set("BitsPerComponent", 8_i64);
@@ -711,6 +754,7 @@ pub fn cancel_compress(state: State<'_, AppState>) {
 mod tests {
     use super::*;
     use lopdf::{Dictionary, Object, Stream};
+
 
     /// A decodable JPEG of the given size, for building image fixtures.
     fn jpeg_bytes(w: u32, h: u32, quality: u8) -> Vec<u8> {
@@ -950,6 +994,100 @@ mod tests {
 
         let w = image_dict(&doc, img_id).get(b"Width").unwrap().as_float().unwrap();
         assert_eq!(w as u32, 150);
+    }
+
+    fn set_decode(doc: &mut Document, id: ObjectId, pairs: &[(f32, f32)]) {
+        let arr = pairs
+            .iter()
+            .flat_map(|(lo, hi)| [Object::Real(*lo), Object::Real(*hi)])
+            .collect();
+        doc.get_object_mut(id)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set("Decode", Object::Array(arr));
+    }
+
+    /// Adobe CMYK JPEGs carry an inverted `/Decode [1 0 1 0 1 0 1 0]`. Once the
+    /// image has been re-encoded to /DeviceRGB that array no longer describes
+    /// its samples — and a four-component array on a three-component image is
+    /// invalid besides. Leaving it behind made the page render as a colour
+    /// negative, so the rewrite must drop it.
+    #[test]
+    fn recompress_images_drops_stale_decode_array() {
+        let jpeg = jpeg_bytes(600, 600, 90);
+        let (mut doc, img_id) = doc_with_image(
+            "DCTDecode",
+            8,
+            "DeviceRGB",
+            600,
+            600,
+            jpeg,
+            72.0,
+            Some([72.0, 0.0, 0.0, 72.0, 0.0, 0.0]),
+        );
+        set_decode(&mut doc, img_id, &[(1.0, 0.0), (1.0, 0.0), (1.0, 0.0), (1.0, 0.0)]);
+
+        let mut skipped = Vec::new();
+        step_recompress_images(&mut doc, 150.0, 75, &mut skipped, &|_, _| {}, &AtomicBool::new(false));
+
+        assert!(skipped.is_empty(), "unexpected skips: {skipped:?}");
+        let dict = image_dict(&doc, img_id);
+        assert!(!dict.has(b"Decode"), "stale /Decode must be removed");
+        assert!(!dict.has(b"D"), "stale /D must be removed");
+    }
+
+    /// The raw-sample (Flate) path reads stored samples verbatim and never
+    /// applies `/Decode`, so an image carrying a non-identity one must be left
+    /// alone rather than silently recoloured.
+    #[test]
+    fn recompress_images_skips_flate_image_with_custom_decode() {
+        let (mut doc, img_id) = doc_with_image(
+            "FlateDecode",
+            8,
+            "DeviceRGB",
+            600,
+            600,
+            vec![0u8; 32],
+            72.0,
+            Some([72.0, 0.0, 0.0, 72.0, 0.0, 0.0]),
+        );
+        set_decode(&mut doc, img_id, &[(1.0, 0.0), (1.0, 0.0), (1.0, 0.0)]);
+        let before = serialized_size(&doc);
+
+        let mut skipped = Vec::new();
+        step_recompress_images(&mut doc, 150.0, 75, &mut skipped, &|_, _| {}, &AtomicBool::new(false));
+
+        assert_eq!(serialized_size(&doc), before, "image must be left byte-for-byte");
+        assert_eq!(skipped.len(), 1, "expected one skip: {skipped:?}");
+        assert_eq!(skipped[0].reason, "decode_array");
+    }
+
+    #[test]
+    fn has_non_default_decode_distinguishes_identity_from_inverted() {
+        let doc = Document::with_version("1.5");
+        let mut dict = Dictionary::new();
+        assert!(!has_non_default_decode(&dict, &doc), "absent means identity");
+
+        dict.set(
+            "Decode",
+            Object::Array(vec![
+                Object::Real(0.0),
+                Object::Real(1.0),
+                Object::Real(0.0),
+                Object::Real(1.0),
+                Object::Real(0.0),
+                Object::Real(1.0),
+            ]),
+        );
+        assert!(!has_non_default_decode(&dict, &doc), "explicit identity");
+
+        dict.set(
+            "Decode",
+            Object::Array(vec![Object::Real(1.0), Object::Real(0.0)]),
+        );
+        assert!(has_non_default_decode(&dict, &doc), "inverted");
     }
 
     /// An image already shown below the target DPI is left byte-for-byte and not

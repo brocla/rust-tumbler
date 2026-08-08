@@ -71,6 +71,7 @@ const REASON_LABELS: Record<string, string> = {
   indexed: "indexed color",
   colorspace: "unsupported color",
   predictor: "predictor",
+  decode_array: "custom decode array",
   ccitt: "CCITT/fax",
   jpx: "JPEG2000",
   jbig2: "JBIG2",
