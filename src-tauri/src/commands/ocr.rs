@@ -699,6 +699,7 @@ mod tests {
             .insert_document(
                 doc_id.to_string(),
                 DocEntry {
+                    page_cache: Vec::new(),
                     document: doc,
                     file_path: format!("{doc_id}.pdf"),
                     // No backing file; these tests never touch the buffer.

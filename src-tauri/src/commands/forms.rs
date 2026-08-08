@@ -1341,6 +1341,7 @@ mod tests {
             .insert_document(
                 "doc-1".into(),
                 DocEntry {
+                    page_cache: Vec::new(),
                     document,
                     file_path: path.into(),
                     buffer: bytes,

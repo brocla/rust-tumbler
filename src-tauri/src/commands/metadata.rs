@@ -444,6 +444,7 @@ mod tests {
             .insert_document(
                 "doc-1".to_string(),
                 DocEntry {
+                    page_cache: Vec::new(),
                     document,
                     file_path: file_path.clone(),
                     buffer: std::fs::read(&file_path).expect("read pdf"),

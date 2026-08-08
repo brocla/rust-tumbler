@@ -1,4 +1,4 @@
-import { useEffect, useRef, useCallback, useMemo } from "react";
+import { useEffect, useLayoutEffect, useRef, useCallback, useMemo } from "react";
 import { usePdfStore } from "../store/usePdfStore";
 import { PageSlot } from "./PageSlot";
 import type { PageDimension, SearchResult, ZoomMode } from "../store/usePdfStore";
@@ -98,6 +98,12 @@ export function ContinuousViewer() {
   const currentPage = activeTab?.currentPage ?? 1;
   const zoom = activeTab?.zoom ?? 100;
   const zoomMode = activeTab?.zoomMode ?? "numeric";
+  // True only while the one-shot open zoom (issue #38) is still the
+  // placeholder value the tab was created with; the layout effect below
+  // replaces it with the real fitted zoom and flips the mode to "numeric".
+  // The persistent fit modes are excluded deliberately — they never become
+  // "numeric", so gating on them would stall rendering forever.
+  const fitPending = zoomMode === "fit-width-90";
   const displayMode = activeTab?.displayMode ?? "normal";
   const tabId = activeTab?.id ?? "";
   const pagesVersion = activeTab?.pagesVersion ?? 0;
@@ -148,7 +154,14 @@ export function ContinuousViewer() {
   }, [currentPage]);
 
   // Fit-mode: recompute zoom whenever the container or current page changes.
-  useEffect(() => {
+  //
+  // A layout effect, not a passive one: React runs layout effects (parent
+  // included) before any child's passive effect, so the one-shot open zoom is
+  // settled before PageSlot's render effect ever fires. As a passive effect
+  // this ran *after* PageSlot's, so every page was first rendered at the
+  // placeholder zoom and then again at the fitted one — see the render gate
+  // below for why that was expensive rather than merely wasteful.
+  useLayoutEffect(() => {
     if (zoomMode === "numeric") return;
     const container = containerRef.current;
     if (!container || pageDimensions.length === 0 || !tabId) return;
@@ -397,7 +410,12 @@ export function ContinuousViewer() {
               pageWidth={dim.width}
               pageHeight={dim.height}
               zoom={zoom}
-              isInRenderWindow={isInRenderWindow(pageNum)}
+              // Hold off until the open zoom is real: rendering at the
+              // placeholder size wastes a full raster per page, and on a
+              // large page that oversized bitmap overflows pdfium's image
+              // cache, so the render that follows re-decodes from scratch
+              // instead of reusing the decode (~1 s per page on a scan).
+              isInRenderWindow={!fitPending && isInRenderWindow(pageNum)}
               contentEpoch={contentEpoch}
               displayMode={displayMode}
               highlightRects={pageHighlights.get(pageNum)?.rects ?? []}

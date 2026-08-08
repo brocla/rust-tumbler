@@ -1011,6 +1011,7 @@ pub(crate) fn apply_redactions_impl(
             .load_pdf_from_byte_vec(final_bytes.clone(), None)
             .map_err(|e| AppError::pdfium("Failed to reload flattened PDF", e))?;
         let temp_entry = Arc::new(Mutex::new(DocEntry {
+            page_cache: Vec::new(),
             document,
             file_path: String::new(),
             buffer: final_bytes.clone(),
@@ -1371,6 +1372,7 @@ mod tests {
             .insert_document(
                 doc_id.to_string(),
                 DocEntry {
+                    page_cache: Vec::new(),
                     document,
                     file_path: format!("{doc_id}.pdf"),
                     buffer: bytes,
