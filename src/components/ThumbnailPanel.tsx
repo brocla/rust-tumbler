@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { ImageOff } from "lucide-react";
 import { usePdfStore } from "../store/usePdfStore";
+import { getThumb, putThumb } from "../utils/renderCache";
 
 const THUMBNAIL_SCALE = 0.18;
 
@@ -93,12 +94,35 @@ function Thumbnail({
   const cssWidth = Math.round(pageWidth * THUMBNAIL_SCALE);
   const cssHeight = Math.round(pageHeight * THUMBNAIL_SCALE);
 
+  const draw = useCallback(
+    (bitmap: ImageBitmap) => {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      canvas.width = bitmap.width;
+      canvas.height = bitmap.height;
+      canvas.style.width = `${cssWidth}px`;
+      canvas.style.height = `${cssHeight}px`;
+      canvas.getContext("2d")?.drawImage(bitmap, 0, 0);
+      setRendered(true);
+    },
+    [cssWidth, cssHeight],
+  );
+
+  // Cache-first, like PagesPanel's thumbnails. Without the shared cache every
+  // remount of this panel (switching sidebar tools, switching tabs) re-invoked
+  // render_page — which on an image-heavy page costs about a second each.
   const renderThumb = useCallback(async () => {
     const canvas = canvasRef.current;
     if (!canvas || rendered || failed) return;
 
     const dpr = window.devicePixelRatio || 1;
     const renderWidth = Math.round(cssWidth * dpr);
+
+    const cached = getThumb(docId, pageNumber, dpr);
+    if (cached) {
+      draw(cached);
+      return;
+    }
 
     try {
       const buffer = await invoke<ArrayBuffer>("render_page", {
@@ -112,22 +136,15 @@ function Thumbnail({
       // which may round slightly differently than cssHeight * dpr.
       const actualHeight = rgba.byteLength / (4 * renderWidth);
       const imageData = new ImageData(rgba, renderWidth, actualHeight);
+      const bitmap = await createImageBitmap(imageData);
 
-      canvas.width = renderWidth;
-      canvas.height = actualHeight;
-      canvas.style.width = `${cssWidth}px`;
-      canvas.style.height = `${cssHeight}px`;
-
-      const ctx = canvas.getContext("2d");
-      if (ctx) {
-        ctx.putImageData(imageData, 0, 0);
-        setRendered(true);
-      }
+      putThumb(docId, pageNumber, dpr, bitmap);
+      draw(bitmap);
     } catch (err) {
       console.error(`Failed to render thumbnail page ${pageNumber}:`, err);
       setFailed(true);
     }
-  }, [docId, pageNumber, cssWidth, cssHeight, rendered, failed]);
+  }, [docId, pageNumber, cssWidth, cssHeight, rendered, failed, draw]);
 
   // Lazy render when visible
   useEffect(() => {

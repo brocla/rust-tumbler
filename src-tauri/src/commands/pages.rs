@@ -103,7 +103,7 @@ fn delete_pages_impl(
     }
 
     let entry_arc = state.get_document(&doc_id)?;
-    let entry = lock_mutex(&entry_arc)?;
+    let mut entry = lock_mutex(&entry_arc)?;
 
     let page_count = entry.document.pages().len() as u32;
 
@@ -123,6 +123,10 @@ fn delete_pages_impl(
             "Cannot delete all pages from a document".to_string(),
         ));
     }
+
+    // Close any retained pages first: they hold handles into the document
+    // about to be restructured (see `DocEntry::page_cache`).
+    entry.clear_page_cache();
 
     // Delete in descending order so lower-indexed pages keep their original indices.
     for n in sorted.iter().rev().copied() {
@@ -177,7 +181,7 @@ pub(crate) fn rotate_pages_impl(
     let effective_turns = clockwise_turns % 4;
 
     let entry_arc = state.get_document(&doc_id)?;
-    let entry = lock_mutex(&entry_arc)?;
+    let mut entry = lock_mutex(&entry_arc)?;
 
     let page_count = entry.document.pages().len() as u32;
     for &n in &page_numbers {
@@ -189,6 +193,8 @@ pub(crate) fn rotate_pages_impl(
     }
 
     if effective_turns != 0 {
+        // Close any retained pages first (see `DocEntry::page_cache`).
+        entry.clear_page_cache();
         for n in &page_numbers {
             let mut page = entry
                 .document
@@ -347,6 +353,9 @@ fn merge_document_impl(
         )));
     }
 
+    // Close any retained pages first (see `DocEntry::page_cache`).
+    entry.clear_page_cache();
+
     entry
         .document
         .pages_mut()
@@ -457,6 +466,7 @@ mod tests {
             .insert_document(
                 doc_id.to_string(),
                 DocEntry {
+                    page_cache: Vec::new(),
                     document: doc,
                     file_path: path.to_string(),
                     buffer,

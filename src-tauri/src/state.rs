@@ -9,6 +9,21 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 pub struct DocEntry {
+    /// Recently rendered pdfium pages, least-recently-used first.
+    ///
+    /// pdfium caches a page's *decoded, colour-managed* image on the
+    /// `FPDF_PAGE` object, so fetching a fresh page for every render throws
+    /// that work away. For a page holding one large ICC-tagged JPEG the
+    /// decode costs ~1 s, while re-rendering a retained page costs ~10–30 ms
+    /// — so retaining pages turns each *additional* render of the same page
+    /// (the sidebar thumbnail, a zoom change, a scroll back) into a near-free
+    /// repaint. Populated only by [`DocEntry::page`].
+    ///
+    /// Declared **before** `document` so it drops first: every `FPDF_PAGE`
+    /// handle here is valid only while that `FPDF_DOCUMENT` lives. For the
+    /// same reason, code that mutates or replaces `document` must call
+    /// [`DocEntry::clear_page_cache`] *before* doing so.
+    pub(crate) page_cache: Vec<(PdfPageIndex, PdfPage<'static>)>,
     /// pdfium render view of `buffer` — always kept in sync with it.
     pub document: PdfDocument<'static>,
     /// Where Save writes; updated by Save As.
@@ -68,6 +83,48 @@ impl Protection {
 }
 
 impl DocEntry {
+    /// How many pages stay open at once. Each retained page holds pdfium's
+    /// decoded bitmap for it, which for a high-resolution scan can be tens of
+    /// MB — so this is deliberately small: enough to cover the viewer's
+    /// render window plus the matching sidebar thumbnails, not a whole
+    /// document.
+    const PAGE_CACHE_LIMIT: usize = 6;
+
+    /// A retained, still-open page, loaded on first use. Prefer this over
+    /// `document.pages().get(..)` on any path that renders, so pdfium's
+    /// decoded-image cache survives between calls (see [`Self::page_cache`]).
+    ///
+    /// `index` is 0-based.
+    pub fn page(&mut self, index: PdfPageIndex) -> Result<&PdfPage<'static>, AppError> {
+        match self.page_cache.iter().position(|(i, _)| *i == index) {
+            Some(pos) => {
+                // Move the hit to the back: least-recently-used stays first.
+                let hit = self.page_cache.remove(pos);
+                self.page_cache.push(hit);
+            }
+            None => {
+                // `pages()` borrows `document` only for this statement; the
+                // page it yields is `'static`, so it can outlive the borrow
+                // and be stored here.
+                let page = self.document.pages().get(index).map_err(|e| {
+                    AppError::pdfium(format!("Failed to get page {}", index + 1), e)
+                })?;
+                while self.page_cache.len() >= Self::PAGE_CACHE_LIMIT {
+                    self.page_cache.remove(0);
+                }
+                self.page_cache.push((index, page));
+            }
+        }
+        Ok(&self.page_cache.last().expect("just inserted").1)
+    }
+
+    /// Closes every retained page. **Must** be called before `document` is
+    /// mutated (page delete/rotate/merge) or replaced, since the cached
+    /// `FPDF_PAGE` handles belong to it.
+    pub fn clear_page_cache(&mut self) {
+        self.page_cache.clear();
+    }
+
     /// Loads a document from `path`: the file bytes become `buffer` and the
     /// pdfium view is built from those bytes (not from the file), so render
     /// state and buffer can never diverge.
@@ -123,6 +180,7 @@ impl DocEntry {
                 .map_err(|e| AppError::pdfium("Failed to reload decrypted PDF", e))?;
             let linearized = crate::commands::linearize::buffer_is_linearized(&plaintext);
             return Ok(Self {
+                page_cache: Vec::new(),
                 document,
                 file_path: path.to_string(),
                 buffer: plaintext,
@@ -134,6 +192,7 @@ impl DocEntry {
 
         let linearized = crate::commands::linearize::buffer_is_linearized(&buffer);
         Ok(Self {
+            page_cache: Vec::new(),
             document,
             file_path: path.to_string(),
             buffer,
@@ -431,6 +490,9 @@ impl AppState {
             .map_err(|e| AppError::pdfium("Failed to reload PDF from edited bytes", e))?;
         {
             let mut e = lock_mutex(&entry)?;
+            // Close the retained pages before the document they belong to is
+            // replaced — their handles would otherwise dangle.
+            e.clear_page_cache();
             e.linearized = crate::commands::linearize::buffer_is_linearized(&bytes);
             e.document = document;
             e.buffer = bytes;
@@ -585,6 +647,71 @@ mod tests {
             .load_pdf_from_byte_vec(encrypted, Some(crate::ENCRYPTED_FIXTURE_PASSWORD))
             .expect("correct password must open the document");
         assert_eq!(doc.pages().len(), 1);
+    }
+
+    /// `DocEntry::page` retains the pdfium page object across calls, so
+    /// pdfium's decoded-image cache survives between renders — the difference
+    /// between ~1 s and ~10 ms per repeat render of an image-heavy page.
+    /// A second request for the same page must reuse the retained one rather
+    /// than opening a second.
+    #[test]
+    fn page_cache_retains_and_reuses_pages() {
+        let _guard = crate::test_pdfium_guard();
+        let pdfium = crate::test_pdfium();
+        let src = crate::fixture_path().to_string_lossy().into_owned();
+        let mut entry = DocEntry::load(pdfium, &src, None).expect("load pdf");
+
+        assert!(entry.page_cache.is_empty(), "starts empty");
+
+        entry.page(0).expect("page 0");
+        assert_eq!(entry.page_cache.len(), 1);
+
+        // Same page again → still one retained page, not a second handle.
+        entry.page(0).expect("page 0 again");
+        assert_eq!(entry.page_cache.len(), 1, "must reuse, not re-open");
+
+        entry.clear_page_cache();
+        assert!(entry.page_cache.is_empty(), "cleared before document edits");
+    }
+
+    /// The cache is bounded — a document with more pages than the limit must
+    /// not retain every page (each holds a decoded bitmap), and the
+    /// least-recently-used page is the one dropped.
+    #[test]
+    fn page_cache_is_bounded_and_evicts_least_recently_used() {
+        let _guard = crate::test_pdfium_guard();
+        let pdfium = crate::test_pdfium();
+        let src = crate::fixture_path().to_string_lossy().into_owned();
+        let mut entry = DocEntry::load(pdfium, &src, None).expect("load pdf");
+
+        // The fixture is single-page, so swap in a document with more pages
+        // than the cache holds. (Clearing first is the same discipline the
+        // page-edit commands follow before touching `document`.)
+        entry.clear_page_cache();
+        entry.document = pdfium.create_new_pdf().expect("create pdf");
+        for i in 0..(DocEntry::PAGE_CACHE_LIMIT + 2) {
+            entry
+                .document
+                .pages_mut()
+                .create_page_at_index(
+                    PdfPagePaperSize::new_custom(PdfPoints::new(50.0), PdfPoints::new(50.0)),
+                    i as PdfPageIndex,
+                )
+                .expect("create page");
+        }
+
+        for i in 0..(DocEntry::PAGE_CACHE_LIMIT + 2) {
+            entry.page(i as PdfPageIndex).expect("page");
+        }
+        assert_eq!(entry.page_cache.len(), DocEntry::PAGE_CACHE_LIMIT);
+
+        // The oldest indices were evicted; the most recent survive.
+        let held: Vec<PdfPageIndex> = entry.page_cache.iter().map(|(i, _)| *i).collect();
+        assert!(!held.contains(&0), "page 0 should have been evicted: {held:?}");
+        assert!(
+            held.contains(&((DocEntry::PAGE_CACHE_LIMIT + 1) as PdfPageIndex)),
+            "most recent page should be retained: {held:?}"
+        );
     }
 
     /// `DocEntry::load` seeds the buffer with the file's bytes and starts clean.

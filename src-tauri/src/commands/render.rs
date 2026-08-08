@@ -10,7 +10,17 @@ pub fn render_page(
     page: u32,
     width: u32,
 ) -> Result<tauri::ipc::Response, String> {
-    render_page_impl(&state, doc_id, page, width).map_err(String::from)
+    // Dev-only render trace: how many renders a single open actually fires,
+    // at what sizes, and how long each takes. Compiled out of release builds.
+    #[cfg(debug_assertions)]
+    let started = std::time::Instant::now();
+    let result = render_page_impl(&state, doc_id, page, width).map_err(String::from);
+    #[cfg(debug_assertions)]
+    eprintln!(
+        "[render] page {page} @{width}px  {:.0} ms",
+        started.elapsed().as_secs_f64() * 1000.0
+    );
+    result
 }
 
 fn render_page_impl(
@@ -20,13 +30,15 @@ fn render_page_impl(
     width: u32,
 ) -> Result<tauri::ipc::Response, AppError> {
     let entry = state.get_document(&doc_id)?;
-    let entry = lock_mutex(&entry)?;
+    let mut entry = lock_mutex(&entry)?;
 
-    let pdf_page = entry
-        .document
-        .pages()
-        .get(page.saturating_sub(1) as i32)
-        .map_err(|e| AppError::pdfium(format!("Failed to get page {page}"), e))?;
+    // Via the entry's page cache, not `document.pages().get(..)`: pdfium
+    // keeps a page's decoded, colour-managed image on the page object, and
+    // re-fetching the page for every render discards it. On an image-heavy
+    // page that decode dominates the render (~1 s vs ~10 ms), and the same
+    // page is rendered repeatedly — full size, sidebar thumbnail, again on
+    // every zoom change.
+    let pdf_page = entry.page(page.saturating_sub(1) as PdfPageIndex)?;
 
     // Render the page content and form-field values, but NOT annotation
     // appearances. Tumbler draws its own interactive overlays on top — text
