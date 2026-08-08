@@ -54,7 +54,7 @@ rust-tumbler/
 |---|---|
 | `document.rs` | open / close documents (password prompt flow for encrypted PDFs, issue #12) |
 | `encryption.rs` | password-protected PDFs (issue #57): decrypt to a plaintext buffer at open, re-encrypt (AES-256) on save, `remove_password` and `set_password` commands |
-| `render.rs` | render a page to a base64 bitmap (pdfium) |
+| `render.rs` | render a page to raw RGBA bytes (pdfium), returned as a `tauri::ipc::Response`; goes through `DocEntry::page` so pdfium's decode is reused (see [The page cache](#the-page-cache--read-this-before-adding-a-page-mutating-command)) |
 | `text.rs` | extract text, full-document search, export text to `.txt` (pdfium) |
 | `ocr.rs` | per-page and whole-document OCR via Windows.Media.Ocr |
 | `metadata.rs` | read PDF metadata (pdfium) / write it (lopdf) |
@@ -119,6 +119,27 @@ let entry = lock_mutex(&entry)?;            // locks the per-document mutex
 // use entry.document / entry.file_path
 // lock drops at end of scope
 ```
+
+### The page cache — read this before adding a page-mutating command
+
+`DocEntry` also holds `page_cache`: up to 6 open pdfium pages, populated only by `DocEntry::page(index)`.
+
+It exists because pdfium keeps a page's **decoded, colour-managed image** on the `FPDF_PAGE` object. Fetching a fresh page for each render (`document.pages().get(..)`, which loads and then closes it) throws that away, and on a page holding one large ICC-tagged image the decode *is* the render: ~1 s cold versus ~10–30 ms against a retained page. Anything on a render path should therefore go through `entry.page(i)`, not `document.pages().get(i)`:
+
+```rust
+let mut entry = lock_mutex(&entry)?;         // note: `mut`
+let pdf_page = entry.page(page_index_0based)?;
+```
+
+**The invariant:** a cached `FPDF_PAGE` handle is valid only while the `FPDF_DOCUMENT` it came from is alive, and the compiler cannot enforce this (the pages are `'static`). Violating it is a use-after-free, not a stale render. Three things uphold it:
+
+- `page_cache` is declared **before** `document` in the struct, so Rust's field drop order closes the pages first.
+- `set_buffer_and_refresh` calls `clear_page_cache()` before swapping the document — this covers every buffer-model edit automatically.
+- Commands that mutate `entry.document` **in place** must call `entry.clear_page_cache()` themselves *before* mutating, because that happens before the refresh. The existing three are `delete_pages_impl`, `rotate_pages_impl`, and `merge_document_impl` in `commands/pages.rs`. **Any new one must do the same.**
+
+The limit of 6 is deliberate: each retained page holds its decoded bitmap (tens of MB for a high-resolution scan), so this is sized for the viewer's render window plus the matching sidebar thumbnails, not for a whole document.
+
+Related frontend constraint: `ContinuousViewer` does not render pages until the one-shot open zoom (`fit-width-90`, issue #38) resolves to a real value. Rendering at the placeholder zoom rasterises every page at a throwaway size, and on a large page that oversized bitmap overflows pdfium's own image cache — evicting the decode, so the render that follows pays for it a second time.
 
 ---
 
