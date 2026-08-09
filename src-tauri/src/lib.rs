@@ -75,6 +75,7 @@ pub fn run() {
             commands::pages::split_document,
             commands::save::save_document,
             commands::save::save_document_as,
+            commands::optimize::inspect_images,
             commands::optimize::run_optimization_steps,
             commands::optimize::cancel_compress,
             commands::margins::analyze_margins,
