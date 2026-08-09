@@ -50,6 +50,15 @@ pub struct SkippedImages {
 pub struct OptimizationReport {
     pub results: Vec<StepResult>,
     pub skipped_images: Vec<SkippedImages>,
+    /// Images the downsampling step deliberately left alone because they are
+    /// already displayed at or below the target DPI.
+    ///
+    /// Kept separate from `skipped_images`, which records images we *couldn't*
+    /// handle: this is the step working as intended, and conflating the two
+    /// would turn reassurance into an apparent limitation. Reported because
+    /// otherwise an image-only PDF that is already at a sensible resolution
+    /// produces 0.00% with no explanation at all.
+    pub images_at_target: u32,
     /// True if the run was cancelled before completing. When cancelled, no
     /// output is staged and the frontend discards `results`.
     pub cancelled: bool,
@@ -508,6 +517,7 @@ fn step_recompress_images(
     target_dpi: f32,
     jpeg_quality: u8,
     skipped: &mut Vec<SkippedImages>,
+    at_target: &mut u32,
     emit: &dyn Fn(u32, u32),
     cancel: &AtomicBool,
 ) -> bool {
@@ -536,7 +546,7 @@ fn step_recompress_images(
         match plan_one(doc, *id, widths.get(id).copied(), target_dpi, jpeg_quality) {
             PlanResult::Replace { content, w, h, gray } => plans.push((*id, content, w, h, gray)),
             PlanResult::Skip(reason) => *counts.entry(reason).or_insert(0) += 1,
-            PlanResult::Leave => {}
+            PlanResult::Leave => *at_target += 1,
         }
     }
 
@@ -671,6 +681,7 @@ fn run_optimization_steps_impl(
     let step_count = steps.len() as u32;
     let mut results = Vec::with_capacity(steps.len());
     let mut skipped_images = Vec::new();
+    let mut images_at_target = 0u32;
     let mut cancelled = false;
 
     for (i, step) in steps.iter().enumerate() {
@@ -703,6 +714,7 @@ fn run_optimization_steps_impl(
                 target_dpi,
                 jpeg_quality,
                 &mut skipped_images,
+                &mut images_at_target,
                 &img_emit,
                 cancel,
             ) {
@@ -725,6 +737,7 @@ fn run_optimization_steps_impl(
             OptimizationReport {
                 results,
                 skipped_images,
+                images_at_target,
                 cancelled: true,
             },
             None,
@@ -739,6 +752,7 @@ fn run_optimization_steps_impl(
         OptimizationReport {
             results,
             skipped_images,
+            images_at_target,
             cancelled: false,
         },
         Some(out),
@@ -986,7 +1000,7 @@ mod tests {
 
         let before = serialized_size(&doc);
         let mut skipped = Vec::new();
-        step_recompress_images(&mut doc, 150.0, 75, &mut skipped, &|_, _| {}, &AtomicBool::new(false));
+        step_recompress_images(&mut doc, 150.0, 75, &mut skipped, &mut 0, &|_, _| {}, &AtomicBool::new(false));
         let after = serialized_size(&doc);
 
         assert!(after < before, "expected shrink: after={after} before={before}");
@@ -1030,7 +1044,7 @@ mod tests {
         set_decode(&mut doc, img_id, &[(1.0, 0.0), (1.0, 0.0), (1.0, 0.0), (1.0, 0.0)]);
 
         let mut skipped = Vec::new();
-        step_recompress_images(&mut doc, 150.0, 75, &mut skipped, &|_, _| {}, &AtomicBool::new(false));
+        step_recompress_images(&mut doc, 150.0, 75, &mut skipped, &mut 0, &|_, _| {}, &AtomicBool::new(false));
 
         assert!(skipped.is_empty(), "unexpected skips: {skipped:?}");
         let dict = image_dict(&doc, img_id);
@@ -1057,7 +1071,7 @@ mod tests {
         let before = serialized_size(&doc);
 
         let mut skipped = Vec::new();
-        step_recompress_images(&mut doc, 150.0, 75, &mut skipped, &|_, _| {}, &AtomicBool::new(false));
+        step_recompress_images(&mut doc, 150.0, 75, &mut skipped, &mut 0, &|_, _| {}, &AtomicBool::new(false));
 
         assert_eq!(serialized_size(&doc), before, "image must be left byte-for-byte");
         assert_eq!(skipped.len(), 1, "expected one skip: {skipped:?}");
@@ -1108,11 +1122,23 @@ mod tests {
 
         let before = serialized_size(&doc);
         let mut skipped = Vec::new();
-        step_recompress_images(&mut doc, 150.0, 75, &mut skipped, &|_, _| {}, &AtomicBool::new(false));
+        let mut at_target = 0;
+        step_recompress_images(
+            &mut doc,
+            150.0,
+            75,
+            &mut skipped,
+            &mut at_target,
+            &|_, _| {},
+            &AtomicBool::new(false),
+        );
         let after = serialized_size(&doc);
 
         assert!(skipped.is_empty());
         assert_eq!(after, before);
+        // Not a skip — a deliberate no-op, tallied separately so the panel can
+        // explain a 0.00% result instead of leaving it unaccounted for.
+        assert_eq!(at_target, 1);
         let w = image_dict(&doc, img_id).get(b"Width").unwrap().as_float().unwrap();
         assert_eq!(w as u32, 100);
     }
@@ -1133,7 +1159,7 @@ mod tests {
         );
 
         let mut skipped = Vec::new();
-        step_recompress_images(&mut doc, 150.0, 75, &mut skipped, &|_, _| {}, &AtomicBool::new(false));
+        step_recompress_images(&mut doc, 150.0, 75, &mut skipped, &mut 0, &|_, _| {}, &AtomicBool::new(false));
 
         assert_eq!(skipped.len(), 1);
         assert_eq!(skipped[0].reason, "jpx");
@@ -1159,7 +1185,7 @@ mod tests {
         );
 
         let mut skipped = Vec::new();
-        step_recompress_images(&mut doc, 150.0, 75, &mut skipped, &|_, _| {}, &AtomicBool::new(false));
+        step_recompress_images(&mut doc, 150.0, 75, &mut skipped, &mut 0, &|_, _| {}, &AtomicBool::new(false));
 
         assert_eq!(skipped.len(), 1);
         assert_eq!(skipped[0].reason, "bilevel");
@@ -1174,7 +1200,7 @@ mod tests {
             doc_with_image("DCTDecode", 8, "DeviceRGB", 600, 600, jpeg, 72.0, None);
 
         let mut skipped = Vec::new();
-        step_recompress_images(&mut doc, 150.0, 75, &mut skipped, &|_, _| {}, &AtomicBool::new(false));
+        step_recompress_images(&mut doc, 150.0, 75, &mut skipped, &mut 0, &|_, _| {}, &AtomicBool::new(false));
 
         assert_eq!(skipped.len(), 1);
         assert_eq!(skipped[0].reason, "unreferenced");

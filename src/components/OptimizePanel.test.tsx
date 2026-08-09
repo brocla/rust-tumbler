@@ -48,6 +48,7 @@ const REPORT = {
     { step: "strip_extras", sizeBefore: 700, sizeAfter: 600 },
   ],
   skippedImages: [],
+  imagesAtTarget: 0,
   cancelled: false,
 };
 
@@ -124,6 +125,41 @@ describe("OptimizePanel", () => {
     });
     await waitFor(() => expect(screen.getByText(/JPEG2000/)).toBeTruthy());
     expect(screen.getByText(/2 images/)).toBeTruthy();
+  });
+
+  // Without this notice an image-only PDF whose images are already sensibly
+  // sized reports 0.00% with nothing to explain it.
+  it("explains images left alone for already being at the target DPI", async () => {
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === "run_optimization_steps") return { ...REPORT, imagesAtTarget: 2 };
+      return undefined;
+    });
+    render(<OptimizePanel />);
+    await act(async () => {
+      fireEvent.click(screen.getByText("Run"));
+    });
+    await waitFor(() => expect(screen.getByText(/already at or below 150 DPI/)).toBeTruthy());
+    expect(screen.getByText(/Lower the target DPI/)).toBeTruthy();
+  });
+
+  // The DPI slider stays live after a run, so the notice must quote the DPI the
+  // report was produced at, not whatever the slider reads now.
+  it("quotes the DPI the report was run at, not the current slider value", async () => {
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === "run_optimization_steps") return { ...REPORT, imagesAtTarget: 1 };
+      return undefined;
+    });
+    render(<OptimizePanel />);
+    fireEvent.click(imageCheckbox());
+    await act(async () => {
+      fireEvent.click(screen.getByText("Run"));
+    });
+    await waitFor(() => expect(screen.getByText(/already at or below 150 DPI/)).toBeTruthy());
+
+    fireEvent.change(screen.getByText(/Target DPI/).closest("div")!.querySelector("input")!, {
+      target: { value: "80" },
+    });
+    expect(screen.getByText(/already at or below 150 DPI/)).toBeTruthy();
   });
 
   it("shows no results when the run reports cancellation", async () => {
