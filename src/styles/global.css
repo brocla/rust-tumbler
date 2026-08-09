@@ -1392,6 +1392,14 @@ input[type="radio"].form-check:checked {
   color: var(--color-text-muted);
 }
 
+/* Not an error — a change to how the document looks that deserves a glance. */
+.optimize-warning {
+  font-size: var(--font-size-sm);
+  color: var(--color-text);
+  border-left: 3px solid var(--color-accent);
+  padding: 4px 0 4px 8px;
+}
+
 .optimize-actions {
   display: flex;
   gap: 8px;

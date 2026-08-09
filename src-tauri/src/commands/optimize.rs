@@ -50,8 +50,8 @@ pub struct SkippedImages {
 pub struct OptimizationReport {
     pub results: Vec<StepResult>,
     pub skipped_images: Vec<SkippedImages>,
-    /// Images the downsampling step deliberately left alone because they are
-    /// already displayed at or below the target DPI.
+    /// Images the step deliberately left alone because they are already
+    /// displayed at or below the target DPI.
     ///
     /// Kept separate from `skipped_images`, which records images we *couldn't*
     /// handle: this is the step working as intended, and conflating the two
@@ -59,6 +59,23 @@ pub struct OptimizationReport {
     /// otherwise an image-only PDF that is already at a sensible resolution
     /// produces 0.00% with no explanation at all.
     pub images_at_target: u32,
+    /// Images that were decoded and re-encoded, then rejected because the
+    /// result wasn't enough smaller to justify the generation loss.
+    ///
+    /// Distinct from `images_at_target`: we did look at these. On a second
+    /// quality-only run this is the expected outcome for everything the first
+    /// run compressed, and reporting it as "already at target DPI" would be a
+    /// plain lie about what happened.
+    pub images_no_win: u32,
+    /// Images that were re-encoded out of a managed colour space (ICC, CMYK,
+    /// Lab) into plain DeviceRGB/DeviceGray.
+    ///
+    /// The replacement is written without a profile, so a viewer no longer
+    /// applies the colour transform the original asked for. On saturated
+    /// artwork that is a visible shift — measured at roughly 7/7/15 mean RGB
+    /// on a CMYK flyer, against 2/1/2 for the quality drop itself. Reported
+    /// because it's a change to how the document *looks*, not just its size.
+    pub images_colour_converted: u32,
     /// True if the run was cancelled before completing. When cancelled, no
     /// output is staged and the frontend discards `results`.
     pub cancelled: bool,
@@ -668,12 +685,56 @@ fn inspect_images_impl(pdf_bytes: &[u8]) -> Result<Vec<ImageInfo>, AppError> {
     Ok(out)
 }
 
+/// A quality-only re-encode is pure generation loss unless it buys something
+/// real, so one is adopted only when it saves at least this much. That also
+/// makes repeat runs converge: the second run's output isn't 10% smaller
+/// again, so it stops instead of stacking artifacts run after run.
+const MIN_REENCODE_WIN: f32 = 0.90;
+
+/// Settings for the image step.
+#[derive(Clone, Copy)]
+struct ImageOptions {
+    target_dpi: f32,
+    jpeg_quality: u8,
+    /// Re-encode images that are already at or below `target_dpi`, keeping
+    /// their pixel dimensions — the only way to reach the encoder for a file
+    /// that is sensibly sized but wastefully encoded. Off by default: it is
+    /// lossy work on images the DPI setting explicitly said to leave alone.
+    ///
+    /// Limited to images already stored as JPEG. Re-encoding a losslessly
+    /// stored image (line art, screenshots) as JPEG is a different trade-off
+    /// with a much worse failure mode, and isn't offered here.
+    reencode_at_target: bool,
+}
+
+/// What the image step did, beyond the bytes it saved.
+#[derive(Default)]
+struct ImageTally {
+    /// Already at or below the target DPI, and not re-encoded.
+    at_target: u32,
+    /// Re-encoded, then rejected for not saving enough to be worth it.
+    no_win: u32,
+    /// Replaced, and converted out of a managed colour space in the process.
+    colour_converted: u32,
+    /// Couldn't be handled at all, by reason.
+    skipped: HashMap<&'static str, u32>,
+}
+
 enum PlanResult {
     /// Replace the stream with a smaller JPEG of the given dimensions.
-    Replace { content: Vec<u8>, w: u32, h: u32, gray: bool },
-    /// Leave the image untouched and don't report it (already small enough, or
-    /// the re-encode wasn't actually smaller).
-    Leave,
+    Replace {
+        content: Vec<u8>,
+        w: u32,
+        h: u32,
+        gray: bool,
+        /// The source wasn't already a device colour space, so its profile is
+        /// being dropped along with the colour management that came with it.
+        colour_converted: bool,
+    },
+    /// Nothing to do: already at or below the target DPI. Not a failure.
+    AtTarget,
+    /// Re-encoded, but the result wasn't enough smaller to be worth adopting.
+    NoWin,
     /// Leave the image untouched and tally it under this reason.
     Skip(&'static str),
 }
@@ -683,8 +744,7 @@ fn plan_one(
     doc: &Document,
     id: ObjectId,
     displayed_w: Option<f32>,
-    target_dpi: f32,
-    quality: u8,
+    opts: ImageOptions,
 ) -> PlanResult {
     let stream = match doc.get_object(id).and_then(|o| o.as_stream()) {
         Ok(s) => s,
@@ -711,15 +771,24 @@ fn plan_one(
         _ => return PlanResult::Skip("unreferenced"),
     };
     let current_dpi = width as f32 * 72.0 / displayed_w;
-    if current_dpi <= target_dpi {
-        return PlanResult::Leave;
+    let at_target = current_dpi <= opts.target_dpi;
+    if at_target && !opts.reencode_at_target {
+        return PlanResult::AtTarget;
     }
-    let scale = target_dpi / current_dpi;
+    // Clamped: an image at the target keeps its dimensions and is re-encoded
+    // in place. Downsampling is a size reduction, never an enlargement.
+    let scale = (opts.target_dpi / current_dpi).min(1.0);
     let new_w = ((width as f32 * scale).round() as u32).max(1);
     let new_h = ((height as f32 * scale).round() as u32).max(1);
 
     let filters = stream.filters().unwrap_or_default();
     let filter = if filters.len() == 1 { std::str::from_utf8(filters[0]).unwrap_or("") } else { "" };
+
+    // Quality-only re-encoding is offered for already-lossy JPEGs only; see
+    // `ImageOptions::reencode_at_target`.
+    if at_target && filter != "DCTDecode" {
+        return PlanResult::AtTarget;
+    }
 
     let (img, gray) = match filter {
         "DCTDecode" => match image::load_from_memory(&stream.content) {
@@ -774,10 +843,16 @@ fn plan_one(
         _ => return PlanResult::Skip("unsupported_filter"),
     };
 
-    let resized = img.resize(new_w, new_h, image::imageops::FilterType::Lanczos3);
+    // A quality-only pass keeps the original dimensions, so there is nothing to
+    // resample — and Lanczos at scale 1.0 is not an identity transform, it's a
+    // slow way to soften the image.
+    let quality_only = new_w == width && new_h == height;
+    let resized =
+        if quality_only { img } else { img.resize(new_w, new_h, image::imageops::FilterType::Lanczos3) };
+
     let mut out = Vec::new();
     let encoded = {
-        let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, quality);
+        let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, opts.jpeg_quality);
         if gray {
             enc.encode_image(&resized.to_luma8()).is_ok()
         } else {
@@ -787,21 +862,31 @@ fn plan_one(
     if !encoded {
         return PlanResult::Skip("decode");
     }
-    // Don't adopt a re-encode that didn't actually shrink the stream.
-    if out.len() >= stream.content.len() {
-        return PlanResult::Leave;
+
+    // A downsample only has to come out smaller; a quality-only re-encode has
+    // to come out *meaningfully* smaller, or it's generation loss for nothing.
+    let ceiling = if quality_only {
+        (stream.content.len() as f32 * MIN_REENCODE_WIN) as usize
+    } else {
+        stream.content.len()
+    };
+    if out.len() >= ceiling {
+        return PlanResult::NoWin;
     }
-    PlanResult::Replace { content: out, w: new_w, h: new_h, gray }
+    // We always write DeviceRGB/DeviceGray. Anything else the source declared —
+    // an ICC profile, CMYK, Lab — is being converted, and the naive conversion
+    // the decoder does is not the colour-managed one a viewer would apply. The
+    // shift is small but visible on saturated artwork, so it gets reported.
+    let colour_converted = !matches!(color_kind(dict, doc), ColorKind::Gray | ColorKind::Rgb);
+    PlanResult::Replace { content: out, w: new_w, h: new_h, gray, colour_converted }
 }
 
 /// Returns `true` if the run was cancelled partway (in which case the document
 /// is left unmodified by this step).
 fn step_recompress_images(
     doc: &mut Document,
-    target_dpi: f32,
-    jpeg_quality: u8,
-    skipped: &mut Vec<SkippedImages>,
-    at_target: &mut u32,
+    opts: ImageOptions,
+    tally: &mut ImageTally,
     emit: &dyn Fn(u32, u32),
     cancel: &AtomicBool,
 ) -> bool {
@@ -821,16 +906,21 @@ fn step_recompress_images(
     // is the slow part, so progress and cancellation are checked here.
     let total = image_ids.len() as u32;
     let mut plans: Vec<(ObjectId, Vec<u8>, u32, u32, bool)> = Vec::new();
-    let mut counts: HashMap<&'static str, u32> = HashMap::new();
     for (i, id) in image_ids.iter().enumerate() {
         if cancel.load(Ordering::Relaxed) {
             return true;
         }
         emit(i as u32 + 1, total);
-        match plan_one(doc, *id, placements.get(id).map(|p| p.width), target_dpi, jpeg_quality) {
-            PlanResult::Replace { content, w, h, gray } => plans.push((*id, content, w, h, gray)),
-            PlanResult::Skip(reason) => *counts.entry(reason).or_insert(0) += 1,
-            PlanResult::Leave => *at_target += 1,
+        match plan_one(doc, *id, placements.get(id).map(|p| p.width), opts) {
+            PlanResult::Replace { content, w, h, gray, colour_converted } => {
+                if colour_converted {
+                    tally.colour_converted += 1;
+                }
+                plans.push((*id, content, w, h, gray));
+            }
+            PlanResult::Skip(reason) => *tally.skipped.entry(reason).or_insert(0) += 1,
+            PlanResult::AtTarget => tally.at_target += 1,
+            PlanResult::NoWin => tally.no_win += 1,
         }
     }
 
@@ -855,9 +945,6 @@ fn step_recompress_images(
         }
     }
 
-    for (reason, count) in counts {
-        skipped.push(SkippedImages { reason: reason.to_string(), count });
-    }
     false
 }
 
@@ -906,6 +993,9 @@ pub fn inspect_images(
     inspect_images_impl(&pdf_bytes).map_err(String::from)
 }
 
+// Tauri commands receive their parameters by name from the frontend, so the
+// settings can't be grouped into a struct without changing the IPC shape.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn run_optimization_steps(
     app: tauri::AppHandle,
@@ -915,6 +1005,7 @@ pub async fn run_optimization_steps(
     steps: Vec<StepId>,
     target_dpi: f32,
     jpeg_quality: u8,
+    reencode_at_target: bool,
 ) -> Result<OptimizationReport, String> {
     // The buffer is the authoritative bytes (it carries any unsaved edits).
     // Clone it before the blocking work so the closure captures only owned,
@@ -934,8 +1025,9 @@ pub async fn run_optimization_steps(
 
     // The work is CPU-bound (image decode/resize/re-encode), so run it off the
     // async runtime to keep the app responsive and let progress events flow.
+    let opts = ImageOptions { target_dpi, jpeg_quality, reencode_at_target };
     let outcome = tauri::async_runtime::spawn_blocking(move || {
-        run_optimization_steps_impl(&emit, &pdf_bytes, steps, target_dpi, jpeg_quality, &cancel)
+        run_optimization_steps_impl(&emit, &pdf_bytes, steps, opts, &cancel)
     })
     .await
     .map_err(|e| e.to_string());
@@ -971,8 +1063,7 @@ fn run_optimization_steps_impl(
     emit: &dyn Fn(CompressProgress),
     pdf_bytes: &[u8],
     steps: Vec<StepId>,
-    target_dpi: f32,
-    jpeg_quality: u8,
+    opts: ImageOptions,
     cancel: &AtomicBool,
 ) -> Result<(OptimizationReport, Option<Vec<u8>>), AppError> {
     let mut doc = Document::load_mem(pdf_bytes)
@@ -980,8 +1071,7 @@ fn run_optimization_steps_impl(
 
     let step_count = steps.len() as u32;
     let mut results = Vec::with_capacity(steps.len());
-    let mut skipped_images = Vec::new();
-    let mut images_at_target = 0u32;
+    let mut tally = ImageTally::default();
     let mut cancelled = false;
 
     for (i, step) in steps.iter().enumerate() {
@@ -1009,15 +1099,7 @@ fn run_optimization_steps_impl(
                     image_total,
                 });
             };
-            if step_recompress_images(
-                &mut doc,
-                target_dpi,
-                jpeg_quality,
-                &mut skipped_images,
-                &mut images_at_target,
-                &img_emit,
-                cancel,
-            ) {
+            if step_recompress_images(&mut doc, opts, &mut tally, &img_emit, cancel) {
                 cancelled = true;
                 break;
             }
@@ -1032,12 +1114,20 @@ fn run_optimization_steps_impl(
         });
     }
 
+    let skipped_images: Vec<SkippedImages> = tally
+        .skipped
+        .into_iter()
+        .map(|(reason, count)| SkippedImages { reason: reason.to_string(), count })
+        .collect();
+
     if cancelled {
         return Ok((
             OptimizationReport {
                 results,
                 skipped_images,
-                images_at_target,
+                images_at_target: tally.at_target,
+                images_no_win: tally.no_win,
+                images_colour_converted: tally.colour_converted,
                 cancelled: true,
             },
             None,
@@ -1052,7 +1142,9 @@ fn run_optimization_steps_impl(
         OptimizationReport {
             results,
             skipped_images,
-            images_at_target,
+            images_at_target: tally.at_target,
+            images_no_win: tally.no_win,
+            images_colour_converted: tally.colour_converted,
             cancelled: false,
         },
         Some(out),
@@ -1069,6 +1161,28 @@ mod tests {
     use super::*;
     use lopdf::{Dictionary, Object, Stream};
 
+
+    /// The shipped defaults: downsample to `target_dpi`, and *don't* re-encode
+    /// images that are already at or below it.
+    fn opts(target_dpi: f32) -> ImageOptions {
+        ImageOptions { target_dpi, jpeg_quality: 75, reencode_at_target: false }
+    }
+
+    /// Run the image step to completion and return what it tallied.
+    fn run_image_step(doc: &mut Document, opts: ImageOptions) -> ImageTally {
+        let mut tally = ImageTally::default();
+        step_recompress_images(doc, opts, &mut tally, &|_, _| {}, &AtomicBool::new(false));
+        tally
+    }
+
+    /// zlib-compress raw samples, so a FlateDecode fixture actually inflates.
+    fn deflate(raw: &[u8]) -> Vec<u8> {
+        use std::io::Write;
+        let mut enc =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(raw).expect("deflate");
+        enc.finish().expect("deflate")
+    }
 
     /// A decodable JPEG of the given size, for building image fixtures.
     fn jpeg_bytes(w: u32, h: u32, quality: u8) -> Vec<u8> {
@@ -1372,7 +1486,7 @@ mod tests {
         ];
         let cancel = AtomicBool::new(false);
         let (report, output) =
-            run_optimization_steps_impl(&|_p| {}, &pdf_bytes, steps, 150.0, 80, &cancel)
+            run_optimization_steps_impl(&|_p| {}, &pdf_bytes, steps, opts(150.0), &cancel)
                 .expect("run optimization");
 
         assert_eq!(report.results.len(), 4);
@@ -1396,7 +1510,7 @@ mod tests {
         let steps = vec![StepId::RecompressStreams, StepId::StripExtras];
         let cancel = AtomicBool::new(true); // already cancelled
         let (report, output) =
-            run_optimization_steps_impl(&|_p| {}, &pdf_bytes, steps, 150.0, 80, &cancel)
+            run_optimization_steps_impl(&|_p| {}, &pdf_bytes, steps, opts(150.0), &cancel)
                 .expect("run optimization");
 
         assert!(report.cancelled);
@@ -1421,12 +1535,11 @@ mod tests {
         );
 
         let before = serialized_size(&doc);
-        let mut skipped = Vec::new();
-        step_recompress_images(&mut doc, 150.0, 75, &mut skipped, &mut 0, &|_, _| {}, &AtomicBool::new(false));
+        let tally = run_image_step(&mut doc, opts(150.0));
         let after = serialized_size(&doc);
 
         assert!(after < before, "expected shrink: after={after} before={before}");
-        assert!(skipped.is_empty(), "unexpected skips: {skipped:?}");
+        assert!(tally.skipped.is_empty(), "unexpected skips: {:?}", tally.skipped);
 
         let w = image_dict(&doc, img_id).get(b"Width").unwrap().as_float().unwrap();
         assert_eq!(w as u32, 150);
@@ -1465,10 +1578,9 @@ mod tests {
         );
         set_decode(&mut doc, img_id, &[(1.0, 0.0), (1.0, 0.0), (1.0, 0.0), (1.0, 0.0)]);
 
-        let mut skipped = Vec::new();
-        step_recompress_images(&mut doc, 150.0, 75, &mut skipped, &mut 0, &|_, _| {}, &AtomicBool::new(false));
+        let tally = run_image_step(&mut doc, opts(150.0));
 
-        assert!(skipped.is_empty(), "unexpected skips: {skipped:?}");
+        assert!(tally.skipped.is_empty(), "unexpected skips: {:?}", tally.skipped);
         let dict = image_dict(&doc, img_id);
         assert!(!dict.has(b"Decode"), "stale /Decode must be removed");
         assert!(!dict.has(b"D"), "stale /D must be removed");
@@ -1492,12 +1604,10 @@ mod tests {
         set_decode(&mut doc, img_id, &[(1.0, 0.0), (1.0, 0.0), (1.0, 0.0)]);
         let before = serialized_size(&doc);
 
-        let mut skipped = Vec::new();
-        step_recompress_images(&mut doc, 150.0, 75, &mut skipped, &mut 0, &|_, _| {}, &AtomicBool::new(false));
+        let tally = run_image_step(&mut doc, opts(150.0));
 
         assert_eq!(serialized_size(&doc), before, "image must be left byte-for-byte");
-        assert_eq!(skipped.len(), 1, "expected one skip: {skipped:?}");
-        assert_eq!(skipped[0].reason, "decode_array");
+        assert_eq!(tally.skipped.get("decode_array"), Some(&1), "{:?}", tally.skipped);
     }
 
     #[test]
@@ -1543,26 +1653,230 @@ mod tests {
         );
 
         let before = serialized_size(&doc);
-        let mut skipped = Vec::new();
-        let mut at_target = 0;
-        step_recompress_images(
-            &mut doc,
-            150.0,
-            75,
-            &mut skipped,
-            &mut at_target,
-            &|_, _| {},
-            &AtomicBool::new(false),
-        );
+        let tally = run_image_step(&mut doc, opts(150.0));
         let after = serialized_size(&doc);
 
-        assert!(skipped.is_empty());
+        assert!(tally.skipped.is_empty());
         assert_eq!(after, before);
         // Not a skip — a deliberate no-op, tallied separately so the panel can
         // explain a 0.00% result instead of leaving it unaccounted for.
-        assert_eq!(at_target, 1);
+        assert_eq!(tally.at_target, 1);
+        assert_eq!(tally.no_win, 0);
         let w = image_dict(&doc, img_id).get(b"Width").unwrap().as_float().unwrap();
         assert_eq!(w as u32, 100);
+    }
+
+    // --- Quality-only re-encode ------------------------------------------
+
+    /// A 100×100 image drawn at 100pt is 72 DPI — under the 150 DPI target, so
+    /// the downsampler leaves it alone. Stored at quality 95 against a target of
+    /// 60, a quality-only pass shrinks it substantially without touching a
+    /// single pixel dimension. This is the case the whole feature exists for.
+    #[test]
+    fn reencode_at_target_shrinks_a_wastefully_encoded_image_in_place() {
+        let jpeg = jpeg_bytes(100, 100, 95);
+        let original = jpeg.len();
+        let (mut doc, img_id) = doc_with_image(
+            "DCTDecode",
+            8,
+            "DeviceRGB",
+            100,
+            100,
+            jpeg,
+            100.0,
+            Some([100.0, 0.0, 0.0, 100.0, 0.0, 0.0]),
+        );
+
+        let tally = run_image_step(
+            &mut doc,
+            ImageOptions { target_dpi: 150.0, jpeg_quality: 60, reencode_at_target: true },
+        );
+
+        assert_eq!(tally.at_target, 0, "it was re-encoded, not passed over");
+        assert_eq!(tally.no_win, 0);
+        assert!(tally.skipped.is_empty(), "{:?}", tally.skipped);
+
+        let dict = image_dict(&doc, img_id);
+        // Resolution preserved — that's the entire point of quality-only.
+        assert_eq!(dict.get(b"Width").unwrap().as_float().unwrap() as u32, 100);
+        assert_eq!(dict.get(b"Height").unwrap().as_float().unwrap() as u32, 100);
+
+        let now = doc.get_object(img_id).unwrap().as_stream().unwrap().content.len();
+        assert!(now < original, "expected shrink: {now} vs {original}");
+    }
+
+    /// Off by default: the same image, same settings, without opting in.
+    #[test]
+    fn images_at_target_are_untouched_unless_reencoding_is_requested() {
+        let jpeg = jpeg_bytes(100, 100, 95);
+        let (mut doc, img_id) = doc_with_image(
+            "DCTDecode",
+            8,
+            "DeviceRGB",
+            100,
+            100,
+            jpeg.clone(),
+            100.0,
+            Some([100.0, 0.0, 0.0, 100.0, 0.0, 0.0]),
+        );
+
+        let tally = run_image_step(
+            &mut doc,
+            ImageOptions { target_dpi: 150.0, jpeg_quality: 60, reencode_at_target: false },
+        );
+
+        assert_eq!(tally.at_target, 1);
+        assert_eq!(
+            doc.get_object(img_id).unwrap().as_stream().unwrap().content,
+            jpeg,
+            "must be byte-for-byte the original"
+        );
+    }
+
+    /// Re-encoding at the quality it's already at buys nothing, so the result is
+    /// rejected and tallied as a no-win rather than adopted. This is what makes
+    /// repeat runs converge instead of stacking generation loss.
+    #[test]
+    fn reencode_at_target_rejects_a_win_too_small_to_be_worth_it() {
+        let jpeg = jpeg_bytes(100, 100, 75);
+        let (mut doc, img_id) = doc_with_image(
+            "DCTDecode",
+            8,
+            "DeviceRGB",
+            100,
+            100,
+            jpeg.clone(),
+            100.0,
+            Some([100.0, 0.0, 0.0, 100.0, 0.0, 0.0]),
+        );
+
+        let tally = run_image_step(
+            &mut doc,
+            ImageOptions { target_dpi: 150.0, jpeg_quality: 75, reencode_at_target: true },
+        );
+
+        assert_eq!(tally.no_win, 1, "re-encode was attempted and rejected");
+        assert_eq!(tally.at_target, 0, "it was not passed over — we looked at it");
+        assert_eq!(
+            doc.get_object(img_id).unwrap().as_stream().unwrap().content,
+            jpeg,
+            "a rejected re-encode must leave the original bytes"
+        );
+    }
+
+    /// The second run must find nothing worth doing. Without the minimum-win
+    /// rule a quality-only re-encode shrinks a little every time, so repeated
+    /// compression would quietly degrade the image run after run.
+    #[test]
+    fn reencode_at_target_converges_on_a_second_run() {
+        let (mut doc, img_id) = doc_with_image(
+            "DCTDecode",
+            8,
+            "DeviceRGB",
+            100,
+            100,
+            jpeg_bytes(100, 100, 95),
+            100.0,
+            Some([100.0, 0.0, 0.0, 100.0, 0.0, 0.0]),
+        );
+        let settings =
+            ImageOptions { target_dpi: 150.0, jpeg_quality: 60, reencode_at_target: true };
+
+        let first = run_image_step(&mut doc, settings);
+        assert_eq!(first.no_win, 0, "first run should compress");
+        let after_first = doc.get_object(img_id).unwrap().as_stream().unwrap().content.clone();
+
+        let second = run_image_step(&mut doc, settings);
+        assert_eq!(second.no_win, 1, "second run should find nothing worth doing");
+        assert_eq!(
+            doc.get_object(img_id).unwrap().as_stream().unwrap().content,
+            after_first,
+            "second run must leave the first run's bytes alone"
+        );
+    }
+
+    /// Replacing an image always writes DeviceRGB/DeviceGray, so a source in a
+    /// managed colour space loses its profile — and with it the colour
+    /// transform a viewer would have applied. That changes how the document
+    /// looks, not just its size, so it has to be reported.
+    #[test]
+    fn reports_images_converted_out_of_a_managed_colour_space() {
+        let (mut doc, img_id) = doc_with_image(
+            "DCTDecode",
+            8,
+            "DeviceRGB",
+            600,
+            600,
+            jpeg_bytes(600, 600, 90),
+            72.0,
+            Some([72.0, 0.0, 0.0, 72.0, 0.0, 0.0]),
+        );
+        // Re-tag it as ICCBased, the shape a print-oriented PDF actually uses.
+        let mut profile = Dictionary::new();
+        profile.set("N", 3_i64);
+        let profile_id = doc.add_object(Stream::new(profile, vec![0u8; 8]));
+        doc.get_object_mut(img_id)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set("ColorSpace", Object::Array(vec!["ICCBased".into(), Object::Reference(profile_id)]));
+
+        let tally = run_image_step(&mut doc, opts(150.0));
+
+        assert!(tally.skipped.is_empty(), "{:?}", tally.skipped);
+        assert_eq!(tally.colour_converted, 1);
+        let cs = image_dict(&doc, img_id).get(b"ColorSpace").unwrap().as_name().unwrap();
+        assert_eq!(cs, b"DeviceRGB");
+    }
+
+    /// An image that was already in a device colour space isn't "converted" —
+    /// counting it would cry wolf on every ordinary downsample.
+    #[test]
+    fn device_colour_spaces_are_not_reported_as_converted() {
+        let (mut doc, _) = doc_with_image(
+            "DCTDecode",
+            8,
+            "DeviceRGB",
+            600,
+            600,
+            jpeg_bytes(600, 600, 90),
+            72.0,
+            Some([72.0, 0.0, 0.0, 72.0, 0.0, 0.0]),
+        );
+        let tally = run_image_step(&mut doc, opts(150.0));
+        assert_eq!(tally.colour_converted, 0);
+    }
+
+    /// Quality-only re-encoding is offered for already-lossy JPEGs only. A
+    /// losslessly stored image at the target DPI is passed over, not converted.
+    #[test]
+    fn reencode_at_target_does_not_touch_losslessly_stored_images() {
+        let (mut doc, img_id) = doc_with_image(
+            "FlateDecode",
+            8,
+            "DeviceRGB",
+            10,
+            10,
+            deflate(&vec![200u8; 10 * 10 * 3]),
+            10.0,
+            Some([10.0, 0.0, 0.0, 10.0, 0.0, 0.0]),
+        );
+        let original = doc.get_object(img_id).unwrap().as_stream().unwrap().content.clone();
+
+        let tally = run_image_step(
+            &mut doc,
+            ImageOptions { target_dpi: 150.0, jpeg_quality: 60, reencode_at_target: true },
+        );
+
+        assert_eq!(tally.at_target, 1);
+        assert_eq!(tally.no_win, 0);
+        assert!(tally.skipped.is_empty(), "{:?}", tally.skipped);
+        assert_eq!(
+            doc.get_object(img_id).unwrap().as_stream().unwrap().content,
+            original,
+            "lossless source must be left exactly as it was"
+        );
     }
 
     /// A filter the `image` crate can't decode (JPEG2000) is left untouched and
@@ -1580,12 +1894,9 @@ mod tests {
             Some([72.0, 0.0, 0.0, 72.0, 0.0, 0.0]),
         );
 
-        let mut skipped = Vec::new();
-        step_recompress_images(&mut doc, 150.0, 75, &mut skipped, &mut 0, &|_, _| {}, &AtomicBool::new(false));
+        let tally = run_image_step(&mut doc, opts(150.0));
 
-        assert_eq!(skipped.len(), 1);
-        assert_eq!(skipped[0].reason, "jpx");
-        assert_eq!(skipped[0].count, 1);
+        assert_eq!(tally.skipped.get("jpx"), Some(&1), "{:?}", tally.skipped);
         // Untouched: the filter is still JPXDecode.
         let f = image_dict(&doc, img_id).get(b"Filter").unwrap().as_name().unwrap();
         assert_eq!(f, b"JPXDecode");
@@ -1606,11 +1917,9 @@ mod tests {
             Some([72.0, 0.0, 0.0, 72.0, 0.0, 0.0]),
         );
 
-        let mut skipped = Vec::new();
-        step_recompress_images(&mut doc, 150.0, 75, &mut skipped, &mut 0, &|_, _| {}, &AtomicBool::new(false));
+        let tally = run_image_step(&mut doc, opts(150.0));
 
-        assert_eq!(skipped.len(), 1);
-        assert_eq!(skipped[0].reason, "bilevel");
+        assert_eq!(tally.skipped.get("bilevel"), Some(&1), "{:?}", tally.skipped);
     }
 
     /// An image XObject that's never drawn on a page has no displayed size, so
@@ -1621,11 +1930,9 @@ mod tests {
         let (mut doc, _img) =
             doc_with_image("DCTDecode", 8, "DeviceRGB", 600, 600, jpeg, 72.0, None);
 
-        let mut skipped = Vec::new();
-        step_recompress_images(&mut doc, 150.0, 75, &mut skipped, &mut 0, &|_, _| {}, &AtomicBool::new(false));
+        let tally = run_image_step(&mut doc, opts(150.0));
 
-        assert_eq!(skipped.len(), 1);
-        assert_eq!(skipped[0].reason, "unreferenced");
+        assert_eq!(tally.skipped.get("unreferenced"), Some(&1), "{:?}", tally.skipped);
     }
 
 }

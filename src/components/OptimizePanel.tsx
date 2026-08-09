@@ -104,6 +104,15 @@ interface OptimizationReport {
   // step working as intended, and without it a document whose images are
   // already sensibly sized reports 0.00% with no explanation.
   imagesAtTarget: number;
+  // Images that were re-encoded and then rejected for not saving enough to
+  // justify the generation loss. Distinct from imagesAtTarget: these were
+  // actually looked at, and on a second quality-only run this is the expected
+  // outcome for everything the first run compressed.
+  imagesNoWin: number;
+  // Images re-encoded out of a managed colour space (ICC, CMYK) into plain
+  // DeviceRGB. The profile is dropped, so colours shift slightly — a change to
+  // how the document looks, not just its size, so it gets its own notice.
+  imagesColourConverted: number;
   cancelled: boolean;
 }
 
@@ -193,12 +202,18 @@ export function OptimizePanel() {
   const [checked, setChecked] = useState<Set<StepId>>(() => new Set(DEFAULT_CHECKED));
   const [targetDpi, setTargetDpi] = useState(150);
   const [jpegQuality, setJpegQuality] = useState(80);
+  // Off by default: lossy work on images the DPI setting explicitly said to
+  // leave alone should never happen without being asked for.
+  const [reencodeAtTarget, setReencodeAtTarget] = useState(false);
   const [running, setRunning] = useState(false);
   const [saving, setSaving] = useState(false);
   const [report, setReport] = useState<OptimizationReport | null>(null);
   // The DPI the displayed report was produced at. The slider stays live after a
   // run, so quoting `targetDpi` in the results would misreport what happened.
   const [reportDpi, setReportDpi] = useState(150);
+  // Likewise: the checkbox stays live after a run, and the notices below read
+  // differently depending on whether the run had it on.
+  const [reportReencode, setReportReencode] = useState(false);
   const [saved, setSaved] = useState(false);
   const [images, setImages] = useState<ImageInfo[] | null>(null);
   const linearizeProgress = usePdfStore((s) => s.linearizeProgress);
@@ -291,10 +306,12 @@ export function OptimizePanel() {
         steps,
         targetDpi,
         jpegQuality,
+        reencodeAtTarget,
       });
       // A cancelled run kept no output, so leave the panel in its pre-run state.
       setReport(result.cancelled ? null : result);
       setReportDpi(targetDpi);
+      setReportReencode(reencodeAtTarget);
     } catch (err) {
       await message(String(err), { title: "Compression Failed", kind: "error" });
     } finally {
@@ -407,9 +424,34 @@ export function OptimizePanel() {
             onChange={(e) => setJpegQuality(Number(e.target.value))}
           />
         </div>
+        <label className="optimize-step">
+          <input
+            type="checkbox"
+            checked={reencodeAtTarget}
+            onChange={(e) => {
+              setReencodeAtTarget(e.target.checked);
+              // Previous results no longer match the selection.
+              setReport(null);
+              setSaved(false);
+            }}
+          />
+          <span className="optimize-step-text">
+            <span className="optimize-step-label">Re-encode images already at target DPI</span>
+            <span className="optimize-step-desc">
+              Re-saves JPEGs at the quality above without changing their size in
+              pixels. Lossy, and only applied when it saves at least 10%.
+            </span>
+          </span>
+        </label>
       </fieldset>
 
-      {imageChecked && images !== null && <ImageInspector images={images} targetDpi={targetDpi} />}
+      {imageChecked && images !== null && (
+        <ImageInspector
+          images={images}
+          targetDpi={targetDpi}
+          reencodeAtTarget={reencodeAtTarget}
+        />
+      )}
 
       <button
         className="optimize-run-button"
@@ -450,8 +492,30 @@ export function OptimizePanel() {
           {report.imagesAtTarget > 0 && (
             <div className="optimize-skipped">
               {report.imagesAtTarget} image{report.imagesAtTarget !== 1 ? "s" : ""} already at
-              or below {reportDpi} DPI — nothing to downsample. Lower the target DPI to
-              re-encode {report.imagesAtTarget !== 1 ? "them" : "it"} anyway.
+              or below {reportDpi} DPI — nothing to downsample.{" "}
+              {reportReencode
+                ? // With the option on, only non-JPEG images can still land here.
+                  "Not stored as JPEG, so quality-only re-encoding doesn't apply."
+                : "Tick “Re-encode images already at target DPI” to compress " +
+                  (report.imagesAtTarget !== 1 ? "them" : "it") +
+                  " without losing resolution."}
+            </div>
+          )}
+
+          {report.imagesColourConverted > 0 && (
+            <div className="optimize-warning">
+              {report.imagesColourConverted} image
+              {report.imagesColourConverted !== 1 ? "s" : ""} converted to plain RGB from a
+              colour-managed space. Colours may shift slightly — check the page before
+              saving.
+            </div>
+          )}
+
+          {report.imagesNoWin > 0 && (
+            <div className="optimize-skipped">
+              {report.imagesNoWin} image{report.imagesNoWin !== 1 ? "s" : ""} re-encoded but
+              left unchanged — the result wasn&rsquo;t enough smaller to be worth the
+              quality loss. Lower the JPEG quality to change that.
             </div>
           )}
 
@@ -512,7 +576,15 @@ export function OptimizePanel() {
  * reported 0.00% and looked broken. This shows the two numbers the decision
  * actually turns on — resolution and encoder quality — before anything runs.
  */
-function ImageInspector({ images, targetDpi }: { images: ImageInfo[]; targetDpi: number }) {
+function ImageInspector({
+  images,
+  targetDpi,
+  reencodeAtTarget,
+}: {
+  images: ImageInfo[];
+  targetDpi: number;
+  reencodeAtTarget: boolean;
+}) {
   if (images.length === 0) {
     return (
       <div className="optimize-skipped">
@@ -523,7 +595,12 @@ function ImageInspector({ images, targetDpi }: { images: ImageInfo[]; targetDpi:
 
   const measured = images.filter((img) => img.dpi !== null);
   const above = measured.filter((img) => img.dpi! > targetDpi).length;
-  const at = measured.length - above;
+  const atTarget = measured.filter((img) => img.dpi! <= targetDpi);
+  // Quality-only re-encoding reaches already-lossy JPEGs only.
+  const reencodable = reencodeAtTarget
+    ? atTarget.filter((img) => img.filter === "DCTDecode").length
+    : 0;
+  const untouched = atTarget.length - reencodable;
 
   return (
     <div className="optimize-images">
@@ -532,7 +609,17 @@ function ImageInspector({ images, targetDpi }: { images: ImageInfo[]; targetDpi:
       </div>
       <ul className="optimize-image-list">
         {images.map((img, i) => (
-          <li key={i} className={img.dpi !== null && img.dpi <= targetDpi ? "at-target" : ""}>
+          <li
+            key={i}
+            // Dimmed only when nothing at all will happen to it.
+            className={
+              img.dpi !== null &&
+              img.dpi <= targetDpi &&
+              !(reencodeAtTarget && img.filter === "DCTDecode")
+                ? "at-target"
+                : ""
+            }
+          >
             <div className="optimize-image-row">
               <span className="optimize-image-page">{formatPages(img.pages)}</span>
               <span className="optimize-image-bytes">{formatBytes(img.storedBytes)}</span>
@@ -551,7 +638,9 @@ function ImageInspector({ images, targetDpi }: { images: ImageInfo[]; targetDpi:
         ))}
       </ul>
       <div className="optimize-images-summary">
-        At {targetDpi} DPI: {above} to downsample, {at} already small enough
+        At {targetDpi} DPI: {above} to downsample
+        {reencodable > 0 && `, ${reencodable} to re-encode`}, {untouched} already small
+        enough
         {measured.length < images.length &&
           `, ${images.length - measured.length} unmeasurable`}
         .

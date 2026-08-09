@@ -49,6 +49,8 @@ const REPORT = {
   ],
   skippedImages: [],
   imagesAtTarget: 0,
+  imagesNoWin: 0,
+  imagesColourConverted: 0,
   cancelled: false,
 };
 
@@ -100,6 +102,13 @@ describe("OptimizePanel", () => {
   function imageCheckbox(): HTMLInputElement {
     return screen
       .getByText("Downsample images")
+      .closest("label")!
+      .querySelector("input")! as HTMLInputElement;
+  }
+
+  function reencodeCheckbox(): HTMLInputElement {
+    return screen
+      .getByText("Re-encode images already at target DPI")
       .closest("label")!
       .querySelector("input")! as HTMLInputElement;
   }
@@ -255,7 +264,115 @@ describe("OptimizePanel", () => {
       fireEvent.click(screen.getByText("Run"));
     });
     await waitFor(() => expect(screen.getByText(/already at or below 150 DPI/)).toBeTruthy());
-    expect(screen.getByText(/Lower the target DPI/)).toBeTruthy();
+    // Points at the lever that would actually help, since the run had the
+    // quality-only option switched off. (Matched on the tail of the sentence:
+    // the option's own label carries the same words.)
+    expect(screen.getByText(/without losing resolution/)).toBeTruthy();
+  });
+
+  // --- Quality-only re-encode --------------------------------------------
+
+  it("leaves quality-only re-encoding off unless asked", async () => {
+    render(<OptimizePanel />);
+    fireEvent.click(imageCheckbox());
+    expect(reencodeCheckbox().checked).toBe(false);
+
+    await act(async () => {
+      fireEvent.click(screen.getByText("Run"));
+    });
+    const call = vi.mocked(invoke).mock.calls.find((c) => c[0] === "run_optimization_steps");
+    expect(call![1]).toMatchObject({ reencodeAtTarget: false });
+  });
+
+  it("passes the quality-only option through when ticked", async () => {
+    render(<OptimizePanel />);
+    fireEvent.click(imageCheckbox());
+    fireEvent.click(reencodeCheckbox());
+    await act(async () => {
+      fireEvent.click(screen.getByText("Run"));
+    });
+    const call = vi.mocked(invoke).mock.calls.find((c) => c[0] === "run_optimization_steps");
+    expect(call![1]).toMatchObject({ reencodeAtTarget: true });
+  });
+
+  // On a second run everything the first run compressed comes back as a
+  // no-win. Reporting that as "already at target DPI" would misdescribe it.
+  it("distinguishes a rejected re-encode from an untouched image", async () => {
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === "run_optimization_steps") return { ...REPORT, imagesNoWin: 2 };
+      return undefined;
+    });
+    render(<OptimizePanel />);
+    await act(async () => {
+      fireEvent.click(screen.getByText("Run"));
+    });
+    await waitFor(() =>
+      expect(screen.getByText(/2 images re-encoded but left unchanged/)).toBeTruthy(),
+    );
+    expect(screen.getByText(/Lower the JPEG quality/)).toBeTruthy();
+    expect(screen.queryByText(/already at or below/)).toBeNull();
+  });
+
+  // A colour shift is a change to how the document looks, not just its size.
+  // It must not hide inside a size-reduction percentage.
+  it("warns when images were converted out of a managed colour space", async () => {
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === "run_optimization_steps") return { ...REPORT, imagesColourConverted: 2 };
+      return undefined;
+    });
+    render(<OptimizePanel />);
+    await act(async () => {
+      fireEvent.click(screen.getByText("Run"));
+    });
+    await waitFor(() =>
+      expect(screen.getByText(/2 images converted to plain RGB/)).toBeTruthy(),
+    );
+    expect(screen.getByText(/check the page before saving/)).toBeTruthy();
+  });
+
+  it("stays quiet about colour when nothing was converted", async () => {
+    render(<OptimizePanel />);
+    await act(async () => {
+      fireEvent.click(screen.getByText("Run"));
+    });
+    await waitFor(() => expect(screen.getByText(/Total:/)).toBeTruthy());
+    expect(screen.queryByText(/converted to plain RGB/)).toBeNull();
+  });
+
+  it("does not suggest an option that was already on", async () => {
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === "run_optimization_steps") return { ...REPORT, imagesAtTarget: 1 };
+      return undefined;
+    });
+    render(<OptimizePanel />);
+    fireEvent.click(imageCheckbox());
+    fireEvent.click(reencodeCheckbox());
+    await act(async () => {
+      fireEvent.click(screen.getByText("Run"));
+    });
+    await waitFor(() => expect(screen.getByText(/already at or below 150 DPI/)).toBeTruthy());
+    expect(screen.getByText(/Not stored as JPEG/)).toBeTruthy();
+  });
+
+  it("counts at-target JPEGs as re-encodable once the option is on", async () => {
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === "inspect_images") return FLYER_IMAGES;
+      return undefined;
+    });
+    render(<OptimizePanel />);
+    await act(async () => {
+      fireEvent.click(imageCheckbox());
+    });
+    await waitFor(() =>
+      expect(screen.getByText(/At 150 DPI: 0 to downsample, 2 already small enough/)).toBeTruthy(),
+    );
+
+    await act(async () => {
+      fireEvent.click(reencodeCheckbox());
+    });
+    expect(
+      screen.getByText(/At 150 DPI: 0 to downsample, 2 to re-encode, 0 already small enough/),
+    ).toBeTruthy();
   });
 
   // The DPI slider stays live after a run, so the notice must quote the DPI the
