@@ -99,6 +99,11 @@ interface SkippedImages {
 interface OptimizationReport {
   results: StepResult[];
   skippedImages: SkippedImages[];
+  // Images left alone because they're already at or below the target DPI.
+  // Distinct from skippedImages (images we couldn't handle) — this is the
+  // step working as intended, and without it a document whose images are
+  // already sensibly sized reports 0.00% with no explanation.
+  imagesAtTarget: number;
   cancelled: boolean;
 }
 
@@ -138,6 +143,9 @@ export function OptimizePanel() {
   const [running, setRunning] = useState(false);
   const [saving, setSaving] = useState(false);
   const [report, setReport] = useState<OptimizationReport | null>(null);
+  // The DPI the displayed report was produced at. The slider stays live after a
+  // run, so quoting `targetDpi` in the results would misreport what happened.
+  const [reportDpi, setReportDpi] = useState(150);
   const [saved, setSaved] = useState(false);
   const linearizeProgress = usePdfStore((s) => s.linearizeProgress);
   const setLinearizeProgress = usePdfStore((s) => s.setLinearizeProgress);
@@ -212,6 +220,7 @@ export function OptimizePanel() {
       });
       // A cancelled run kept no output, so leave the panel in its pre-run state.
       setReport(result.cancelled ? null : result);
+      setReportDpi(targetDpi);
     } catch (err) {
       await message(String(err), { title: "Compression Failed", kind: "error" });
     } finally {
@@ -361,6 +370,14 @@ export function OptimizePanel() {
             Total: {formatBytes(totalBefore)} → {formatBytes(totalAfter)} (
             {percentReduction(totalBefore, totalAfter)})
           </div>
+
+          {report.imagesAtTarget > 0 && (
+            <div className="optimize-skipped">
+              {report.imagesAtTarget} image{report.imagesAtTarget !== 1 ? "s" : ""} already at
+              or below {reportDpi} DPI — nothing to downsample. Lower the target DPI to
+              re-encode {report.imagesAtTarget !== 1 ? "them" : "it"} anyway.
+            </div>
+          )}
 
           {report.skippedImages.length > 0 && (
             <div className="optimize-skipped">
