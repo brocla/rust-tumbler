@@ -1339,6 +1339,59 @@ input[type="radio"].form-check:checked {
   color: var(--color-text-muted);
 }
 
+/* Read-only image inspector, shown while the downsample step is checked. */
+.optimize-images {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.optimize-images-header {
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--color-text-muted);
+}
+
+.optimize-image-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.optimize-image-list li {
+  padding: 6px 8px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+}
+
+/* Dimmed: at the current target these are the images nothing will happen to. */
+.optimize-image-list li.at-target {
+  opacity: 0.62;
+}
+
+.optimize-image-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--color-text);
+  font-weight: 600;
+}
+
+.optimize-image-detail {
+  /* Tabular figures keep the DPI/quality numbers from jittering as they change. */
+  font-variant-numeric: tabular-nums;
+}
+
+.optimize-images-summary {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+}
+
 .optimize-actions {
   display: flex;
   gap: 8px;

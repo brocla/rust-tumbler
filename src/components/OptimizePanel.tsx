@@ -107,6 +107,22 @@ interface OptimizationReport {
   cancelled: boolean;
 }
 
+// One image as the backend's read-only inspector sees it.
+interface ImageInfo {
+  pages: number[];
+  width: number;
+  height: number;
+  storedBytes: number;
+  filter: string;
+  colorSpace: string;
+  // Null when the image is never drawn on a page — with no draw site there's
+  // no displayed size, so no resolution to report.
+  dpi: number | null;
+  // Null for anything that isn't a plain JPEG. Always an estimate, never a
+  // stored fact, so it renders with a leading "~".
+  jpegQuality: number | null;
+}
+
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -121,6 +137,43 @@ function percentReduction(before: number, after: number): string {
 const STEP_LABELS: Record<StepId, string> = Object.fromEntries(
   STEPS.map((s) => [s.id, s.label]),
 ) as Record<StepId, string>;
+
+// PDF filter names are opaque to anyone who hasn't read the spec.
+const FILTER_LABELS: Record<string, string> = {
+  DCTDecode: "JPEG",
+  JPXDecode: "JPEG 2000",
+  FlateDecode: "Flate",
+  LZWDecode: "LZW",
+  CCITTFaxDecode: "CCITT fax",
+  JBIG2Decode: "JBIG2",
+  RunLengthDecode: "run-length",
+};
+
+function shortFilter(filter: string): string {
+  if (!filter) return "uncompressed";
+  return filter
+    .split("+")
+    .map((f) => FILTER_LABELS[f] ?? f)
+    .join(" + ");
+}
+
+/** "p1", "p2–4", "p1, p3" — compact enough for a narrow sidebar column. */
+function formatPages(pages: number[]): string {
+  if (pages.length === 0) return "—";
+  const runs: string[] = [];
+  let start = pages[0];
+  let prev = pages[0];
+  for (const page of pages.slice(1)) {
+    if (page === prev + 1) {
+      prev = page;
+      continue;
+    }
+    runs.push(start === prev ? `${start}` : `${start}–${prev}`);
+    start = prev = page;
+  }
+  runs.push(start === prev ? `${start}` : `${start}–${prev}`);
+  return `p${runs.join(", ")}`;
+}
 
 function suggestName(fileName: string): string {
   const dot = fileName.lastIndexOf(".");
@@ -147,6 +200,7 @@ export function OptimizePanel() {
   // run, so quoting `targetDpi` in the results would misreport what happened.
   const [reportDpi, setReportDpi] = useState(150);
   const [saved, setSaved] = useState(false);
+  const [images, setImages] = useState<ImageInfo[] | null>(null);
   const linearizeProgress = usePdfStore((s) => s.linearizeProgress);
   const setLinearizeProgress = usePdfStore((s) => s.setLinearizeProgress);
 
@@ -160,6 +214,26 @@ export function OptimizePanel() {
     setRunning(false);
     setSaving(false);
   }, [activeDocId]);
+
+  // Inspect only while the image step is checked — that's when these numbers
+  // are being acted on. Re-inspect after a run, because compression rewrites
+  // the buffer the inspector reads from.
+  const wantImages = checked.has(IMAGE_STEP);
+  useEffect(() => {
+    if (!activeDocId || !wantImages) {
+      setImages(null);
+      return;
+    }
+    let stale = false;
+    invoke<ImageInfo[]>("inspect_images", { docId: activeDocId })
+      // Inspection is advisory: it must never take the panel down with it, so
+      // anything other than a list is treated as "nothing to report".
+      .then((list) => !stale && setImages(Array.isArray(list) ? list : []))
+      .catch(() => !stale && setImages([]));
+    return () => {
+      stale = true;
+    };
+  }, [activeDocId, wantImages, report]);
 
   if (!activeTab) return null;
   const docId = activeTab.docId;
@@ -335,6 +409,8 @@ export function OptimizePanel() {
         </div>
       </fieldset>
 
+      {imageChecked && images !== null && <ImageInspector images={images} targetDpi={targetDpi} />}
+
       <button
         className="optimize-run-button"
         onClick={handleRun}
@@ -423,6 +499,62 @@ export function OptimizePanel() {
           <Zap size={16} />
           {linearizeProgress ? "Saving…" : "Save Linearized Copy…"}
         </button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Read-only listing of the document's images.
+ *
+ * The compression panel used to give no way to tell whether a run would do
+ * anything, so a file whose images were already at a sensible resolution
+ * reported 0.00% and looked broken. This shows the two numbers the decision
+ * actually turns on — resolution and encoder quality — before anything runs.
+ */
+function ImageInspector({ images, targetDpi }: { images: ImageInfo[]; targetDpi: number }) {
+  if (images.length === 0) {
+    return (
+      <div className="optimize-skipped">
+        No images in this document — the downsample step has nothing to work on.
+      </div>
+    );
+  }
+
+  const measured = images.filter((img) => img.dpi !== null);
+  const above = measured.filter((img) => img.dpi! > targetDpi).length;
+  const at = measured.length - above;
+
+  return (
+    <div className="optimize-images">
+      <div className="optimize-images-header">
+        {images.length} image{images.length !== 1 ? "s" : ""} in this document
+      </div>
+      <ul className="optimize-image-list">
+        {images.map((img, i) => (
+          <li key={i} className={img.dpi !== null && img.dpi <= targetDpi ? "at-target" : ""}>
+            <div className="optimize-image-row">
+              <span className="optimize-image-page">{formatPages(img.pages)}</span>
+              <span className="optimize-image-bytes">{formatBytes(img.storedBytes)}</span>
+            </div>
+            <div className="optimize-image-detail">
+              {img.width}×{img.height}
+              {img.dpi !== null && ` · ${Math.round(img.dpi)} DPI`}
+              {/* Recovered from the file's quantization table, so "~". */}
+              {img.jpegQuality !== null && ` · ~q${Math.round(img.jpegQuality)}`}
+            </div>
+            <div className="optimize-image-detail">
+              {shortFilter(img.filter)} · {img.colorSpace}
+              {img.dpi === null && " · never drawn on a page"}
+            </div>
+          </li>
+        ))}
+      </ul>
+      <div className="optimize-images-summary">
+        At {targetDpi} DPI: {above} to downsample, {at} already small enough
+        {measured.length < images.length &&
+          `, ${images.length - measured.length} unmeasurable`}
+        .
       </div>
     </div>
   );

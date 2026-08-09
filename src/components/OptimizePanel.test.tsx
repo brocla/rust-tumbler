@@ -52,6 +52,31 @@ const REPORT = {
   cancelled: false,
 };
 
+// Modelled on the real flyer that motivated the inspector: two full-page CMYK
+// scans sitting at exactly 72 DPI, saved at quality 94.
+const FLYER_IMAGES = [
+  {
+    pages: [1],
+    width: 1535,
+    height: 2135,
+    storedBytes: 1_640_024,
+    filter: "DCTDecode",
+    colorSpace: "CMYK (ICC)",
+    dpi: 72,
+    jpegQuality: 94,
+  },
+  {
+    pages: [2],
+    width: 1535,
+    height: 2135,
+    storedBytes: 1_270_905,
+    filter: "DCTDecode",
+    colorSpace: "CMYK (ICC)",
+    dpi: 72,
+    jpegQuality: 94,
+  },
+];
+
 describe("OptimizePanel", () => {
   beforeEach(() => {
     vi.mocked(invoke).mockReset();
@@ -125,6 +150,97 @@ describe("OptimizePanel", () => {
     });
     await waitFor(() => expect(screen.getByText(/JPEG2000/)).toBeTruthy());
     expect(screen.getByText(/2 images/)).toBeTruthy();
+  });
+
+  // --- Image inspector ---------------------------------------------------
+
+  it("does not inspect images until the image step is checked", async () => {
+    render(<OptimizePanel />);
+    await waitFor(() => expect(screen.getByText("Run")).toBeTruthy());
+    expect(vi.mocked(invoke).mock.calls.some((c) => c[0] === "inspect_images")).toBe(false);
+  });
+
+  it("lists each image with its resolution and estimated quality", async () => {
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === "inspect_images") return FLYER_IMAGES;
+      return undefined;
+    });
+    render(<OptimizePanel />);
+    await act(async () => {
+      fireEvent.click(imageCheckbox());
+    });
+
+    await waitFor(() => expect(screen.getByText(/2 images in this document/)).toBeTruthy());
+    expect(screen.getAllByText(/1535×2135 · 72 DPI · ~q94/)).toHaveLength(2);
+    expect(screen.getAllByText(/JPEG · CMYK \(ICC\)/)).toHaveLength(2);
+    expect(screen.getByText("p1")).toBeTruthy();
+    expect(screen.getByText("p2")).toBeTruthy();
+  });
+
+  // The whole point: say up front that a run will do nothing, rather than
+  // letting the user discover it as an unexplained 0.00%.
+  it("summarises what the current target DPI will and won't touch", async () => {
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === "inspect_images") return FLYER_IMAGES;
+      return undefined;
+    });
+    render(<OptimizePanel />);
+    await act(async () => {
+      fireEvent.click(imageCheckbox());
+    });
+
+    await waitFor(() =>
+      expect(screen.getByText(/At 150 DPI: 0 to downsample, 2 already small enough/)).toBeTruthy(),
+    );
+
+    // Dropping the target below the images' 72 DPI flips both into scope.
+    fireEvent.change(screen.getByText(/Target DPI/).closest("div")!.querySelector("input")!, {
+      target: { value: "50" },
+    });
+    expect(screen.getByText(/At 50 DPI: 2 to downsample, 0 already small enough/)).toBeTruthy();
+  });
+
+  it("reports an image that is never drawn as unmeasurable", async () => {
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === "inspect_images") {
+        return [{ ...FLYER_IMAGES[0], pages: [], dpi: null, jpegQuality: null }];
+      }
+      return undefined;
+    });
+    render(<OptimizePanel />);
+    await act(async () => {
+      fireEvent.click(imageCheckbox());
+    });
+
+    await waitFor(() => expect(screen.getByText(/never drawn on a page/)).toBeTruthy());
+    expect(screen.getByText(/1 unmeasurable/)).toBeTruthy();
+    expect(screen.getByText("—")).toBeTruthy();
+  });
+
+  it("says so when the document has no images at all", async () => {
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === "inspect_images") return [];
+      return undefined;
+    });
+    render(<OptimizePanel />);
+    await act(async () => {
+      fireEvent.click(imageCheckbox());
+    });
+    await waitFor(() => expect(screen.getByText(/No images in this document/)).toBeTruthy());
+  });
+
+  // Inspection is advisory — a backend failure must not block compressing.
+  it("stays usable when inspection fails", async () => {
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === "inspect_images") throw new Error("parse failed");
+      return undefined;
+    });
+    render(<OptimizePanel />);
+    await act(async () => {
+      fireEvent.click(imageCheckbox());
+    });
+    await waitFor(() => expect(screen.getByText(/No images in this document/)).toBeTruthy());
+    expect((screen.getByText("Run") as HTMLButtonElement).disabled).toBe(false);
   });
 
   // Without this notice an image-only PDF whose images are already sensibly

@@ -201,16 +201,25 @@ fn collect_image_names(
     }
 }
 
-/// Largest displayed width (points) of each image across all pages, from the
-/// CTM in effect at each `Do`. Images never drawn directly on a page's content
-/// stream are absent — the caller treats those as "unreferenced" and skips them.
-fn measure_displayed_widths(
+/// Where an image ends up on the page.
+struct Placement {
+    /// Largest displayed width in points across every draw site.
+    width: f32,
+    /// 1-based page numbers the image is drawn on, ascending.
+    pages: Vec<u32>,
+}
+
+/// Locate each image's draw sites from the CTM in effect at each `Do`. Images
+/// never drawn directly on a page's content stream are absent — the compressor
+/// treats those as "unreferenced" and skips them, and the inspector reports
+/// them with no DPI, since without a draw site there's no resolution to judge.
+fn measure_placements(
     doc: &Document,
     image_ids: &HashSet<ObjectId>,
-) -> HashMap<ObjectId, f32> {
-    let mut widths: HashMap<ObjectId, f32> = HashMap::new();
+) -> HashMap<ObjectId, Placement> {
+    let mut placements: HashMap<ObjectId, Placement> = HashMap::new();
 
-    for page_id in doc.get_pages().into_values() {
+    for (page_no, page_id) in doc.get_pages() {
         let mut names: HashMap<Vec<u8>, ObjectId> = HashMap::new();
         if let Ok((inline, referenced)) = doc.get_page_resources(page_id) {
             if let Some(res) = inline {
@@ -253,8 +262,16 @@ fn measure_displayed_widths(
                         if let Some(&id) = names.get(name) {
                             let w = ctm.displayed_width();
                             if w > 0.0 {
-                                let entry = widths.entry(id).or_insert(0.0);
-                                *entry = entry.max(w);
+                                let entry = placements
+                                    .entry(id)
+                                    .or_insert_with(|| Placement { width: 0.0, pages: Vec::new() });
+                                entry.width = entry.width.max(w);
+                                // Pages are walked in ascending order and one at
+                                // a time, so checking the tail is enough to keep
+                                // this de-duplicated and sorted.
+                                if entry.pages.last() != Some(&page_no) {
+                                    entry.pages.push(page_no);
+                                }
                             }
                         }
                     }
@@ -264,7 +281,7 @@ fn measure_displayed_widths(
         }
     }
 
-    widths
+    placements
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -382,6 +399,273 @@ fn inflate(data: &[u8]) -> Option<Vec<u8>> {
         return Some(out);
     }
     None
+}
+
+// --- Inspection helpers ----------------------------------------------------
+
+/// The standard IJG luminance quantization table (JPEG spec, Annex K), in
+/// natural row-major order.
+#[rustfmt::skip]
+const STD_LUMINANCE_Q: [u16; 64] = [
+    16,  11,  10,  16,  24,  40,  51,  61,
+    12,  12,  14,  19,  26,  58,  60,  55,
+    14,  13,  16,  24,  40,  57,  69,  56,
+    14,  17,  22,  29,  51,  87,  80,  62,
+    18,  22,  37,  56,  68, 109, 103,  77,
+    24,  35,  55,  64,  81, 104, 113,  92,
+    49,  64,  78,  87, 103, 121, 120, 101,
+    72,  92,  95,  98, 112, 100, 103,  99,
+];
+
+/// Natural (row-major) index of each zig-zag position. DQT segments store
+/// coefficients in zig-zag order; the standard table above is row-major.
+#[rustfmt::skip]
+const ZIGZAG: [usize; 64] = [
+     0,  1,  8, 16,  9,  2,  3, 10,
+    17, 24, 32, 25, 18, 11,  4,  5,
+    12, 19, 26, 33, 40, 48, 41, 34,
+    27, 20, 13,  6,  7, 14, 21, 28,
+    35, 42, 49, 56, 57, 50, 43, 36,
+    29, 22, 15, 23, 30, 37, 44, 51,
+    58, 59, 52, 45, 38, 31, 39, 46,
+    53, 60, 61, 54, 47, 55, 62, 63,
+];
+
+/// Pull the luminance (table id 0) quantization table out of a JPEG's DQT
+/// segments, de-zig-zagged into row-major order.
+fn jpeg_luminance_table(data: &[u8]) -> Option<[u16; 64]> {
+    if data.len() < 4 || data[0] != 0xFF || data[1] != 0xD8 {
+        return None;
+    }
+    let mut i = 2;
+    while i + 3 < data.len() {
+        if data[i] != 0xFF {
+            i += 1; // resync on the next marker prefix
+            continue;
+        }
+        let marker = data[i + 1];
+        i += 2;
+        match marker {
+            // A run of 0xFF bytes is padding before the real marker.
+            0xFF => i -= 1,
+            // Standalone markers carry no length or payload.
+            0xD8 | 0x01 | 0xD0..=0xD7 => {}
+            // End of image, or the start of entropy-coded scan data: any DQT
+            // worth reading has already been seen.
+            0xD9 | 0xDA => return None,
+            _ => {
+                let len = u16::from_be_bytes([data[i], data[i + 1]]) as usize;
+                if len < 2 || i + len > data.len() {
+                    return None;
+                }
+                if marker == 0xDB {
+                    if let Some(table) = parse_dqt(&data[i + 2..i + len]) {
+                        return Some(table);
+                    }
+                }
+                i += len;
+            }
+        }
+    }
+    None
+}
+
+/// Scan one DQT segment's payload for the luminance table. A segment may hold
+/// several tables back to back.
+fn parse_dqt(mut seg: &[u8]) -> Option<[u16; 64]> {
+    while !seg.is_empty() {
+        let precision = seg[0] >> 4; // 0 = 8-bit entries, 1 = 16-bit
+        let table_id = seg[0] & 0x0F; // 0 is luminance
+        let entry_bytes = if precision == 0 { 1 } else { 2 };
+        let need = 1 + 64 * entry_bytes;
+        if seg.len() < need {
+            return None;
+        }
+        if table_id == 0 {
+            let mut out = [0u16; 64];
+            for (k, &natural) in ZIGZAG.iter().enumerate() {
+                out[natural] = if precision == 0 {
+                    seg[1 + k] as u16
+                } else {
+                    u16::from_be_bytes([seg[1 + 2 * k], seg[2 + 2 * k]])
+                };
+            }
+            return Some(out);
+        }
+        seg = &seg[need..];
+    }
+    None
+}
+
+/// Estimate the quality setting a JPEG was encoded at.
+///
+/// JPEG stores no quality number. The quality dial scales the standard
+/// quantization table by `scale`, and only the scaled table reaches the file:
+/// `stored = clamp((standard * scale + 50) / 100, 1, 255)`. That is invertible,
+/// so averaging the recovered scale across the table recovers the dial position
+/// — within about a point in practice. (Same approach as ImageMagick's `%Q`.)
+///
+/// Reported to the user as an estimate ("~q94"), never as a stored fact.
+fn estimate_jpeg_quality(data: &[u8]) -> Option<f32> {
+    let table = jpeg_luminance_table(data)?;
+    let scales: Vec<f32> = table
+        .iter()
+        .zip(STD_LUMINANCE_Q.iter())
+        // A clamped entry lost the information we'd be inverting.
+        .filter(|(&stored, _)| stored > 1 && stored < 255)
+        .map(|(&stored, &std)| (stored as f32 * 100.0 - 50.0) / std as f32)
+        .collect();
+    if scales.is_empty() {
+        return None;
+    }
+    let scale = scales.iter().sum::<f32>() / scales.len() as f32;
+    let quality = if scale > 100.0 { 5000.0 / scale } else { (200.0 - scale) / 2.0 };
+    Some(quality.clamp(1.0, 100.0))
+}
+
+/// A short human label for an image's colour space.
+fn describe_color_space(dict: &Dictionary, doc: &Document) -> String {
+    fn resolve<'a>(obj: &'a Object, doc: &'a Document) -> Option<&'a Object> {
+        match obj {
+            Object::Reference(id) => doc.get_object(*id).ok(),
+            other => Some(other),
+        }
+    }
+
+    let cs = match dict.get(b"ColorSpace").ok().and_then(|o| resolve(o, doc)) {
+        Some(cs) => cs,
+        None => return "unknown".into(),
+    };
+
+    if let Ok(name) = cs.as_name() {
+        return match name {
+            b"DeviceGray" | b"CalGray" | b"G" => "Gray",
+            b"DeviceRGB" | b"CalRGB" | b"RGB" => "RGB",
+            b"DeviceCMYK" | b"CMYK" => "CMYK",
+            _ => "unknown",
+        }
+        .into();
+    }
+
+    let arr = match cs.as_array() {
+        Ok(arr) => arr,
+        Err(_) => return "unknown".into(),
+    };
+    match arr.first().and_then(|o| o.as_name().ok()).unwrap_or(b"") {
+        // The component count lives on the ICC profile stream, and it's the
+        // part that matters here: an ICC CMYK image is a 4-channel image.
+        b"ICCBased" => {
+            let n = arr
+                .get(1)
+                .and_then(|o| resolve(o, doc))
+                .and_then(|o| o.as_stream().ok())
+                .and_then(|s| s.dict.get(b"N").ok())
+                .and_then(|o| o.as_i64().ok())
+                .unwrap_or(0);
+            match n {
+                1 => "Gray (ICC)",
+                3 => "RGB (ICC)",
+                4 => "CMYK (ICC)",
+                _ => "ICC",
+            }
+        }
+        b"Indexed" | b"I" => "Indexed",
+        b"Separation" => "Separation",
+        b"DeviceN" => "DeviceN",
+        b"CalGray" => "Gray (Cal)",
+        b"CalRGB" => "RGB (Cal)",
+        b"Lab" => "Lab",
+        _ => "unknown",
+    }
+    .into()
+}
+
+/// One image XObject as the inspector sees it. Purely descriptive — producing
+/// this never modifies the document.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageInfo {
+    /// 1-based page numbers the image is drawn on; empty if it's never drawn.
+    pub pages: Vec<u32>,
+    pub width: u32,
+    pub height: u32,
+    /// Size of the stored (still-encoded) stream, in bytes.
+    pub stored_bytes: u64,
+    /// Stream filter — "DCTDecode", "FlateDecode", … Chained filters are joined
+    /// with "+"; an image with no filter reports an empty string.
+    pub filter: String,
+    pub color_space: String,
+    /// Effective resolution where the image is drawn. `None` when it is never
+    /// drawn on a page — which is also why the compressor can't judge it.
+    pub dpi: Option<f32>,
+    /// Estimated encoder quality. `None` for anything that isn't a plain JPEG.
+    pub jpeg_quality: Option<f32>,
+}
+
+/// Describe every image in the document. Read-only, and deliberately cheap: it
+/// reads stream dictionaries and JPEG headers but never decodes pixels.
+fn inspect_images_impl(pdf_bytes: &[u8]) -> Result<Vec<ImageInfo>, AppError> {
+    let doc = Document::load_mem(pdf_bytes)
+        .map_err(|e| AppError::lopdf("Failed to parse PDF for image inspection", e))?;
+
+    let image_ids: HashSet<ObjectId> = doc
+        .objects
+        .iter()
+        .filter_map(|(id, obj)| is_image_xobject(obj).then_some(*id))
+        .collect();
+    if image_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placements = measure_placements(&doc, &image_ids);
+
+    let mut out: Vec<ImageInfo> = image_ids
+        .iter()
+        .filter_map(|id| {
+            let stream = doc.get_object(*id).and_then(|o| o.as_stream()).ok()?;
+            let dict = &stream.dict;
+            let width = dict.get(b"Width").and_then(|o| o.as_float()).map(|f| f as u32).unwrap_or(0);
+            let height =
+                dict.get(b"Height").and_then(|o| o.as_float()).map(|f| f as u32).unwrap_or(0);
+            if width == 0 || height == 0 {
+                return None;
+            }
+
+            let filter = stream
+                .filters()
+                .unwrap_or_default()
+                .iter()
+                .map(|f| String::from_utf8_lossy(f).into_owned())
+                .collect::<Vec<_>>()
+                .join("+");
+
+            let placement = placements.get(id);
+            let dpi = placement
+                .map(|p| width as f32 * 72.0 / p.width)
+                .filter(|dpi| dpi.is_finite() && *dpi > 0.0);
+            let jpeg_quality = (filter == "DCTDecode")
+                .then(|| estimate_jpeg_quality(&stream.content))
+                .flatten();
+
+            Some(ImageInfo {
+                pages: placement.map(|p| p.pages.clone()).unwrap_or_default(),
+                width,
+                height,
+                stored_bytes: stream.content.len() as u64,
+                filter,
+                color_space: describe_color_space(dict, &doc),
+                dpi,
+                jpeg_quality,
+            })
+        })
+        .collect();
+
+    // Page order, then biggest first — the order you'd scan looking for what's
+    // making the file large. Never-drawn images sort to the end.
+    out.sort_by(|a, b| {
+        let key = |i: &ImageInfo| i.pages.first().copied().unwrap_or(u32::MAX);
+        key(a).cmp(&key(b)).then(b.stored_bytes.cmp(&a.stored_bytes))
+    });
+    Ok(out)
 }
 
 enum PlanResult {
@@ -530,7 +814,7 @@ fn step_recompress_images(
         return false;
     }
     let id_set: HashSet<ObjectId> = image_ids.iter().copied().collect();
-    let widths = measure_displayed_widths(doc, &id_set);
+    let placements = measure_placements(doc, &id_set);
 
     // Plan with shared borrows, then write with a single mutable pass — an image
     // can't be re-encoded while we're iterating the object map. Decoding/encoding
@@ -543,7 +827,7 @@ fn step_recompress_images(
             return true;
         }
         emit(i as u32 + 1, total);
-        match plan_one(doc, *id, widths.get(id).copied(), target_dpi, jpeg_quality) {
+        match plan_one(doc, *id, placements.get(id).map(|p| p.width), target_dpi, jpeg_quality) {
             PlanResult::Replace { content, w, h, gray } => plans.push((*id, content, w, h, gray)),
             PlanResult::Skip(reason) => *counts.entry(reason).or_insert(0) += 1,
             PlanResult::Leave => *at_target += 1,
@@ -605,6 +889,22 @@ fn serialized_size(doc: &Document) -> u64 {
 }
 
 // --- Commands -------------------------------------------------------------
+
+/// List what's actually in the document, so the compression settings can be
+/// chosen against real numbers instead of guessed at. Read-only.
+#[tauri::command]
+pub fn inspect_images(
+    state: State<'_, AppState>,
+    doc_id: String,
+) -> Result<Vec<ImageInfo>, String> {
+    // The buffer is authoritative — it carries any unsaved edits.
+    let pdf_bytes = {
+        let entry = state.get_document(&doc_id).map_err(String::from)?;
+        let entry = lock_mutex(&entry).map_err(String::from)?;
+        entry.buffer.clone()
+    };
+    inspect_images_impl(&pdf_bytes).map_err(String::from)
+}
 
 #[tauri::command]
 pub async fn run_optimization_steps(
@@ -851,6 +1151,128 @@ mod tests {
 
     fn image_dict<'a>(doc: &'a Document, id: ObjectId) -> &'a Dictionary {
         &doc.get_object(id).unwrap().as_stream().unwrap().dict
+    }
+
+    fn to_bytes(doc: &Document) -> Vec<u8> {
+        let mut buf = Vec::new();
+        doc.clone().save_to(&mut buf).expect("serialize");
+        buf
+    }
+
+    // --- Inspector ---------------------------------------------------------
+
+    /// The whole point of the estimate is that it recovers the dial position
+    /// someone actually used. Encode at a known quality, read it back.
+    #[test]
+    fn estimates_jpeg_quality_close_to_the_encoded_value() {
+        for want in [95u8, 85, 80, 75, 60, 50] {
+            let got = estimate_jpeg_quality(&jpeg_bytes(64, 64, want))
+                .unwrap_or_else(|| panic!("no estimate for q{want}"));
+            assert!(
+                (got - want as f32).abs() <= 3.0,
+                "q{want} estimated as {got:.1} — outside the ±3 tolerance"
+            );
+        }
+    }
+
+    /// Anything that isn't a JPEG has no quantization table to invert, and must
+    /// say so rather than inventing a number.
+    #[test]
+    fn estimate_jpeg_quality_declines_non_jpeg_input() {
+        assert!(estimate_jpeg_quality(b"").is_none());
+        assert!(estimate_jpeg_quality(b"not a jpeg at all").is_none());
+        // Valid SOI, then immediately a start-of-scan: no DQT to be found.
+        assert!(estimate_jpeg_quality(&[0xFF, 0xD8, 0xFF, 0xDA, 0x00, 0x02]).is_none());
+    }
+
+    #[test]
+    fn describes_iccbased_colour_spaces_by_component_count() {
+        let mut doc = Document::with_version("1.5");
+        for (n, expected) in [(1, "Gray (ICC)"), (3, "RGB (ICC)"), (4, "CMYK (ICC)")] {
+            let mut profile = Dictionary::new();
+            profile.set("N", n as i64);
+            let profile_id = doc.add_object(Stream::new(profile, vec![0u8; 8]));
+            let mut dict = Dictionary::new();
+            dict.set(
+                "ColorSpace",
+                Object::Array(vec!["ICCBased".into(), Object::Reference(profile_id)]),
+            );
+            assert_eq!(describe_color_space(&dict, &doc), expected);
+        }
+    }
+
+    /// The inspector's job: report what the compressor is looking at, including
+    /// the DPI judgement that decides whether an image is touched at all.
+    #[test]
+    fn inspect_images_reports_geometry_dpi_and_quality() {
+        let jpeg = jpeg_bytes(600, 600, 90);
+        let stored = jpeg.len() as u64;
+        // Drawn 300pt wide on a 300pt page: 600px / 300pt = 144 DPI.
+        let (doc, _) = doc_with_image(
+            "DCTDecode",
+            8,
+            "DeviceRGB",
+            600,
+            600,
+            jpeg,
+            300.0,
+            Some([300.0, 0.0, 0.0, 300.0, 0.0, 0.0]),
+        );
+
+        let images = inspect_images_impl(&to_bytes(&doc)).expect("inspect");
+        assert_eq!(images.len(), 1);
+        let img = &images[0];
+        assert_eq!((img.width, img.height), (600, 600));
+        assert_eq!(img.pages, vec![1]);
+        assert_eq!(img.filter, "DCTDecode");
+        assert_eq!(img.color_space, "RGB");
+        assert_eq!(img.stored_bytes, stored);
+        assert!((img.dpi.unwrap() - 144.0).abs() < 0.5, "dpi = {:?}", img.dpi);
+        assert!(
+            (img.jpeg_quality.unwrap() - 90.0).abs() <= 3.0,
+            "quality = {:?}",
+            img.jpeg_quality
+        );
+    }
+
+    /// An image that's never drawn has no displayed size, so it has no DPI —
+    /// the same reason the compressor reports it as "unreferenced".
+    #[test]
+    fn inspect_images_reports_no_dpi_for_an_undrawn_image() {
+        let (doc, _) =
+            doc_with_image("DCTDecode", 8, "DeviceRGB", 600, 600, jpeg_bytes(600, 600, 80), 72.0, None);
+
+        let images = inspect_images_impl(&to_bytes(&doc)).expect("inspect");
+        assert_eq!(images.len(), 1);
+        assert!(images[0].dpi.is_none());
+        assert!(images[0].pages.is_empty());
+    }
+
+    /// Non-JPEG images still get listed — just without a quality estimate.
+    #[test]
+    fn inspect_images_lists_non_jpeg_images_without_a_quality() {
+        let (doc, _) = doc_with_image(
+            "FlateDecode",
+            8,
+            "DeviceGray",
+            10,
+            10,
+            vec![0u8; 100],
+            72.0,
+            Some([72.0, 0.0, 0.0, 72.0, 0.0, 0.0]),
+        );
+
+        let images = inspect_images_impl(&to_bytes(&doc)).expect("inspect");
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].filter, "FlateDecode");
+        assert_eq!(images[0].color_space, "Gray");
+        assert!(images[0].jpeg_quality.is_none());
+    }
+
+    #[test]
+    fn inspect_images_on_a_document_without_images_is_empty() {
+        let images = inspect_images_impl(&to_bytes(&load_fixture())).expect("inspect");
+        assert!(images.is_empty(), "fixture has no images: {images:?}");
     }
 
     fn load_fixture() -> Document {
