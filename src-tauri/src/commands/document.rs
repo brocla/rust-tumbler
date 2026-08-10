@@ -50,20 +50,24 @@ fn open_document_impl(
     let encrypted = entry.protection.is_encrypted();
     let linearized = entry.linearized;
 
-    let page_count = entry.document.pages().len() as u32;
-    let mut page_dimensions = Vec::with_capacity(page_count as usize);
-
-    for i in 0..page_count {
-        let page = entry
-            .document
-            .pages()
-            .get(i as i32)
-            .map_err(|e| AppError::pdfium(format!("Failed to get page {i}"), e))?;
-        page_dimensions.push(PageDimension {
-            width: page.width().value,
-            height: page.height().value,
-        });
-    }
+    // Straight from the page tree, without loading a single page — see
+    // `pages::page_info_from_doc` for why that matters. This sits squarely on
+    // perceived open time: it runs before the UI is shown anything, and the
+    // per-page alternative cost ~600 ms of the 621 ms this function took on a
+    // 100-page document.
+    let sizes = entry
+        .document
+        .pages()
+        .page_sizes()
+        .map_err(|e| AppError::pdfium("Failed to read page dimensions", e))?;
+    let page_count = sizes.len() as u32;
+    let page_dimensions: Vec<PageDimension> = sizes
+        .iter()
+        .map(|r| PageDimension {
+            width: r.width().value,
+            height: r.height().value,
+        })
+        .collect();
 
     let doc_id = uuid::Uuid::new_v4().to_string();
     state.insert_document(doc_id.clone(), entry)?;
@@ -120,6 +124,44 @@ mod tests {
         assert!(!info.doc_id.is_empty());
 
         assert!(state.get_document(&info.doc_id).is_ok());
+    }
+
+    /// The fixture is single-page, so it can't tell a correct multi-page read
+    /// from one that mis-orders or drops pages. Open a document with three
+    /// distinct page sizes and check all of them.
+    #[test]
+    fn open_document_reports_every_page_size_in_order() {
+        let _guard = crate::test_pdfium_guard();
+        let pdfium = crate::test_pdfium();
+        let state = AppState::new(pdfium, None);
+
+        let path = std::env::temp_dir().join("tumbler_open_multipage.pdf");
+        {
+            use pdfium_render::prelude::*;
+            let mut doc = pdfium.create_new_pdf().expect("create");
+            for (i, (w, h)) in [(200.0f32, 200.0f32), (300.0, 300.0), (400.0, 200.0)]
+                .iter()
+                .enumerate()
+            {
+                doc.pages_mut()
+                    .create_page_at_index(
+                        PdfPagePaperSize::new_custom(PdfPoints::new(*w), PdfPoints::new(*h)),
+                        i as PdfPageIndex,
+                    )
+                    .expect("create page");
+            }
+            doc.save_to_file(&path).expect("save");
+        }
+
+        let info = open_document_impl(&state, path.to_string_lossy().into_owned(), None)
+            .expect("open");
+
+        assert_eq!(info.page_count, 3);
+        let dims: Vec<(f32, f32)> =
+            info.page_dimensions.iter().map(|d| (d.width, d.height)).collect();
+        assert_eq!(dims, vec![(200.0, 200.0), (300.0, 300.0), (400.0, 200.0)]);
+
+        std::fs::remove_file(&path).ok();
     }
 
     /// The same file expressed with different case and an inserted `..`
