@@ -1319,7 +1319,7 @@ mod tests {
     }
 
     /// Builds a PDF with one 200×200 page per entry, each drawing its text at
-    /// 24pt Helvetica from (20, 150) — extractable by pdfium.
+    /// 24pt Helvetica from (20, 150) — extractable by pdfium.get().
     fn text_pdf_bytes(page_texts: &[&str]) -> Vec<u8> {
         let mut doc = Document::with_version("1.5");
         let pages_id = doc.new_object_id();
@@ -1364,8 +1364,7 @@ mod tests {
 
     /// Inserts in-memory PDF bytes into `state` as an open document.
     fn open_mem_doc(state: &AppState, doc_id: &str, bytes: Vec<u8>) {
-        let pdfium = crate::test_pdfium();
-        let document = pdfium
+                let document = state.pdfium
             .load_pdf_from_byte_vec(bytes.clone(), None)
             .expect("load fixture bytes");
         state
@@ -1397,13 +1396,12 @@ mod tests {
     /// extractable text at all in the saved (reloaded) output.
     #[test]
     fn flatten_redaction_removes_all_text_from_page() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
         let bytes = text_pdf_bytes(&["Top Secret"]);
 
         let (result, output) = apply_redactions_impl(
             &no_progress,
-            pdfium,
+            pdfium.get(),
             &bytes,
             &[full_page_region(1)],
             &[],
@@ -1421,7 +1419,7 @@ mod tests {
         let out = output.expect("output bytes");
         // Reload fresh — the artifact, not the in-memory pre-save state.
         Document::load_mem(&out).expect("output should be valid PDF for lopdf");
-        let reloaded = pdfium
+        let reloaded = pdfium.get()
             .load_pdf_from_byte_vec(out, None)
             .expect("output should be valid PDF for pdfium");
         let text = reloaded.pages().get(0).expect("page").text().expect("text").all();
@@ -1436,9 +1434,8 @@ mod tests {
     /// their text, and the result is verified.
     #[test]
     fn find_and_redact_all_leaves_no_search_hits() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None);
+        let state = AppState::new(pdfium.get(), None);
         let bytes = text_pdf_bytes(&["SECRET alpha", "plain page", "SECRET beta"]);
         open_mem_doc(&state, "doc1", bytes.clone());
 
@@ -1457,7 +1454,7 @@ mod tests {
 
         let (result, output) = apply_redactions_impl(
             &no_progress,
-            pdfium,
+            pdfium.get(),
             &bytes,
             &regions,
             &["SECRET".to_string()],
@@ -1530,7 +1527,6 @@ mod tests {
     /// verification certifies (nothing leaked).
     #[test]
     fn metadata_only_keyword_redaction_clears_author_and_verifies() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
         let bytes = text_pdf_with_info(
             &["nothing sensitive on the page"],
@@ -1539,7 +1535,7 @@ mod tests {
 
         let (result, output) = apply_redactions_impl(
             &no_progress,
-            pdfium,
+            pdfium.get(),
             &bytes,
             &[], // no page regions — the keyword is only in metadata
             &["Jon".to_string()],
@@ -1576,7 +1572,6 @@ mod tests {
     /// occurrence) certifies instead of permanently blocking Save As.
     #[test]
     fn keyword_in_producer_is_cleared_and_verifies() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
         let bytes = text_pdf_with_info(
             &["nothing sensitive on the page"],
@@ -1588,7 +1583,7 @@ mod tests {
 
         let (result, output) = apply_redactions_impl(
             &no_progress,
-            pdfium,
+            pdfium.get(),
             &bytes,
             &[], // no page regions — the keyword is only in /Producer
             &["Acrobat".to_string()],
@@ -1622,7 +1617,6 @@ mod tests {
     /// both — pages flatten and the matching Info field is cleared.
     #[test]
     fn keyword_in_page_and_metadata_clears_both() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
         let bytes = text_pdf_with_info(
             &["SECRET data"],
@@ -1631,7 +1625,7 @@ mod tests {
 
         let (result, output) = apply_redactions_impl(
             &no_progress,
-            pdfium,
+            pdfium.get(),
             &bytes,
             &[full_page_region(1)],
             &["SECRET".to_string()],
@@ -1661,13 +1655,12 @@ mod tests {
     /// still rejected (nothing to redact).
     #[test]
     fn empty_regions_and_no_queries_is_rejected() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
         let bytes = text_pdf_bytes(&["some text"]);
 
         let err = apply_redactions_impl(
             &no_progress,
-            pdfium,
+            pdfium.get(),
             &bytes,
             &[],
             &[],
@@ -1683,9 +1676,8 @@ mod tests {
     /// text (i.e. verifying the ORIGINAL bytes) must report leaks and fail.
     #[test]
     fn verification_fails_loudly_when_text_survives() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None);
+        let state = AppState::new(pdfium.get(), None);
         let bytes = text_pdf_bytes(&["SECRET data"]);
         open_mem_doc(&state, "doc1", bytes.clone());
 
@@ -1702,7 +1694,7 @@ mod tests {
 
         // The wrong approach: text still in the content stream under the box.
         let (leaks, _ocr_ran, _violations) =
-            verify_redactions(pdfium, &bytes, &regions, &["SECRET".to_string()], &empty_engine())
+            verify_redactions(pdfium.get(), &bytes, &regions, &["SECRET".to_string()], &empty_engine())
                 .expect("verify");
 
         assert!(!leaks.is_empty(), "verification must report the surviving text as a leak");
@@ -1712,7 +1704,6 @@ mod tests {
     /// scrubbed from the output.
     #[test]
     fn redaction_scrubs_document_metadata() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
 
         // Seed Info + XMP metadata that echo the redacted text.
@@ -1741,7 +1732,7 @@ mod tests {
 
         let (result, output) = apply_redactions_impl(
             &no_progress,
-            pdfium,
+            pdfium.get(),
             &bytes,
             &[full_page_region(1)],
             &["SECRET".to_string()],
@@ -1783,7 +1774,6 @@ mod tests {
     /// APIs; the scrub must remove them and the output must carry no echo.
     #[test]
     fn redaction_scrubs_struct_tree_outlines_and_page_extras() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
 
         let bytes = {
@@ -1846,7 +1836,7 @@ mod tests {
 
         let (result, output) = apply_redactions_impl(
             &no_progress,
-            pdfium,
+            pdfium.get(),
             &bytes,
             &[full_page_region(1)],
             &["SECRET".to_string()],
@@ -1951,13 +1941,12 @@ mod tests {
     /// must not survive.
     #[test]
     fn hierarchical_field_with_all_widgets_flattened_is_dropped() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
         let bytes = hierarchical_form_pdf_bytes();
 
         let (result, output) = apply_redactions_impl(
             &no_progress,
-            pdfium,
+            pdfium.get(),
             &bytes,
             &[full_page_region(1), full_page_region(2)],
             &[],
@@ -1989,13 +1978,12 @@ mod tests {
     /// what the user typed, invisibly to every text-based check.
     #[test]
     fn hierarchical_field_with_surviving_widget_is_kept_and_pruned() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
         let bytes = hierarchical_form_pdf_bytes();
 
         let (result, output) = apply_redactions_impl(
             &no_progress,
-            pdfium,
+            pdfium.get(),
             &bytes,
             &[full_page_region(1)], // page 2's widget survives
             &[],
@@ -2413,7 +2401,6 @@ mod tests {
     /// before the run.
     #[test]
     fn redaction_removes_the_secret_from_every_known_leak_vector() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
         const SECRET: &[u8] = b"ZANZIBAR";
         let bytes = leaky_pdf_bytes("ZANZIBAR");
@@ -2427,7 +2414,7 @@ mod tests {
 
         let (result, output) = apply_redactions_impl(
             &no_progress,
-            pdfium,
+            pdfium.get(),
             &bytes,
             &[full_page_region(1)],
             &["ZANZIBAR".to_string()],
@@ -2461,7 +2448,6 @@ mod tests {
     /// render blank in the output.
     #[test]
     fn flatten_raster_excludes_annotation_appearances() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
         let bytes = leaky_pdf_bytes("ZANZIBAR");
 
@@ -2474,7 +2460,7 @@ mod tests {
         };
         let (result, output) = apply_redactions_impl(
             &no_progress,
-            pdfium,
+            pdfium.get(),
             &bytes,
             &[region],
             &["ZANZIBAR".to_string()],
@@ -2491,7 +2477,7 @@ mod tests {
 
         // Render the flattened output page at 1px/pt and assert the widget +
         // icon areas are blank (white, with JPEG-artifact slack).
-        let doc = pdfium
+        let doc = pdfium.get()
             .load_pdf_from_byte_vec(output.expect("output"), None)
             .expect("reload");
         let page = doc.pages().get(0).expect("page 1");
@@ -2606,7 +2592,6 @@ mod tests {
     /// length — the literal "attacker removes the incremental update" move.
     #[test]
     fn naive_incremental_cover_leaves_original_revision_recoverable() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
         let base = text_pdf_bytes(&["ZANZIBAR original"]);
         let (two_revision, split_at) = stack_incremental_revision(&base, "[REDACTED]");
@@ -2617,7 +2602,7 @@ mod tests {
             "the naive construction should leave the secret's bytes in the file"
         );
         // ...and a normal parse (following /Prev, newest wins) hides it...
-        let normal_view = pdfium
+        let normal_view = pdfium.get()
             .load_pdf_from_byte_vec(two_revision.clone(), None)
             .expect("load two-revision file");
         let shown = normal_view.pages().get(0).expect("page").text().expect("text").all();
@@ -2625,7 +2610,7 @@ mod tests {
         drop(normal_view);
         // ...but truncating to the first revision's boundary reveals it.
         let truncated = &two_revision[..split_at];
-        let rolled_back = pdfium
+        let rolled_back = pdfium.get()
             .load_pdf_from_byte_vec(truncated.to_vec(), None)
             .expect("truncated bytes must still be a standalone-valid PDF");
         let revealed = rolled_back.pages().get(0).expect("page").text().expect("text").all();
@@ -2643,7 +2628,6 @@ mod tests {
     /// "attacker truncates an earlier %%EOF" move has nothing to peel back.
     #[test]
     fn input_with_incremental_update_revision_is_fully_redacted() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
         let base = leaky_pdf_bytes("ZANZIBAR"); // secret seeded into every vector
         // Short cover text: the fixture page is 200pt wide at 24pt Helvetica,
@@ -2657,7 +2641,7 @@ mod tests {
         // revision input shows the covering text, not the secret — proving
         // find-&-redact against the CURRENT view has nothing to mark; the
         // secret's continued presence in the file is invisible to search.
-        let precheck = pdfium
+        let precheck = pdfium.get()
             .load_pdf_from_byte_vec(two_revision.clone(), None)
             .expect("load two-revision input");
         let shown = precheck.pages().get(0).expect("page").text().expect("text").all();
@@ -2673,7 +2657,7 @@ mod tests {
         };
         let (result, output) = apply_redactions_impl(
             &no_progress,
-            pdfium,
+            pdfium.get(),
             &two_revision,
             &[region],
             &[],
@@ -2708,13 +2692,12 @@ mod tests {
     /// property the two tests above rely on `apply_redactions_impl` having.
     #[test]
     fn redaction_output_is_a_single_pdf_revision() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
         let bytes = text_pdf_bytes(&["Top Secret"]);
 
         let (_result, output) = apply_redactions_impl(
             &no_progress,
-            pdfium,
+            pdfium.get(),
             &bytes,
             &[full_page_region(1)],
             &[],
@@ -2760,7 +2743,6 @@ mod tests {
     /// parse refuses it.
     #[test]
     fn corrupted_xref_input_is_rejected_with_no_output() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
         let good = text_pdf_bytes(&["ZANZIBAR original"]);
         let (two_rev, _split) = stack_incremental_revision(&good, "REDACTED");
@@ -2783,7 +2765,7 @@ mod tests {
 
             let result = apply_redactions_impl(
                 &no_progress,
-                pdfium,
+                pdfium.get(),
                 &bytes,
                 &[full_page_region(1)],
                 &["ZANZIBAR".to_string()],
@@ -2819,13 +2801,12 @@ mod tests {
     /// don't reject valid documents (guards the false-positive direction).
     #[test]
     fn valid_input_still_redacts_after_hardening() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
         let bytes = text_pdf_bytes(&["ZANZIBAR original"]);
 
         let (result, output) = apply_redactions_impl(
             &no_progress,
-            pdfium,
+            pdfium.get(),
             &bytes,
             &[full_page_region(1)],
             &["ZANZIBAR".to_string()],
@@ -2843,14 +2824,13 @@ mod tests {
     /// verifier refuses to certify even though checks 1–3 pass.
     #[test]
     fn verification_fails_closed_on_surviving_struct_tree() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
         let bytes = text_pdf_bytes(&["Top Secret"]);
         let regions = [full_page_region(1)];
 
         let (result, output) = apply_redactions_impl(
             &no_progress,
-            pdfium,
+            pdfium.get(),
             &bytes,
             &regions,
             &[],
@@ -2883,7 +2863,7 @@ mod tests {
         };
 
         let (leaks, _ocr, violations) =
-            verify_redactions(pdfium, &tampered, &regions, &[], &empty_engine())
+            verify_redactions(pdfium.get(), &tampered, &regions, &[], &empty_engine())
                 .expect("verify");
         assert!(leaks.is_empty(), "checks 1–3 see nothing — that is the point");
         assert!(
@@ -2967,9 +2947,8 @@ mod tests {
     /// invisible glyphs inside the region and fail — falsely — check 1).
     #[test]
     fn reocr_layer_does_not_span_the_burned_gap() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None);
+        let state = AppState::new(pdfium.get(), None);
         let bytes = text_pdf_bytes(&["ab SECRET cd"]);
         open_mem_doc(&state, "doc1", bytes.clone());
 
@@ -2988,7 +2967,7 @@ mod tests {
         let engine: Arc<dyn OcrEngine> = Arc::new(RemainingWordsOcr);
         let (result, output) = apply_redactions_impl(
             &no_progress,
-            pdfium,
+            pdfium.get(),
             &bytes,
             &regions,
             &["SECRET".to_string()],
@@ -3007,7 +2986,7 @@ mod tests {
 
         // The surviving words are searchable in the output; the redacted one is gone.
         let out = output.expect("output bytes");
-        let reloaded = pdfium.load_pdf_from_byte_vec(out, None).expect("reload");
+        let reloaded = pdfium.get().load_pdf_from_byte_vec(out, None).expect("reload");
         let text = reloaded.pages().get(0).expect("page").text().expect("text").all();
         assert!(text.contains("ab") && text.contains("cd"), "got: {text:?}");
         assert!(!text.contains("SECRET"), "got: {text:?}");
@@ -3016,13 +2995,12 @@ mod tests {
     /// A pre-set cancel token stops the run before any output is produced.
     #[test]
     fn cancellation_produces_no_output() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
         let bytes = text_pdf_bytes(&["Top Secret"]);
 
         let (result, output) = apply_redactions_impl(
             &no_progress,
-            pdfium,
+            pdfium.get(),
             &bytes,
             &[full_page_region(1)],
             &[],
@@ -3041,20 +3019,19 @@ mod tests {
     /// file path is never an accepted destination.
     #[test]
     fn save_redacted_copy_gates_on_verification_and_protects_original() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None);
+        let state = AppState::new(pdfium.get(), None);
         let bytes = text_pdf_bytes(&["Top Secret"]);
 
         // Open the "original" from a real temp file so path comparisons work.
         let original = std::env::temp_dir().join(format!("tumbler-redact-{}.pdf", uuid::Uuid::new_v4()));
         std::fs::write(&original, &bytes).expect("write original");
         let original = dunce::canonicalize(&original).expect("canonical");
-        let entry = DocEntry::load(pdfium, &original.to_string_lossy(), None).expect("load");
+        let entry = DocEntry::load(pdfium.get(), &original.to_string_lossy(), None).expect("load");
         state.insert_document("doc1".to_string(), entry).expect("insert");
 
         let stage = |verified: bool| {
-            let document = pdfium
+            let document = pdfium.get()
                 .load_pdf_from_byte_vec(bytes.clone(), None)
                 .expect("load staged");
             state
@@ -3581,7 +3558,6 @@ mod tests {
     /// future change regresses any defense, the matching attack fails here.
     #[test]
     fn pentest_corpus_is_neutralized_or_rejected() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
 
         for attack in pentest_corpus() {
@@ -3590,7 +3566,7 @@ mod tests {
             // secret-bearing base).
             if attack.expect == Expect::Neutralized {
                 assert!(
-                    secret_recoverable(pdfium, &attack.bytes),
+                    secret_recoverable(pdfium.get(), &attack.bytes),
                     "[{}] attack fixture should leak the secret before redaction",
                     attack.name
                 );
@@ -3598,7 +3574,7 @@ mod tests {
 
             let result = apply_redactions_impl(
                 &no_progress,
-                pdfium,
+                pdfium.get(),
                 &attack.bytes,
                 &[full_page_region(1)],
                 &[SECRET.to_string()],
@@ -3623,7 +3599,7 @@ mod tests {
                     );
                     let out = output.expect("neutralized attack must produce output");
                     assert!(
-                        !secret_recoverable(pdfium, &out),
+                        !secret_recoverable(pdfium.get(), &out),
                         "[{}] the secret must be unrecoverable from the redacted output",
                         attack.name
                     );
@@ -3685,7 +3661,6 @@ mod tests {
     #[test]
     #[ignore = "writes Tumbler's redacted pen-test output to disk"]
     fn dump_redacted_pentest_corpus() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/redaction/pentest-redacted");
@@ -3714,7 +3689,7 @@ mod tests {
             }
             let (result, output) = apply_redactions_impl(
                 &no_progress,
-                pdfium,
+                pdfium.get(),
                 &attack.bytes,
                 &[full_page_region(1)],
                 &[SECRET.to_string()],

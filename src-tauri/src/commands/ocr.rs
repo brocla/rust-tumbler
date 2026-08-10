@@ -601,9 +601,8 @@ mod tests {
     }
 
     fn open_fixture(state: &AppState, doc_id: &str) {
-        let pdfium = crate::test_pdfium();
-        let src = crate::fixture_path();
-        let entry = DocEntry::load(pdfium, &src.to_string_lossy(), None).expect("load pdf");
+                let src = crate::fixture_path();
+        let entry = DocEntry::load(state.pdfium, &src.to_string_lossy(), None).expect("load pdf");
         state.insert_document(doc_id.to_string(), entry).expect("insert");
     }
 
@@ -685,8 +684,7 @@ mod tests {
     }
 
     fn open_blank_doc(state: &AppState, doc_id: &str, pages: u32) {
-        let pdfium = crate::test_pdfium();
-        let mut doc = pdfium.create_new_pdf().expect("create pdf");
+                let mut doc = state.pdfium.create_new_pdf().expect("create pdf");
         for i in 0..pages {
             doc.pages_mut()
                 .create_page_at_index(
@@ -717,13 +715,12 @@ mod tests {
     /// "Make Searchable" OCRs every text-less page into the cache.
     #[test]
     fn ocr_document_ocrs_blank_pages_into_cache() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
         let fake: Arc<dyn OcrEngine> = Arc::new(FakeOcrEngine {
             words: vec![word("scanned")],
             call_count: AtomicUsize::new(0),
         });
-        let state = AppState::new(pdfium, None).with_ocr_engine(fake);
+        let state = AppState::new(pdfium.get(), None).with_ocr_engine(fake);
         open_blank_doc(&state, "blank", 2);
 
         let entry = state.get_document("blank").expect("get");
@@ -751,13 +748,12 @@ mod tests {
     /// junk layer is never replaced unless the user asks.
     #[test]
     fn ocr_document_unforced_skips_pages_with_native_text() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
         let fake: Arc<dyn OcrEngine> = Arc::new(FakeOcrEngine {
             words: vec![word("scanned")],
             call_count: AtomicUsize::new(0),
         });
-        let state = AppState::new(pdfium, None).with_ocr_engine(fake);
+        let state = AppState::new(pdfium.get(), None).with_ocr_engine(fake);
         open_fixture(&state, "fixture");
 
         let cache = state.ocr_cache_handle();
@@ -783,13 +779,12 @@ mod tests {
     /// the layer the user rejected (issue #97).
     #[test]
     fn ocr_document_forced_ocrs_page_with_native_text_and_sets_override() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
         let fake: Arc<dyn OcrEngine> = Arc::new(FakeOcrEngine {
             words: vec![word("scanned")],
             call_count: AtomicUsize::new(0),
         });
-        let state = AppState::new(pdfium, None).with_ocr_engine(fake);
+        let state = AppState::new(pdfium.get(), None).with_ocr_engine(fake);
         open_fixture(&state, "fixture");
 
         let cache = state.ocr_cache_handle();
@@ -817,13 +812,12 @@ mod tests {
     /// words may be the very thing the user is trying to replace.
     #[test]
     fn ocr_document_forced_bypasses_the_cache() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
         let fake = Arc::new(FakeOcrEngine {
             words: vec![word("scanned")],
             call_count: AtomicUsize::new(0),
         });
-        let state = AppState::new(pdfium, None).with_ocr_engine(fake.clone());
+        let state = AppState::new(pdfium.get(), None).with_ocr_engine(fake.clone());
         open_blank_doc(&state, "blank", 1);
 
         let run = |force| {
@@ -857,13 +851,12 @@ mod tests {
     /// page would suppress its native text with nothing to replace it.
     #[test]
     fn clearing_the_ocr_cache_clears_force_overrides() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
         let fake: Arc<dyn OcrEngine> = Arc::new(FakeOcrEngine {
             words: vec![word("scanned")],
             call_count: AtomicUsize::new(0),
         });
-        let state = AppState::new(pdfium, None).with_ocr_engine(fake);
+        let state = AppState::new(pdfium.get(), None).with_ocr_engine(fake);
         open_fixture(&state, "fixture");
 
         ocr_document_impl(
@@ -891,9 +884,8 @@ mod tests {
     /// A pre-set cancel token stops the run before any page is processed.
     #[test]
     fn ocr_document_honors_cancellation() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None);
+        let state = AppState::new(pdfium.get(), None);
         open_blank_doc(&state, "blank", 3);
 
         let entry = state.get_document("blank").expect("get");
@@ -917,13 +909,12 @@ mod tests {
     /// must serve from cache and NOT invoke the engine again.
     #[test]
     fn ocr_page_caches_result_on_second_call() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
         let fake = Arc::new(FakeOcrEngine {
             words: vec![word("hello"), word("world")],
             call_count: AtomicUsize::new(0),
         });
-        let state = AppState::new(pdfium, None).with_ocr_engine(fake.clone());
+        let state = AppState::new(pdfium.get(), None).with_ocr_engine(fake.clone());
         open_fixture(&state, "doc1");
 
         let words1 = ocr_page_impl(&state, "doc1".to_string(), 1).expect("first ocr");
@@ -942,13 +933,12 @@ mod tests {
     /// before caching, so cached words are in PDF user space (bottom-left).
     #[test]
     fn ocr_page_maps_pixel_rects_into_pdf_points() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
         let fake = Arc::new(FakeOcrEngine {
             words: vec![word("hello")],
             call_count: AtomicUsize::new(0),
         });
-        let state = AppState::new(pdfium, None).with_ocr_engine(fake);
+        let state = AppState::new(pdfium.get(), None).with_ocr_engine(fake);
         open_fixture(&state, "doc1");
 
         let words = ocr_page_impl(&state, "doc1".to_string(), 1).expect("ocr");
@@ -965,9 +955,8 @@ mod tests {
     #[test]
     #[ignore = "requires Windows OCR language pack"]
     fn windows_ocr_engine_recognizes_text_in_rendered_page() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None); // real WindowsOcrEngine default
+        let state = AppState::new(pdfium.get(), None); // real WindowsOcrEngine default
         open_fixture(&state, "doc1");
 
         let words = ocr_page_impl(&state, "doc1".to_string(), 1).expect("ocr");

@@ -738,8 +738,13 @@ mod tests {
         out
     }
 
+    /// Self-contained: takes the pdfium lock, does all its pdfium work, and
+    /// returns plain data. Safe for a helper to lock because anything the
+    /// caller does afterwards has to acquire the lock again to get a `Pdfium`.
     fn detect_bytes(bytes: &[u8]) -> PageMargins {
-        let doc = crate::test_pdfium()
+        let pdfium = crate::test_pdfium();
+        let doc = pdfium
+            .get()
             .load_pdf_from_byte_vec(bytes.to_vec(), None)
             .expect("load bytes");
         detect_page(&doc, 0).expect("detect")
@@ -876,7 +881,6 @@ mod tests {
     /// within ~2pt (1px ≈ 1pt at 72 DPI, plus antialiased edges).
     #[test]
     fn detect_page_finds_rect_bbox() {
-        let _guard = crate::test_pdfium_guard();
         let bytes = rect_doc_bytes(300.0, 400.0, Some([50.0, 100.0, 250.0, 300.0]), 0);
         let pm = detect_bytes(&bytes);
         assert!(approx(pm.page_w, 300.0, 0.5) && approx(pm.page_h, 400.0, 0.5));
@@ -885,7 +889,6 @@ mod tests {
 
     #[test]
     fn detect_page_blank_is_none() {
-        let _guard = crate::test_pdfium_guard();
         let pm = detect_bytes(&rect_doc_bytes(300.0, 400.0, None, 0));
         assert!(pm.bbox.is_none());
     }
@@ -894,7 +897,6 @@ mod tests {
     /// centered horizontally and top-aligned: new bbox (10, 110)–(290, 390).
     #[test]
     fn expand_scales_content_to_fill_page() {
-        let _guard = crate::test_pdfium_guard();
         let bytes = rect_doc_bytes(300.0, 400.0, Some([50.0, 100.0, 250.0, 300.0]), 0);
         let report = detect_bytes(&bytes);
         let (out, scale) = expand_margins_bytes(&bytes, &[report], 10.0).expect("expand");
@@ -910,7 +912,6 @@ mod tests {
     /// scale ≈ 1.
     #[test]
     fn expand_twice_converges_with_single_wrap() {
-        let _guard = crate::test_pdfium_guard();
         let bytes = rect_doc_bytes(300.0, 400.0, Some([50.0, 100.0, 250.0, 300.0]), 0);
         let report = detect_bytes(&bytes);
         let (once, _) = expand_margins_bytes(&bytes, &[report], 10.0).expect("first");
@@ -929,7 +930,6 @@ mod tests {
     /// pins the module's rotation convention to pdfium's actual behavior.
     #[test]
     fn expand_handles_rotated_page() {
-        let _guard = crate::test_pdfium_guard();
         let bytes = rect_doc_bytes(300.0, 400.0, Some([50.0, 100.0, 250.0, 300.0]), 90);
         let pm = detect_bytes(&bytes);
         assert!(approx(pm.page_w, 400.0, 0.5) && approx(pm.page_h, 300.0, 0.5));
@@ -944,7 +944,6 @@ mod tests {
 
     #[test]
     fn expand_blank_document_errors_cleanly() {
-        let _guard = crate::test_pdfium_guard();
         let bytes = rect_doc_bytes(300.0, 400.0, None, 0);
         let report = detect_bytes(&bytes);
         match expand_margins_bytes(&bytes, &[report], 10.0) {
@@ -957,7 +956,6 @@ mod tests {
     /// the ink box corner must land on the fitted corner.
     #[test]
     fn expand_transforms_annotation_rects() {
-        let _guard = crate::test_pdfium_guard();
         let bytes = rect_doc_bytes(300.0, 400.0, Some([50.0, 100.0, 250.0, 300.0]), 0);
         let with_annot = {
             let mut doc = Document::load_mem(&bytes).expect("parse");
@@ -1013,9 +1011,10 @@ mod tests {
             eprintln!("TUMBLER_MARGINS_SAMPLE not set; skipping");
             return;
         };
-        let _guard = crate::test_pdfium_guard();
         let bytes = std::fs::read(&path).expect("read sample");
-        let doc = crate::test_pdfium()
+        let pdfium = crate::test_pdfium();
+        let doc = pdfium
+            .get()
             .load_pdf_from_byte_vec(bytes.clone(), None)
             .expect("load sample");
         let pages: Vec<PageMargins> = (0..doc.pages().len() as u32)
@@ -1036,7 +1035,6 @@ mod tests {
     /// content, and the note still round-trips through read_typewriter_annots.
     #[test]
     fn expand_scales_typewriter_notes() {
-        let _guard = crate::test_pdfium_guard();
         let bytes = rect_doc_bytes(300.0, 400.0, Some([50.0, 100.0, 250.0, 300.0]), 0);
         let note = TypewriterAnnot {
             id: "n1".to_string(),

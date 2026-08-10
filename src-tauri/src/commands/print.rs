@@ -698,10 +698,9 @@ mod tests {
     /// disk for an encrypted one) with the stored password.
     #[test]
     fn dirty_document_prints_from_memory_clean_document_from_file() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
         let path = crate::encrypted_fixture_path().to_string_lossy().into_owned();
-        let mut entry = DocEntry::load(pdfium, &path, Some(crate::ENCRYPTED_FIXTURE_PASSWORD))
+        let mut entry = DocEntry::load(pdfium.get(), &path, Some(crate::ENCRYPTED_FIXTURE_PASSWORD))
             .expect("load encrypted fixture");
 
         // Clean: file-path handoff, password included for the encrypted file.
@@ -719,20 +718,19 @@ mod tests {
     }
 
     /// Pins the raw `FPDF_LoadMemDocument64` binding against the shipped
-    /// pdfium.dll: the symbol exists and our signature (`*const c_void`,
+    /// pdfium.get().dll: the symbol exists and our signature (`*const c_void`,
     /// `usize` length, password string) is right. A mismatch here would
     /// otherwise only surface as a crash or null document during a live
     /// print of an edited document.
     #[test]
     fn load_mem_document64_binding_matches_shipped_dll() {
-        let _guard = crate::test_pdfium_guard();
         // Binds pdfium and calls FPDF_InitLibrary, which the raw symbols
         // below rely on (mirrors print_impl running against the app's
         // already-initialized library).
         let _ = crate::test_pdfium();
 
         let lib = unsafe { libloading::Library::new(crate::resolve_pdfium_path()) }
-            .expect("load pdfium.dll");
+            .expect("load pdfium.get().dll");
         let load: libloading::Symbol<FnLoadMemDocument64> =
             unsafe { lib.get(b"FPDF_LoadMemDocument64\0") }.expect("find FPDF_LoadMemDocument64");
         let page_count: libloading::Symbol<FnGetPageCount> =
@@ -762,15 +760,15 @@ mod tests {
     }
 
     /// Exercises the token-check branch by pre-setting the cancel flag and
-    /// invoking print_impl. Requires pdfium.dll and a real (or PDF) printer.
+    /// invoking print_impl. Requires pdfium.get().dll and a real (or PDF) printer.
     #[test]
-    #[ignore = "needs pdfium.dll and a real printer — run locally with cargo test -- --ignored"]
+    #[ignore = "needs pdfium.get().dll and a real printer — run locally with cargo test -- --ignored"]
     fn print_cancelled_before_first_page_returns_cancelled_error() {
         // Pre-set the cancel token to true so the very first post-EndPage
         // check fires. Verify the function returns the cancelled error.
         let cancel = Arc::new(AtomicBool::new(true));
         // A real hwnd_raw, pdfium_path, pdf_path, and window are needed here.
-        // Run manually on a machine with pdfium.dll and a printer available.
+        // Run manually on a machine with pdfium.get().dll and a printer available.
         let _ = cancel;
     }
 }

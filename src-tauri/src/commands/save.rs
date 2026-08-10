@@ -191,9 +191,8 @@ mod tests {
     /// A buffer edit must not touch disk; `save_document` is what commits it.
     #[test]
     fn edit_is_deferred_and_save_document_commits_it() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None);
+        let state = AppState::new(pdfium.get(), None);
         let path = open_fixture_copy(&state, "doc1", "tumbler_save_test.pdf");
         let original_bytes = std::fs::read(&path).expect("read original");
 
@@ -221,7 +220,7 @@ mod tests {
         assert_ne!(saved, original_bytes, "save should write the edited bytes");
 
         // Re-opening from disk shows the rotation.
-        let reopened = pdfium.load_pdf_from_file(&path, None).expect("reopen");
+        let reopened = pdfium.get().load_pdf_from_file(&path, None).expect("reopen");
         let p0 = reopened.pages().get(0).expect("page 0");
         assert_eq!(
             p0.rotation().unwrap_or(pdfium_render::prelude::PdfPageRenderRotation::None),
@@ -233,9 +232,8 @@ mod tests {
 
     #[test]
     fn save_document_as_writes_new_path_and_retargets() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None);
+        let state = AppState::new(pdfium.get(), None);
         let src_path = open_fixture_copy(&state, "doc1", "tumbler_save_as_src.pdf");
         let original_bytes = std::fs::read(&src_path).expect("read original");
         let dest_path = tmp_path("tumbler_save_as_dest.pdf");
@@ -256,7 +254,7 @@ mod tests {
             let entry = lock_mutex(&entry_arc).expect("lock");
             assert_eq!(entry.file_path, canonical);
         }
-        let reopened = pdfium.load_pdf_from_file(&dest_path, None).expect("reopen dest");
+        let reopened = pdfium.get().load_pdf_from_file(&dest_path, None).expect("reopen dest");
         let p0 = reopened.pages().get(0).expect("page 0");
         assert_eq!(
             p0.rotation().unwrap_or(pdfium_render::prelude::PdfPageRenderRotation::None),
@@ -269,9 +267,8 @@ mod tests {
 
     #[test]
     fn save_document_as_rejects_path_open_in_another_tab() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None);
+        let state = AppState::new(pdfium.get(), None);
         let path_a = open_fixture_copy(&state, "doc-a", "tumbler_save_as_conflict_a.pdf");
         let path_b = open_fixture_copy(&state, "doc-b", "tumbler_save_as_conflict_b.pdf");
 
@@ -302,13 +299,12 @@ mod tests {
     /// plaintext buffer must never reach disk while a password is set.
     #[test]
     fn save_of_encrypted_document_keeps_password_protection() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None);
+        let state = AppState::new(pdfium.get(), None);
         let path = tmp_path("tumbler_save_encrypted.pdf");
         std::fs::copy(crate::encrypted_fixture_path(), &path).expect("copy fixture");
         let entry = DocEntry::load(
-            pdfium,
+            pdfium.get(),
             &path,
             Some(crate::ENCRYPTED_FIXTURE_PASSWORD),
         )
@@ -322,11 +318,11 @@ mod tests {
 
         // The saved file must reject a missing password...
         assert!(
-            pdfium.load_pdf_from_file(&path, None).is_err(),
+            pdfium.get().load_pdf_from_file(&path, None).is_err(),
             "saved file must still require the password"
         );
         // ...and carry the edit when opened with it.
-        let reopened = pdfium
+        let reopened = pdfium.get()
             .load_pdf_from_file(&path, Some(crate::ENCRYPTED_FIXTURE_PASSWORD))
             .expect("reopen with password");
         let p0 = reopened.pages().get(0).expect("page 0");
@@ -342,12 +338,11 @@ mod tests {
     /// with no password and carries no `/Encrypt` (issue #57).
     #[test]
     fn save_after_remove_password_writes_plaintext() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None);
+        let state = AppState::new(pdfium.get(), None);
         let path = crate::encrypted_fixture_path().to_string_lossy().into_owned();
         let entry = DocEntry::load(
-            pdfium,
+            pdfium.get(),
             &path,
             Some(crate::ENCRYPTED_FIXTURE_PASSWORD),
         )
@@ -363,7 +358,7 @@ mod tests {
         let saved = std::fs::read(&dest).expect("read saved");
         let doc = lopdf::Document::load_mem(&saved).expect("parse saved");
         assert!(!doc.is_encrypted(), "saved file must carry no /Encrypt");
-        let reopened = pdfium.load_pdf_from_file(&dest, None).expect("open without password");
+        let reopened = pdfium.get().load_pdf_from_file(&dest, None).expect("open without password");
         assert_eq!(reopened.pages().len(), 1);
 
         std::fs::remove_file(&dest).ok();
@@ -374,10 +369,9 @@ mod tests {
     /// the owner-only empty password — re-encrypts.
     #[test]
     fn bytes_for_disk_encrypts_iff_protected() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
         let path = crate::fixture_path().to_string_lossy().into_owned();
-        let mut entry = DocEntry::load(pdfium, &path, None).expect("load");
+        let mut entry = DocEntry::load(pdfium.get(), &path, None).expect("load");
 
         // Plaintext → the buffer itself, byte for byte.
         let bytes = bytes_for_disk(&entry).expect("plaintext bytes");
@@ -413,9 +407,8 @@ mod tests {
     #[test]
     fn save_stamps_moddate_and_producer_on_disk_and_in_buffer() {
         use pdfium_render::prelude::PdfDocumentMetadataTagType as Tag;
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None);
+        let state = AppState::new(pdfium.get(), None);
         let path = open_fixture_copy(&state, "doc1", "tumbler_stamp_test.pdf");
 
         // Dirty the doc so Save actually runs.
@@ -442,7 +435,7 @@ mod tests {
         assert!(disk_mod.starts_with("D:"), "disk ModDate not stamped: {disk_mod}");
 
         // /Producer on disk (via pdfium — its key is correct).
-        let reopened = pdfium.load_pdf_from_file(&path, None).expect("reopen");
+        let reopened = pdfium.get().load_pdf_from_file(&path, None).expect("reopen");
         assert_eq!(
             reopened
                 .metadata()
@@ -468,9 +461,8 @@ mod tests {
     /// Save) — the exclusion by doc_id must prevent a self-conflict.
     #[test]
     fn save_document_as_to_own_path_is_allowed() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None);
+        let state = AppState::new(pdfium.get(), None);
         let path = open_fixture_copy(&state, "doc1", "tumbler_save_as_self.pdf");
 
         crate::commands::pages::rotate_pages_impl(&state, "doc1".to_string(), vec![1], 1)

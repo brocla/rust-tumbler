@@ -69,9 +69,8 @@ mod tests {
     use tauri::ipc::{InvokeResponseBody, IpcResponse};
 
     fn open_fixture(state: &AppState, doc_id: &str) {
-        let pdfium = crate::test_pdfium();
-        let src = crate::fixture_path();
-        let entry = DocEntry::load(pdfium, &src.to_string_lossy(), None).expect("load pdf");
+                let src = crate::fixture_path();
+        let entry = DocEntry::load(state.pdfium, &src.to_string_lossy(), None).expect("load pdf");
         state.insert_document(doc_id.to_string(), entry).expect("insert");
     }
 
@@ -87,9 +86,8 @@ mod tests {
     /// sized `width * height * 4` for the resulting (square) bitmap.
     #[test]
     fn render_page_produces_rgba_buffer_of_expected_size() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None);
+        let state = AppState::new(pdfium.get(), None);
         open_fixture(&state, "doc1");
 
         let response = render_page_impl(&state, "doc1".to_string(), 1, 200).expect("render");
@@ -100,9 +98,8 @@ mod tests {
     /// proportionally (the fixture page is square, so width == height).
     #[test]
     fn render_page_scales_buffer_with_target_width() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None);
+        let state = AppState::new(pdfium.get(), None);
         open_fixture(&state, "doc1");
 
         let response = render_page_impl(&state, "doc1".to_string(), 1, 100).expect("render");
@@ -111,9 +108,8 @@ mod tests {
 
     #[test]
     fn render_page_for_missing_page_is_error() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None);
+        let state = AppState::new(pdfium.get(), None);
         open_fixture(&state, "doc1");
 
         match render_page_impl(&state, "doc1".to_string(), 99, 200) {

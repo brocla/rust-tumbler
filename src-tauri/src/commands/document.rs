@@ -111,9 +111,8 @@ mod tests {
     /// the document in `state` under the returned `doc_id`.
     #[test]
     fn open_document_loads_fixture_with_page_dimensions() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None);
+        let state = AppState::new(pdfium.get(), None);
         let src = crate::fixture_path();
 
         let info = open_document_impl(&state, src.to_string_lossy().into_owned(), None).expect("open");
@@ -132,14 +131,13 @@ mod tests {
     /// distinct page sizes and check all of them.
     #[test]
     fn open_document_reports_every_page_size_in_order() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None);
+        let state = AppState::new(pdfium.get(), None);
 
         let path = std::env::temp_dir().join("tumbler_open_multipage.pdf");
         {
             use pdfium_render::prelude::*;
-            let mut doc = pdfium.create_new_pdf().expect("create");
+            let mut doc = pdfium.get().create_new_pdf().expect("create");
             for (i, (w, h)) in [(200.0f32, 200.0f32), (300.0, 300.0), (400.0, 200.0)]
                 .iter()
                 .enumerate()
@@ -204,9 +202,8 @@ mod tests {
     /// open it with `encrypted == true`. (issue #12)
     #[test]
     fn open_document_password_flow_for_encrypted_fixture() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None);
+        let state = AppState::new(pdfium.get(), None);
         let path = crate::encrypted_fixture_path().to_string_lossy().into_owned();
 
         // First attempt, no password → PasswordRequired.
@@ -250,9 +247,8 @@ mod tests {
     /// An unencrypted document reports `encrypted == false`.
     #[test]
     fn open_document_unencrypted_is_not_flagged_encrypted() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None);
+        let state = AppState::new(pdfium.get(), None);
         let src = crate::fixture_path().to_string_lossy().into_owned();
 
         let info = open_document_impl(&state, src, None).expect("open");
@@ -261,9 +257,8 @@ mod tests {
 
     #[test]
     fn open_document_for_missing_file_is_error() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None);
+        let state = AppState::new(pdfium.get(), None);
 
         let missing = std::env::temp_dir().join("tumbler_does_not_exist.pdf");
         match open_document_impl(&state, missing.to_string_lossy().into_owned(), None) {
