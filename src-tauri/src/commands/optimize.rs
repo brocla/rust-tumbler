@@ -1476,7 +1476,6 @@ mod tests {
     /// (the command applies them to the buffer via `set_buffer_and_refresh`).
     #[test]
     fn pipeline_records_steps_and_returns_valid_output() {
-        let _guard = crate::test_pdfium_guard();
         let pdf_bytes = std::fs::read(crate::fixture_path()).expect("read fixture");
 
         let steps = vec![
@@ -1498,7 +1497,7 @@ mod tests {
         let out_bytes = output.expect("output bytes");
         Document::load_mem(&out_bytes).expect("optimized output should be valid PDF");
         let pdfium = crate::test_pdfium();
-        pdfium
+        pdfium.get()
             .load_pdf_from_byte_vec(out_bytes, None)
             .expect("pdfium should load the optimized output");
     }

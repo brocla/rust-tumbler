@@ -557,9 +557,8 @@ mod tests {
 
     #[test]
     fn cancel_print_job_sets_token_to_true() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None);
+        let state = AppState::new(pdfium.get(), None);
         let token = Arc::new(AtomicBool::new(false));
         state.set_print_job(token.clone());
         state.cancel_print_job();
@@ -568,9 +567,8 @@ mod tests {
 
     #[test]
     fn take_print_job_removes_token_from_state() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None);
+        let state = AppState::new(pdfium.get(), None);
         let token = Arc::new(AtomicBool::new(false));
         state.set_print_job(token.clone());
         let taken = state.take_print_job();
@@ -603,17 +601,16 @@ mod tests {
     /// removal.
     #[test]
     fn document_map_get_insert_remove() {
-        let _guard = crate::test_pdfium_guard();
         let src = crate::fixture_path();
 
         let pdfium = crate::test_pdfium();
 
-        let state = AppState::new(pdfium, None);
+        let state = AppState::new(pdfium.get(), None);
 
         assert!(matches!(state.get_document("missing"), Err(AppError::NotFound(_))));
 
         let file_path = src.to_string_lossy().into_owned();
-        let entry = DocEntry::load(pdfium, &file_path, None).expect("load pdf");
+        let entry = DocEntry::load(pdfium.get(), &file_path, None).expect("load pdf");
         state.insert_document("doc1".to_string(), entry).expect("insert");
 
         let entry = state.get_document("doc1").expect("get");
@@ -629,12 +626,11 @@ mod tests {
     /// is supplied. (The buffer itself is decrypted at load — issue #57.)
     #[test]
     fn encrypted_fixture_rejects_missing_password_and_opens_with_correct_one() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
         let encrypted = std::fs::read(crate::encrypted_fixture_path()).expect("read fixture");
 
         // No password → pdfium password error.
-        let err = pdfium
+        let err = pdfium.get()
             .load_pdf_from_byte_vec(encrypted.clone(), None)
             .expect_err("encrypted file must reject a missing password");
         assert!(
@@ -646,7 +642,7 @@ mod tests {
         );
 
         // Correct password → opens and renders, buffer untouched.
-        let doc = pdfium
+        let doc = pdfium.get()
             .load_pdf_from_byte_vec(encrypted, Some(crate::ENCRYPTED_FIXTURE_PASSWORD))
             .expect("correct password must open the document");
         assert_eq!(doc.pages().len(), 1);
@@ -659,10 +655,9 @@ mod tests {
     /// than opening a second.
     #[test]
     fn page_cache_retains_and_reuses_pages() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
         let src = crate::fixture_path().to_string_lossy().into_owned();
-        let mut entry = DocEntry::load(pdfium, &src, None).expect("load pdf");
+        let mut entry = DocEntry::load(pdfium.get(), &src, None).expect("load pdf");
 
         assert!(entry.page_cache.is_empty(), "starts empty");
 
@@ -682,16 +677,15 @@ mod tests {
     /// least-recently-used page is the one dropped.
     #[test]
     fn page_cache_is_bounded_and_evicts_least_recently_used() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
         let src = crate::fixture_path().to_string_lossy().into_owned();
-        let mut entry = DocEntry::load(pdfium, &src, None).expect("load pdf");
+        let mut entry = DocEntry::load(pdfium.get(), &src, None).expect("load pdf");
 
         // The fixture is single-page, so swap in a document with more pages
         // than the cache holds. (Clearing first is the same discipline the
         // page-edit commands follow before touching `document`.)
         entry.clear_page_cache();
-        entry.document = pdfium.create_new_pdf().expect("create pdf");
+        entry.document = pdfium.get().create_new_pdf().expect("create pdf");
         for i in 0..(DocEntry::PAGE_CACHE_LIMIT + 2) {
             entry
                 .document
@@ -720,11 +714,10 @@ mod tests {
     /// `DocEntry::load` seeds the buffer with the file's bytes and starts clean.
     #[test]
     fn doc_entry_load_seeds_buffer_from_file_and_is_clean() {
-        let _guard = crate::test_pdfium_guard();
         let src = crate::fixture_path();
         let pdfium = crate::test_pdfium();
 
-        let entry = DocEntry::load(pdfium, &src.to_string_lossy(), None).expect("load");
+        let entry = DocEntry::load(pdfium.get(), &src.to_string_lossy(), None).expect("load");
 
         assert_eq!(entry.buffer, std::fs::read(&src).expect("read fixture"));
         assert!(!entry.dirty);
@@ -735,17 +728,16 @@ mod tests {
     /// edit ends with.
     #[test]
     fn set_buffer_and_refresh_marks_dirty_and_rebuilds_document() {
-        let _guard = crate::test_pdfium_guard();
         let src = crate::fixture_path();
         let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None);
+        let state = AppState::new(pdfium.get(), None);
 
         let file_path = src.to_string_lossy().into_owned();
-        let entry = DocEntry::load(pdfium, &file_path, None).expect("load");
+        let entry = DocEntry::load(pdfium.get(), &file_path, None).expect("load");
         state.insert_document("doc1".to_string(), entry).expect("insert");
 
         // A distinguishable two-page document as the "edited" bytes.
-        let mut edited = pdfium.create_new_pdf().expect("create pdf");
+        let mut edited = pdfium.get().create_new_pdf().expect("create pdf");
         for i in 0..2 {
             edited
                 .pages_mut()
@@ -776,14 +768,13 @@ mod tests {
     /// accessible on the main thread.
     #[test]
     fn locking_one_document_does_not_block_access_to_another() {
-        let _guard = crate::test_pdfium_guard();
         let src = crate::fixture_path();
         let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None);
+        let state = AppState::new(pdfium.get(), None);
         let file_path = src.to_string_lossy().into_owned();
 
         for doc_id in ["doc-a", "doc-b"] {
-            let entry = DocEntry::load(pdfium, &file_path, None).expect("load pdf");
+            let entry = DocEntry::load(pdfium.get(), &file_path, None).expect("load pdf");
             state.insert_document(doc_id.to_string(), entry).expect("insert");
         }
 

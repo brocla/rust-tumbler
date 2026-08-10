@@ -710,10 +710,10 @@ mod tests {
         write_pdf_with_content(&src, page_content);
 
         let engine: Arc<dyn OcrEngine> = Arc::new(FakeOcrEngine { words: vec![word.clone()] });
-        let state = AppState::new(pdfium, None).with_ocr_engine(engine.clone());
+        let state = AppState::new(pdfium.get(), None).with_ocr_engine(engine.clone());
         // Seed the cache directly so the rect is exactly `word.rect`.
         state.set_ocr_words("doc1", 1, vec![word]);
-        let document = pdfium.load_pdf_from_file(&src, None).expect("load src");
+        let document = pdfium.get().load_pdf_from_file(&src, None).expect("load src");
         state
             .insert_document("doc1".to_string(), DocEntry { page_cache: Vec::new(), document, file_path: src.clone(), buffer: std::fs::read(&src).expect("read src"), dirty: false, protection: crate::state::Protection::Plaintext, linearized: false })
             .expect("insert");
@@ -729,7 +729,7 @@ mod tests {
         )
         .expect("add layer");
 
-        let reopened = pdfium
+        let reopened = pdfium.get()
             .load_pdf_from_byte_vec(bytes.expect("edited bytes"), None)
             .expect("reopen");
         let page = reopened.pages().get(0).expect("page");
@@ -992,16 +992,15 @@ mod tests {
     /// overlay.
     #[test]
     fn edited_bytes_are_natively_searchable() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
 
         let src = temp_path("src.pdf");
         write_blank_pdf(&src);
 
         let engine: Arc<dyn OcrEngine> = Arc::new(FakeOcrEngine { words: vec![px_word("Scanned")] });
-        let state = AppState::new(pdfium, None).with_ocr_engine(engine.clone());
+        let state = AppState::new(pdfium.get(), None).with_ocr_engine(engine.clone());
 
-        let document = pdfium.load_pdf_from_file(&src, None).expect("load blank");
+        let document = pdfium.get().load_pdf_from_file(&src, None).expect("load blank");
         state
             .insert_document(
                 "doc1".to_string(),
@@ -1024,7 +1023,7 @@ mod tests {
         assert!(!result.cancelled);
 
         // Reopen the edited bytes and read text through pdfium's native API.
-        let reopened = pdfium
+        let reopened = pdfium.get()
             .load_pdf_from_byte_vec(bytes.expect("edited bytes"), None)
             .expect("reopen edited bytes");
         let text = reopened
@@ -1049,7 +1048,6 @@ mod tests {
     /// Seeded rect: bottom y=100, height=20 → OCR box spans y 100..120.
     #[test]
     fn layer_box_matches_ocr_box() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
 
         let src = temp_path("src.pdf");
@@ -1060,11 +1058,11 @@ mod tests {
             rect: TextRect { x: 30.0, y: 100.0, width: 120.0, height: 20.0 },
         };
         let engine: Arc<dyn OcrEngine> = Arc::new(FakeOcrEngine { words: vec![word.clone()] });
-        let state = AppState::new(pdfium, None).with_ocr_engine(engine.clone());
+        let state = AppState::new(pdfium.get(), None).with_ocr_engine(engine.clone());
         // Seed the cache directly so the rect is exactly the one above (no
         // pixel→point mapping in the way).
         state.set_ocr_words("doc1", 1, vec![word]);
-        let document = pdfium.load_pdf_from_file(&src, None).expect("load blank");
+        let document = pdfium.get().load_pdf_from_file(&src, None).expect("load blank");
         state
             .insert_document("doc1".to_string(), DocEntry { page_cache: Vec::new(), document, file_path: src.clone(), buffer: std::fs::read(&src).expect("read src"), dirty: false, protection: crate::state::Protection::Plaintext, linearized: false })
             .expect("insert");
@@ -1081,7 +1079,7 @@ mod tests {
         .expect("add layer");
 
         // Union the loose bounds of every character in the run.
-        let reopened = pdfium
+        let reopened = pdfium.get()
             .load_pdf_from_byte_vec(bytes.expect("edited bytes"), None)
             .expect("reopen");
         let page = reopened.pages().get(0).expect("page");
@@ -1137,7 +1135,6 @@ mod tests {
     /// appended invisible text. FAILS until B1 is fixed.
     #[test]
     fn layer_ignores_leftover_translate_ctm() {
-        let _guard = crate::test_pdfium_guard();
         let word = OcrWord {
             text: "Scanned".to_string(),
             rect: TextRect { x: 30.0, y: 100.0, width: 120.0, height: 20.0 },
@@ -1155,7 +1152,6 @@ mod tests {
     /// scale/shift the appended invisible text. FAILS until B1 is fixed.
     #[test]
     fn layer_ignores_unbalanced_q_scale_ctm() {
-        let _guard = crate::test_pdfium_guard();
         let word = OcrWord {
             text: "Scanned".to_string(),
             rect: TextRect { x: 30.0, y: 100.0, width: 120.0, height: 20.0 },
@@ -1175,7 +1171,6 @@ mod tests {
     /// Exercises the Array branch of `append_content_stream`.
     #[test]
     fn layer_wraps_array_contents_and_ignores_ctm() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
 
         // Build a page whose Contents is an ARRAY of two streams; the second
@@ -1213,9 +1208,9 @@ mod tests {
             rect: TextRect { x: 30.0, y: 100.0, width: 120.0, height: 20.0 },
         };
         let engine: Arc<dyn OcrEngine> = Arc::new(FakeOcrEngine { words: vec![word.clone()] });
-        let state = AppState::new(pdfium, None).with_ocr_engine(engine.clone());
+        let state = AppState::new(pdfium.get(), None).with_ocr_engine(engine.clone());
         state.set_ocr_words("doc1", 1, vec![word]);
-        let document = pdfium.load_pdf_from_file(&src, None).expect("load src");
+        let document = pdfium.get().load_pdf_from_file(&src, None).expect("load src");
         state
             .insert_document("doc1".to_string(), DocEntry { page_cache: Vec::new(), document, file_path: src.clone(), buffer: std::fs::read(&src).expect("read src"), dirty: false, protection: crate::state::Protection::Plaintext, linearized: false })
             .expect("insert");
@@ -1232,7 +1227,7 @@ mod tests {
         .expect("add layer");
         assert_eq!(result.pages_written, 1);
 
-        let reopened = pdfium
+        let reopened = pdfium.get()
             .load_pdf_from_byte_vec(bytes.expect("edited bytes"), None)
             .expect("reopen");
         let page = reopened.pages().get(0).expect("page");
@@ -1259,7 +1254,6 @@ mod tests {
     /// pdfium to render a rotated page.
     #[test]
     fn offset_page_is_counted_as_skipped() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
 
         let src = temp_path("src.pdf");
@@ -1303,8 +1297,8 @@ mod tests {
         }
 
         let engine: Arc<dyn OcrEngine> = Arc::new(FakeOcrEngine { words: vec![px_word("Scanned")] });
-        let state = AppState::new(pdfium, None).with_ocr_engine(engine.clone());
-        let document = pdfium.load_pdf_from_file(&src, None).expect("load src");
+        let state = AppState::new(pdfium.get(), None).with_ocr_engine(engine.clone());
+        let document = pdfium.get().load_pdf_from_file(&src, None).expect("load src");
         state
             .insert_document("doc1".to_string(), DocEntry { page_cache: Vec::new(), document, file_path: src.clone(), buffer: std::fs::read(&src).expect("read src"), dirty: false, protection: crate::state::Protection::Plaintext, linearized: false })
             .expect("insert");
@@ -1336,12 +1330,11 @@ mod tests {
     /// lopdf re-serialization for no reason would churn the bytes).
     #[test]
     fn pages_with_native_text_produce_no_edit() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None);
+        let state = AppState::new(pdfium.get(), None);
 
         let src = crate::fixture_path();
-        let entry = DocEntry::load(pdfium, &src.to_string_lossy(), None).expect("load fixture");
+        let entry = DocEntry::load(pdfium.get(), &src.to_string_lossy(), None).expect("load fixture");
         state.insert_document("doc1".to_string(), entry).expect("insert");
 
         let entry = state.get_document("doc1").expect("get");
@@ -1363,7 +1356,6 @@ mod tests {
     /// are untouched by the run (only an explicit Save writes them).
     #[test]
     fn source_file_is_unchanged() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
 
         let src = temp_path("src.pdf");
@@ -1371,8 +1363,8 @@ mod tests {
         let before = std::fs::read(&src).expect("read src");
 
         let engine: Arc<dyn OcrEngine> = Arc::new(FakeOcrEngine { words: vec![px_word("Scanned")] });
-        let state = AppState::new(pdfium, None).with_ocr_engine(engine.clone());
-        let document = pdfium.load_pdf_from_file(&src, None).expect("load blank");
+        let state = AppState::new(pdfium.get(), None).with_ocr_engine(engine.clone());
+        let document = pdfium.get().load_pdf_from_file(&src, None).expect("load blank");
         state
             .insert_document(
                 "doc1".to_string(),
@@ -1402,14 +1394,13 @@ mod tests {
     /// A pre-set cancel token stops before any edit is produced.
     #[test]
     fn cancellation_produces_no_edit() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
 
         let src = temp_path("src.pdf");
         write_blank_pdf(&src);
 
-        let state = AppState::new(pdfium, None);
-        let document = pdfium.load_pdf_from_file(&src, None).expect("load blank");
+        let state = AppState::new(pdfium.get(), None);
+        let document = pdfium.get().load_pdf_from_file(&src, None).expect("load blank");
         state
             .insert_document(
                 "doc1".to_string(),

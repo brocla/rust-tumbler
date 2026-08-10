@@ -1331,8 +1331,7 @@ mod tests {
             .join("tests/fixtures/forms/acroform_basic.pdf")
     }
 
-    fn state_with_bytes(bytes: Vec<u8>, path: &str) -> AppState {
-        let pdfium = crate::test_pdfium();
+    fn state_with_bytes(pdfium: &'static pdfium_render::prelude::Pdfium, bytes: Vec<u8>, path: &str) -> AppState {
         let state = AppState::new(pdfium, None);
         let document = pdfium
             .load_pdf_from_byte_vec(bytes.clone(), None)
@@ -1392,9 +1391,9 @@ mod tests {
 
     #[test]
     fn discovers_text_styling_from_da_and_q() {
-        let _guard = crate::test_pdfium_guard();
         let bytes = std::fs::read(styling_fixture()).expect("read styling fixture");
-        let state = state_with_bytes(bytes, "mem.pdf");
+        let pdfium = crate::test_pdfium();
+        let state = state_with_bytes(pdfium.get(), bytes, "mem.pdf");
         let fields = get_form_fields_impl(&state, "doc-1".into(), 1).expect("fields");
 
         let left = field(&fields, "leftBlack");
@@ -1417,9 +1416,9 @@ mod tests {
 
     #[test]
     fn discovers_signature_field() {
-        let _guard = crate::test_pdfium_guard();
         let bytes = std::fs::read(signature_fixture()).expect("read sig fixture");
-        let state = state_with_bytes(bytes, "mem.pdf");
+        let pdfium = crate::test_pdfium();
+        let state = state_with_bytes(pdfium.get(), bytes, "mem.pdf");
         let fields = get_form_fields_impl(&state, "doc-1".into(), 1).expect("fields");
         let sig = field(&fields, "signature1");
         assert_eq!(sig.field_type, FieldType::Signature);
@@ -1427,12 +1426,12 @@ mod tests {
 
     #[test]
     fn set_signature_strokes_writes_appearance_dirty_and_disk_untouched() {
-        let _guard = crate::test_pdfium_guard();
         let bytes = std::fs::read(signature_fixture()).expect("read sig fixture");
         let tmp = std::env::temp_dir().join("tumbler_sig_test.pdf");
         std::fs::write(&tmp, &bytes).expect("write tmp");
         let path = tmp.to_string_lossy().into_owned();
-        let state = state_with_bytes(bytes, &path);
+        let pdfium = crate::test_pdfium();
+        let state = state_with_bytes(pdfium.get(), bytes, &path);
         let disk_before = std::fs::read(&tmp).expect("read disk");
 
         // A diagonal stroke plus a dot.
@@ -1474,9 +1473,9 @@ mod tests {
 
     #[test]
     fn clear_form_removes_a_signature_appearance() {
-        let _guard = crate::test_pdfium_guard();
         let bytes = std::fs::read(signature_fixture()).expect("read sig fixture");
-        let state = state_with_bytes(bytes, "mem.pdf");
+        let pdfium = crate::test_pdfium();
+        let state = state_with_bytes(pdfium.get(), bytes, "mem.pdf");
 
         // Sign, then clear the whole form.
         set_signature_strokes_impl(
@@ -1515,9 +1514,9 @@ mod tests {
 
     #[test]
     fn discovers_reset_and_unsupported_buttons() {
-        let _guard = crate::test_pdfium_guard();
         let bytes = std::fs::read(reset_fixture()).expect("read reset fixture");
-        let state = state_with_bytes(bytes, "mem.pdf");
+        let pdfium = crate::test_pdfium();
+        let state = state_with_bytes(pdfium.get(), bytes, "mem.pdf");
         let fields = get_form_fields_impl(&state, "doc-1".into(), 1).expect("fields");
 
         let reset = field(&fields, "resetBtn");
@@ -1533,12 +1532,12 @@ mod tests {
 
     #[test]
     fn clear_form_resets_to_default_or_empty_and_leaves_disk_untouched() {
-        let _guard = crate::test_pdfium_guard();
         let bytes = std::fs::read(reset_fixture()).expect("read reset fixture");
         let tmp = std::env::temp_dir().join("tumbler_clear_form_test.pdf");
         std::fs::write(&tmp, &bytes).expect("write tmp");
         let path = tmp.to_string_lossy().into_owned();
-        let state = state_with_bytes(bytes, &path);
+        let pdfium = crate::test_pdfium();
+        let state = state_with_bytes(pdfium.get(), bytes, &path);
         let disk_before = std::fs::read(&tmp).expect("read disk");
 
         reset_scope_impl(&state, "doc-1".into(), ResetScope::All).expect("clear");
@@ -1562,9 +1561,9 @@ mod tests {
 
     #[test]
     fn reset_form_via_button_resets_all_fields() {
-        let _guard = crate::test_pdfium_guard();
         let bytes = std::fs::read(reset_fixture()).expect("read reset fixture");
-        let state = state_with_bytes(bytes, "mem.pdf");
+        let pdfium = crate::test_pdfium();
+        let state = state_with_bytes(pdfium.get(), bytes, "mem.pdf");
 
         let scope = reset_scope_for_button(&state, "doc-1", "resetBtn").expect("scope");
         assert!(matches!(scope, ResetScope::All)); // no /Fields → all
@@ -1578,9 +1577,9 @@ mod tests {
 
     #[test]
     fn reset_scope_rejects_non_reset_button() {
-        let _guard = crate::test_pdfium_guard();
         let bytes = std::fs::read(reset_fixture()).expect("read reset fixture");
-        let state = state_with_bytes(bytes, "mem.pdf");
+        let pdfium = crate::test_pdfium();
+        let state = state_with_bytes(pdfium.get(), bytes, "mem.pdf");
         // jsBtn has a JavaScript action, not ResetForm.
         let err = reset_scope_for_button(&state, "doc-1", "jsBtn").unwrap_err();
         assert!(err.to_string().contains("ResetForm"), "got: {err}");
@@ -1588,9 +1587,9 @@ mod tests {
 
     #[test]
     fn document_has_form_detects_forms() {
-        let _guard = crate::test_pdfium_guard();
         let with = std::fs::read(reset_fixture()).expect("read reset fixture");
-        let state = state_with_bytes(with, "mem.pdf");
+        let pdfium = crate::test_pdfium();
+        let state = state_with_bytes(pdfium.get(), with, "mem.pdf");
         assert!(document_has_form_impl(&state, "doc-1".into()).unwrap());
     }
 
@@ -1599,11 +1598,11 @@ mod tests {
     /// but Tumbler can't run it) rather than being silently dropped.
     #[test]
     fn app117217_clear_button_is_unsupported() {
-        let _guard = crate::test_pdfium_guard();
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/forms/APP117217-06-01.pdf");
         let bytes = std::fs::read(&path).expect("read APP117217");
-        let state = state_with_bytes(bytes, "app.pdf");
+        let pdfium = crate::test_pdfium();
+        let state = state_with_bytes(pdfium.get(), bytes, "app.pdf");
 
         let button = (1..=5)
             .flat_map(|p| get_form_fields_impl(&state, "doc-1".into(), p).unwrap_or_default())
@@ -1648,9 +1647,9 @@ mod tests {
 
     #[test]
     fn discovers_every_field_type_on_the_fixture() {
-        let _guard = crate::test_pdfium_guard();
         let bytes = std::fs::read(forms_fixture()).expect("read fixture");
-        let state = state_with_bytes(bytes, "mem.pdf");
+        let pdfium = crate::test_pdfium();
+        let state = state_with_bytes(pdfium.get(), bytes, "mem.pdf");
 
         let fields = get_form_fields_impl(&state, "doc-1".into(), 1).expect("get fields");
 
@@ -1692,9 +1691,9 @@ mod tests {
 
     #[test]
     fn field_rect_is_top_left_origin() {
-        let _guard = crate::test_pdfium_guard();
         let bytes = std::fs::read(forms_fixture()).expect("read fixture");
-        let state = state_with_bytes(bytes, "mem.pdf");
+        let pdfium = crate::test_pdfium();
+        let state = state_with_bytes(pdfium.get(), bytes, "mem.pdf");
         let fields = get_form_fields_impl(&state, "doc-1".into(), 1).expect("fields");
         let full_name = fields.iter().find(|f| f.id == "fullName").unwrap();
         // /Rect [50 700 300 720] on a 792-high page → top-left y = 792 - 720 = 72.
@@ -1706,10 +1705,10 @@ mod tests {
 
     #[test]
     fn xfa_only_form_is_rejected_but_hybrid_is_accepted() {
-        let _guard = crate::test_pdfium_guard();
         // XFA present, no /Fields → dynamic XFA, unsupported.
         let xfa_only = build_form_pdf(Vec::new(), true);
-        let state = state_with_bytes(xfa_only, "xfa.pdf");
+        let pdfium = crate::test_pdfium();
+        let state = state_with_bytes(pdfium.get(), xfa_only, "xfa.pdf");
         let err = get_form_fields_impl(&state, "doc-1".into(), 1).unwrap_err();
         assert!(err.to_string().contains("XFA"), "got: {err}");
 
@@ -1724,14 +1723,14 @@ mod tests {
         let mut hybrid = Vec::new();
         doc.save_to(&mut hybrid).unwrap();
 
-        let state = state_with_bytes(hybrid, "hybrid.pdf");
+
+        let state = state_with_bytes(pdfium.get(), hybrid, "hybrid.pdf");
         let fields = get_form_fields_impl(&state, "doc-1".into(), 1).expect("hybrid accepted");
         assert!(!fields.is_empty());
     }
 
     #[test]
     fn set_text_value_persists_in_buffer_goes_dirty_and_strips_xfa() {
-        let _guard = crate::test_pdfium_guard();
         // Start from a hybrid (fixture + spliced /XFA) so we can assert the
         // strip, and write to a real temp file so we can assert disk is untouched.
         let base = std::fs::read(forms_fixture()).expect("read fixture");
@@ -1746,7 +1745,8 @@ mod tests {
         let tmp = std::env::temp_dir().join("tumbler_set_form_test.pdf");
         std::fs::write(&tmp, &hybrid).expect("write tmp");
         let path = tmp.to_string_lossy().into_owned();
-        let state = state_with_bytes(hybrid, &path);
+        let pdfium = crate::test_pdfium();
+        let state = state_with_bytes(pdfium.get(), hybrid, &path);
         let disk_before = std::fs::read(&tmp).expect("read disk");
 
         set_form_field_value_impl(&state, "doc-1".into(), "fullName".into(), "Ada Lovelace".into())
@@ -1776,9 +1776,9 @@ mod tests {
 
     #[test]
     fn set_checkbox_and_radio_update_value() {
-        let _guard = crate::test_pdfium_guard();
         let bytes = std::fs::read(forms_fixture()).expect("read fixture");
-        let state = state_with_bytes(bytes, "mem.pdf");
+        let pdfium = crate::test_pdfium();
+        let state = state_with_bytes(pdfium.get(), bytes, "mem.pdf");
 
         set_form_field_value_impl(&state, "doc-1".into(), "subscribe".into(), "Yes".into())
             .expect("set checkbox");
@@ -1795,11 +1795,11 @@ mod tests {
     /// exercises the `/P`-reference page-association fallback.
     #[test]
     fn f8946_hybrid_form_is_discovered() {
-        let _guard = crate::test_pdfium_guard();
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/forms/f8946.pdf");
         let bytes = std::fs::read(&path).expect("read f8946");
-        let state = state_with_bytes(bytes, "f8946.pdf");
+        let pdfium = crate::test_pdfium();
+        let state = state_with_bytes(pdfium.get(), bytes, "f8946.pdf");
         let total: usize = (1..=3)
             .map(|p| get_form_fields_impl(&state, "doc-1".into(), p).expect("fields").len())
             .sum();
@@ -1811,11 +1811,11 @@ mod tests {
     /// `max_len` on a genuine form, not just the synthetic fixture.
     #[test]
     fn f1040_has_comb_ssn_fields() {
-        let _guard = crate::test_pdfium_guard();
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/forms/f1040.pdf");
         let bytes = std::fs::read(&path).expect("read f1040");
-        let state = state_with_bytes(bytes, "f1040.pdf");
+        let pdfium = crate::test_pdfium();
+        let state = state_with_bytes(pdfium.get(), bytes, "f1040.pdf");
         let found = (1..=2)
             .flat_map(|p| get_form_fields_impl(&state, "doc-1".into(), p).unwrap_or_default())
             .any(|f| f.comb && f.max_len == Some(9));
@@ -1828,11 +1828,11 @@ mod tests {
     /// dropped the stale `/Prev`/`/XRefStm` on save.
     #[test]
     fn consecutive_edits_survive_reparse_on_pdf_with_prev_xref() {
-        let _guard = crate::test_pdfium_guard();
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/forms/f8946.pdf");
         let bytes = std::fs::read(&path).expect("read f8946");
-        let state = state_with_bytes(bytes, "f8946.pdf");
+        let pdfium = crate::test_pdfium();
+        let state = state_with_bytes(pdfium.get(), bytes, "f8946.pdf");
 
         let fid = "topmostSubform[0].Page1[0].phoneNumber[0]";
         set_form_field_value_impl(&state, "doc-1".into(), fid.into(), "555-1234".into())

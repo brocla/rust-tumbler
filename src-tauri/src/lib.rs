@@ -184,41 +184,80 @@ pub fn resolve_qpdf_path() -> String {
     "qpdf.dll".to_string()
 }
 
-/// A process-wide mutex that serializes tests which create or mutate pdfium
-/// documents. pdfium-render's `thread_safe` feature serializes individual
-/// API calls, but multi-step operations (create + copy-pages + save + reload)
-/// can interleave between threads in ways that trigger pdfium internal races.
+/// Exclusive access to the process-wide test `Pdfium` instance.
 ///
-/// **Every test that touches pdfium must hold this guard for its duration** —
-/// not just multi-step ones. The older "single reads are fine" rule left 47
-/// tests unguarded and the suite heap-corrupting under concurrency, which was
-/// masked by running everything with `--test-threads=1`. Holding it uniformly
-/// removed both the flag and the crash.
+/// pdfium-render's `thread_safe` feature serializes individual API calls, but
+/// multi-step operations (create + copy-pages + save + reload) interleave
+/// between threads in ways that trigger pdfium's internal races, surfacing as
+/// `STATUS_HEAP_CORRUPTION` — intermittently, and often at teardown, so a
+/// single green run proves nothing.
 ///
-/// It must be held by the `#[test]` itself. A guard taken inside a helper is
-/// released when the helper returns, before the test body runs.
+/// The lock is bundled with the instance rather than offered alongside it
+/// because the alternative did not work. A separate `test_pdfium_guard()` that
+/// tests were asked to remember left 47 of them unguarded (PR #109); the gap
+/// was invisible only because the whole suite ran with `--test-threads=1`.
+/// Here, holding the lock is the *only* way to obtain a `Pdfium`, so a test
+/// that forgets simply does not compile.
+///
+/// Access goes through [`Self::get`]. A `Deref` impl would be more ergonomic
+/// but hands back a borrow tied to the handle, and most pdfium calls produce
+/// `PdfDocument<'static>` — so it would compile for trivial uses and fail with
+/// lifetime errors for real ones. One accessor is easier to explain.
 #[cfg(test)]
-pub(crate) fn test_pdfium_guard() -> std::sync::MutexGuard<'static, ()> {
-    use std::sync::{Mutex, OnceLock};
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
+pub(crate) struct TestPdfium {
+    pdfium: &'static Pdfium,
+    _lock: std::sync::MutexGuard<'static, ()>,
 }
 
-/// Returns a process-wide `Pdfium` instance for use in tests.
-///
-/// pdfium-render's `Pdfium::bind_to_library` can only succeed once per
-/// process, so tests across multiple modules must share a single binding
-/// rather than each binding their own.
 #[cfg(test)]
-pub(crate) fn test_pdfium() -> &'static Pdfium {
-    use std::sync::OnceLock;
+impl TestPdfium {
+    /// The shared instance. Keep the handle bound for as long as anything
+    /// derived from this is alive — dropping it releases the lock.
+    pub(crate) fn get(&self) -> &'static Pdfium {
+        self.pdfium
+    }
+}
+
+/// Locks the process-wide `Pdfium` instance for the duration of a test.
+///
+/// `Pdfium::bind_to_library` can only succeed once per process, so every test
+/// shares one binding. The returned handle holds the lock until it drops —
+/// bind it to a named local (`let pdfium = test_pdfium();`), never to `_`,
+/// which would drop it immediately and release the lock.
+///
+/// # Call it once per test
+///
+/// The lock is **not reentrant**. Calling this twice while the first handle is
+/// still in scope deadlocks, and so does calling a helper that acquires it
+/// while holding one. That is the cost of the design: the old failure was an
+/// intermittent heap corruption that a green run could hide, and this one is a
+/// deterministic hang on the very first run. Loud beats silent, but it is
+/// still a trap worth knowing about.
+///
+/// So: helpers should take `&'static Pdfium` from the caller rather than
+/// acquire (most already receive `&AppState` and can use `state.pdfium`). The
+/// exception is a fully self-contained helper that acquires, does all its
+/// pdfium work, and returns plain data — `margins::tests::detect_bytes` is the
+/// one such case. Those are safe only while no caller holds a handle.
+#[cfg(test)]
+pub(crate) fn test_pdfium() -> TestPdfium {
+    use std::sync::{Mutex, OnceLock};
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     static PDFIUM: OnceLock<Pdfium> = OnceLock::new();
-    PDFIUM.get_or_init(|| {
+
+    // Taken before handing out the instance, and poison is ignored: a panicking
+    // test must not cascade into every later one failing to acquire.
+    let _lock = LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+
+    let pdfium = PDFIUM.get_or_init(|| {
         let bindings = Pdfium::bind_to_library(resolve_pdfium_path()).expect("bind pdfium");
         Pdfium::new(bindings)
-    })
+    });
+
+    TestPdfium { pdfium, _lock }
 }
 
 /// Path to the small checked-in PDF used by tests that need a real,

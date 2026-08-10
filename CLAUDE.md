@@ -253,13 +253,18 @@ Tests live alongside the components they test (`*.test.tsx`). Use `vi.mock` for 
 cd src-tauri
 cargo test
 ```
-**Any test that touches pdfium — directly via `test_pdfium()`, or through a helper that does — must start with `let _guard = crate::test_pdfium_guard();`.**
+**A test that needs pdfium calls `let pdfium = crate::test_pdfium();` — exactly once — and reaches the instance via `pdfium.get()`.**
 
-pdfium can only be bound once per process, so tests share a `test_pdfium()` singleton. pdfium-render's `thread_safe` feature serializes individual API calls, but multi-step sequences (create + edit + save + reload) interleave into pdfium's internal races, which surface as `STATUS_HEAP_CORRUPTION` — often at teardown, and intermittently, so a green run proves little. The guard is what prevents that, and it only works if *every* pdfium test holds it.
+pdfium can only be bound once per process, so tests share one instance. pdfium-render's `thread_safe` feature serializes individual API calls, but multi-step sequences (create + edit + save + reload) interleave into pdfium's internal races, surfacing as `STATUS_HEAP_CORRUPTION` — intermittently, and often at teardown, so a green run proves little.
 
-This used to be enforced by running the whole suite with `--test-threads=1`, with the guard applied case-by-case. That flag is no longer needed: the guard is now held uniformly, so pdfium tests serialize against each other while everything else runs in parallel (9.1s → 6.4s, verified over 18 consecutive runs at 16 and 32 threads).
+`test_pdfium()` returns a handle that **holds the lock and hands out the instance together**, so a test that forgets to lock cannot compile. That replaced a separate `test_pdfium_guard()` that tests were asked to remember; it left 47 of them unguarded, invisibly, because the suite ran with `--test-threads=1`. Plain `cargo test` is now correct: pdfium tests serialize against each other while everything else runs in parallel (9.1s → 5.7s).
 
-Note the guard must be held by the **test**, not by a helper — a guard taken inside a helper is released when the helper returns, before the test body does its pdfium work. Helpers like `open_fixture` and `saved_layer_loose_bounds` therefore document that their callers hold it.
+Two rules follow from the lock not being reentrant:
+
+- **Call `test_pdfium()` once per test.** A second call while the first handle is in scope deadlocks. So does calling a helper that acquires while you hold one.
+- **Helpers take `&'static Pdfium` from the caller, they don't acquire.** Most already receive `&AppState` and use `state.pdfium`. The one deliberate exception is a fully self-contained helper that acquires, does all its pdfium work and returns plain data (`margins::tests::detect_bytes`).
+
+Getting this wrong hangs the suite deterministically on the first run, rather than corrupting the heap intermittently on the fiftieth.
 
 The fixture PDF (`tests/fixtures/sample.pdf`) is a single 200×200 page with the text "Test Fixture" at 24pt, near the top-left. Many backend tests depend on this layout; don't modify it.
 

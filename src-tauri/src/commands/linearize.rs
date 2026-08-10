@@ -344,16 +344,15 @@ mod tests {
         std::env::temp_dir().join(name).to_string_lossy().into_owned()
     }
 
-    fn state_with_stub_linearizer() -> AppState {
-        let pdfium = crate::test_pdfium();
+    fn state_with_stub_linearizer(pdfium: &'static pdfium_render::prelude::Pdfium) -> AppState {
         AppState::new(pdfium, None).with_linearizer(std::sync::Arc::new(StubLinearizer))
     }
 
     /// StubLinearizer test — no DLL needed, always passes in CI.
     #[test]
     fn export_linearized_copy_writes_a_file() {
-        let _guard = crate::test_pdfium_guard();
-        let state = state_with_stub_linearizer();
+        let pdfium = crate::test_pdfium();
+        let state = state_with_stub_linearizer(pdfium.get());
         let src = crate::fixture_path();
         let entry = DocEntry::load(state.pdfium, &src.to_string_lossy(), None).expect("load");
         state.insert_document("doc1".to_string(), entry).expect("insert");
@@ -377,8 +376,8 @@ mod tests {
 
     #[test]
     fn export_linearized_copy_refuses_own_open_path() {
-        let _guard = crate::test_pdfium_guard();
-        let state = state_with_stub_linearizer();
+        let pdfium = crate::test_pdfium();
+        let state = state_with_stub_linearizer(pdfium.get());
         let path = tmp_path("tumbler_linearize_self.pdf");
         std::fs::copy(crate::fixture_path(), &path).expect("copy fixture");
         let entry = DocEntry::load(state.pdfium, &path, None).expect("load");
@@ -393,8 +392,8 @@ mod tests {
 
     #[test]
     fn export_linearized_copy_refuses_path_open_in_another_tab() {
-        let _guard = crate::test_pdfium_guard();
-        let state = state_with_stub_linearizer();
+        let pdfium = crate::test_pdfium();
+        let state = state_with_stub_linearizer(pdfium.get());
         let path_a = tmp_path("tumbler_linearize_conflict_a.pdf");
         let path_b = tmp_path("tumbler_linearize_conflict_b.pdf");
         std::fs::copy(crate::fixture_path(), &path_a).expect("copy fixture a");
@@ -433,9 +432,9 @@ mod tests {
     }
 
     fn state_with_failing_linearizer(
+        pdfium: &'static pdfium_render::prelude::Pdfium,
         panic: bool,
     ) -> (AppState, std::sync::Arc<FailingLinearizer>) {
-        let pdfium = crate::test_pdfium();
         let linearizer = std::sync::Arc::new(FailingLinearizer {
             src_seen: std::sync::Mutex::new(None),
             panic,
@@ -449,8 +448,8 @@ mod tests {
     /// reports an error.
     #[test]
     fn temp_copy_is_removed_when_linearize_fails() {
-        let _guard = crate::test_pdfium_guard();
-        let (state, linearizer) = state_with_failing_linearizer(false);
+        let pdfium = crate::test_pdfium();
+        let (state, linearizer) = state_with_failing_linearizer(pdfium.get(), false);
         let entry = DocEntry::load(state.pdfium, &crate::fixture_path().to_string_lossy(), None)
             .expect("load");
         state.insert_document("doc1".to_string(), entry).expect("insert");
@@ -468,8 +467,8 @@ mod tests {
     /// plaintext copy behind.
     #[test]
     fn temp_copy_is_removed_when_linearize_panics() {
-        let _guard = crate::test_pdfium_guard();
-        let (state, linearizer) = state_with_failing_linearizer(true);
+        let pdfium = crate::test_pdfium();
+        let (state, linearizer) = state_with_failing_linearizer(pdfium.get(), true);
         let entry = DocEntry::load(state.pdfium, &crate::fixture_path().to_string_lossy(), None)
             .expect("load");
         state.insert_document("doc1".to_string(), entry).expect("insert");
@@ -511,15 +510,15 @@ mod tests {
     #[test]
     #[ignore = "needs real qpdf.dll at src-tauri/resources/qpdf.dll"]
     fn linearized_output_has_linearized_marker() {
-        let _guard = crate::test_pdfium_guard();
-        let pdfium = crate::test_pdfium();
         let linearizer = QpdfLinearizer {
             dll_path: std::path::PathBuf::from("resources/qpdf.dll"),
         };
-        let state = AppState::new(pdfium, None).with_linearizer(std::sync::Arc::new(linearizer));
+        let pdfium = crate::test_pdfium();
+        let state =
+            AppState::new(pdfium.get(), None).with_linearizer(std::sync::Arc::new(linearizer));
 
         let src = crate::fixture_path();
-        let entry = DocEntry::load(pdfium, &src.to_string_lossy(), None).expect("load");
+        let entry = DocEntry::load(pdfium.get(), &src.to_string_lossy(), None).expect("load");
         state.insert_document("doc1".to_string(), entry).expect("insert");
 
         let dest = tmp_path("tumbler_linearized_real.pdf");
@@ -542,7 +541,7 @@ mod tests {
         assert!(buffer_is_linearized(&bytes), "prefix scan should also detect it");
 
         // pdfium must still be able to load the linearized output.
-        let reopened = pdfium.load_pdf_from_file(&dest, None).expect("pdfium should load linearized output");
+        let reopened = pdfium.get().load_pdf_from_file(&dest, None).expect("pdfium should load linearized output");
         assert_eq!(reopened.pages().len(), 1);
 
         std::fs::remove_file(&dest).ok();

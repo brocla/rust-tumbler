@@ -186,10 +186,9 @@ mod tests {
 
     /// AES-256 round trip of the exact pipeline Save uses: decrypt the
     /// encrypted fixture to plaintext, re-encrypt it, and confirm the result
-    /// opens (lopdf and pdfium) only with the same password.
+    /// opens (lopdf and pdfium.get()) only with the same password.
     #[test]
     fn decrypt_then_encrypt_round_trip_aes256() {
-        let _guard = crate::test_pdfium_guard();
         let encrypted = std::fs::read(crate::encrypted_fixture_path()).expect("read fixture");
 
         let (plaintext, permissions) =
@@ -206,10 +205,10 @@ mod tests {
         // pdfium (a fully independent implementation) must agree: rejected
         // without the password, opens with it.
         let pdfium = crate::test_pdfium();
-        assert!(pdfium
+        assert!(pdfium.get()
             .load_pdf_from_byte_vec(re_encrypted.clone(), None)
             .is_err());
-        let doc = pdfium
+        let doc = pdfium.get()
             .load_pdf_from_byte_vec(re_encrypted, Some(crate::ENCRYPTED_FIXTURE_PASSWORD))
             .expect("open re-encrypted with password");
         assert_eq!(doc.pages().len(), 1);
@@ -220,7 +219,6 @@ mod tests {
     /// the whole open path yields a plaintext, editable buffer.
     #[test]
     fn rc4_encrypted_file_opens_with_plaintext_buffer() {
-        let _guard = crate::test_pdfium_guard();
         let mut doc =
             lopdf::Document::load(crate::fixture_path()).expect("load plain fixture");
         // RC4 key derivation hashes the file ID; the plain fixture has none.
@@ -239,7 +237,7 @@ mod tests {
         doc.save(&path).expect("save rc4 file");
 
         let pdfium = crate::test_pdfium();
-        let entry = DocEntry::load(pdfium, &path, Some("rc4pw")).expect("open rc4 file");
+        let entry = DocEntry::load(pdfium.get(), &path, Some("rc4pw")).expect("open rc4 file");
         assert!(
             matches!(&entry.protection, Protection::Encrypted { password, .. } if password == "rc4pw"),
             "entry must be Encrypted with the validated password"
@@ -252,11 +250,10 @@ mod tests {
 
     #[test]
     fn remove_password_clears_protection_and_marks_dirty() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None);
+        let state = AppState::new(pdfium.get(), None);
         let path = crate::encrypted_fixture_path().to_string_lossy().into_owned();
-        let entry = DocEntry::load(pdfium, &path, Some(crate::ENCRYPTED_FIXTURE_PASSWORD))
+        let entry = DocEntry::load(pdfium.get(), &path, Some(crate::ENCRYPTED_FIXTURE_PASSWORD))
             .expect("open encrypted");
         state.insert_document("doc1".to_string(), entry).expect("insert");
 
@@ -270,11 +267,10 @@ mod tests {
 
     #[test]
     fn set_password_protects_document_and_marks_dirty() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None);
+        let state = AppState::new(pdfium.get(), None);
         let path = crate::fixture_path().to_string_lossy().into_owned();
-        let entry = DocEntry::load(pdfium, &path, None).expect("open");
+        let entry = DocEntry::load(pdfium.get(), &path, None).expect("open");
         state.insert_document("doc1".to_string(), entry).expect("insert");
 
         set_password_impl(&state, "doc1", "new-secret").expect("set password");
@@ -299,11 +295,10 @@ mod tests {
     /// permission bits.
     #[test]
     fn set_password_on_encrypted_document_changes_password() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None);
+        let state = AppState::new(pdfium.get(), None);
         let path = crate::encrypted_fixture_path().to_string_lossy().into_owned();
-        let entry = DocEntry::load(pdfium, &path, Some(crate::ENCRYPTED_FIXTURE_PASSWORD))
+        let entry = DocEntry::load(pdfium.get(), &path, Some(crate::ENCRYPTED_FIXTURE_PASSWORD))
             .expect("open encrypted");
         let original_permissions = match &entry.protection {
             Protection::Encrypted { permissions, .. } => *permissions,
@@ -327,11 +322,10 @@ mod tests {
 
     #[test]
     fn set_password_rejects_empty_password() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None);
+        let state = AppState::new(pdfium.get(), None);
         let path = crate::fixture_path().to_string_lossy().into_owned();
-        let entry = DocEntry::load(pdfium, &path, None).expect("open");
+        let entry = DocEntry::load(pdfium.get(), &path, None).expect("open");
         state.insert_document("doc1".to_string(), entry).expect("insert");
 
         let err = set_password_impl(&state, "doc1", "").expect_err("must reject");
@@ -351,11 +345,10 @@ mod tests {
     /// writes a file pdfium rejects without the password and opens with it.
     #[test]
     fn set_password_then_save_writes_encrypted_file() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None);
+        let state = AppState::new(pdfium.get(), None);
         let path = crate::fixture_path().to_string_lossy().into_owned();
-        let entry = DocEntry::load(pdfium, &path, None).expect("open");
+        let entry = DocEntry::load(pdfium.get(), &path, None).expect("open");
         state.insert_document("doc1".to_string(), entry).expect("insert");
 
         set_password_impl(&state, "doc1", "issue58-pw").expect("set password");
@@ -364,10 +357,10 @@ mod tests {
             .expect("save as");
 
         assert!(
-            pdfium.load_pdf_from_file(&dest, None).is_err(),
+            pdfium.get().load_pdf_from_file(&dest, None).is_err(),
             "saved file must require the password"
         );
-        let doc = pdfium
+        let doc = pdfium.get()
             .load_pdf_from_file(&dest, Some("issue58-pw"))
             .expect("open with the new password");
         assert_eq!(doc.pages().len(), 1);
@@ -377,11 +370,10 @@ mod tests {
 
     #[test]
     fn remove_password_on_unencrypted_document_is_error() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None);
+        let state = AppState::new(pdfium.get(), None);
         let path = crate::fixture_path().to_string_lossy().into_owned();
-        let entry = DocEntry::load(pdfium, &path, None).expect("open");
+        let entry = DocEntry::load(pdfium.get(), &path, None).expect("open");
         state.insert_document("doc1".to_string(), entry).expect("insert");
 
         let err = remove_password_impl(&state, "doc1").expect_err("must reject");

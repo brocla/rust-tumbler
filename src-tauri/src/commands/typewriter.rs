@@ -823,8 +823,7 @@ mod tests {
 
         // pdfium can still open the edited bytes.
         let pdfium = crate::test_pdfium();
-        let _guard = crate::test_pdfium_guard();
-        pdfium
+        pdfium.get()
             .load_pdf_from_byte_vec(bytes.clone(), None)
             .expect("pdfium opens edited bytes");
 
@@ -848,8 +847,7 @@ mod tests {
             .expect("some bytes");
 
         let pdfium = crate::test_pdfium();
-        let _guard = crate::test_pdfium_guard();
-        let doc = pdfium
+        let doc = pdfium.get()
             .load_pdf_from_byte_vec(bytes, None)
             .expect("pdfium opens edited bytes");
         let page = doc.pages().get(0).expect("page 0");
@@ -867,8 +865,7 @@ mod tests {
             .expect("bytes");
 
         let pdfium = crate::test_pdfium();
-        let _guard = crate::test_pdfium_guard();
-        let doc = pdfium.load_pdf_from_byte_vec(cleared, None).expect("open");
+        let doc = pdfium.get().load_pdf_from_byte_vec(cleared, None).expect("open");
         let page = doc.pages().get(0).expect("page 0");
         let text = page.text().expect("page text").all();
         assert!(!text.contains("Hello world"), "note text should be gone: {text:?}");

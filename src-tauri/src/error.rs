@@ -124,11 +124,10 @@ mod tests {
     /// multiple lines, which would look broken in a dialog/log line).
     #[test]
     fn pdfium_variant_includes_message_and_single_line_cause() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
         let missing = std::env::temp_dir().join("tumbler_does_not_exist.pdf");
 
-        let cause = pdfium
+        let cause = pdfium.get()
             .load_pdf_from_file(missing.to_str().unwrap(), None)
             .expect_err("expected pdfium error");
 
@@ -145,12 +144,11 @@ mod tests {
     /// `PdfiumLibraryInternalError(...)` wrapper.
     #[test]
     fn describe_pdfium_error_unwraps_internal_error_to_inner_value() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
         let garbage = std::env::temp_dir().join("tumbler_garbage.pdf");
         std::fs::write(&garbage, b"not a pdf").expect("write garbage file");
 
-        let cause = pdfium
+        let cause = pdfium.get()
             .load_pdf_from_file(garbage.to_str().unwrap(), None)
             .expect_err("expected pdfium error");
 

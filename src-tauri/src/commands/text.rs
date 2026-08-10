@@ -622,8 +622,7 @@ mod tests {
     /// Loads the checked-in fixture into `state` under `doc_id`.
     fn open_fixture(state: &AppState, doc_id: &str) {
         let src = crate::fixture_path();
-        let pdfium = crate::test_pdfium();
-        let entry = DocEntry::load(pdfium, &src.to_string_lossy(), None).expect("load pdf");
+                let entry = DocEntry::load(state.pdfium, &src.to_string_lossy(), None).expect("load pdf");
         state.insert_document(doc_id.to_string(), entry).expect("insert");
     }
 
@@ -633,9 +632,8 @@ mod tests {
     /// (PDF bottom-left origin -> top-left origin used by the UI).
     #[test]
     fn extract_page_text_returns_single_run_with_position() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None);
+        let state = AppState::new(pdfium.get(), None);
         open_fixture(&state, "doc1");
 
         let items = extract_page_text_impl(&state, "doc1".to_string(), 1).expect("extract");
@@ -659,10 +657,9 @@ mod tests {
     /// data and cannot be checked in; this pins the helper's basic contract.)
     #[test]
     fn page_text_in_document_order_reads_fixture_text() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
         let src = crate::fixture_path();
-        let entry = DocEntry::load(pdfium, &src.to_string_lossy(), None).expect("load pdf");
+        let entry = DocEntry::load(pdfium.get(), &src.to_string_lossy(), None).expect("load pdf");
         let page = entry.document.pages().get(0).expect("page 1");
         let text = page.text().expect("text");
 
@@ -671,9 +668,8 @@ mod tests {
 
     #[test]
     fn extract_page_text_for_missing_page_is_error() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None);
+        let state = AppState::new(pdfium.get(), None);
         open_fixture(&state, "doc1");
 
         match extract_page_text_impl(&state, "doc1".to_string(), 99) {
@@ -688,9 +684,8 @@ mod tests {
     /// `extract_page_text`.
     #[test]
     fn search_document_finds_known_word_with_nonempty_rect() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None);
+        let state = AppState::new(pdfium.get(), None);
         open_fixture(&state, "doc1");
 
         let results = search_document_impl(
@@ -715,9 +710,8 @@ mod tests {
 
     #[test]
     fn search_document_returns_empty_for_word_not_present() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None);
+        let state = AppState::new(pdfium.get(), None);
         open_fixture(&state, "doc1");
 
         let results = search_document_impl(
@@ -735,9 +729,8 @@ mod tests {
 
     #[test]
     fn search_document_returns_empty_for_empty_query() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None);
+        let state = AppState::new(pdfium.get(), None);
         open_fixture(&state, "doc1");
 
         let results = search_document_impl(
@@ -759,9 +752,8 @@ mod tests {
     /// forcing would change nothing they can see.
     #[test]
     fn extract_page_text_prefers_ocr_words_over_native_text_when_forced() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None);
+        let state = AppState::new(pdfium.get(), None);
         open_fixture(&state, "doc1");
 
         // Stand-in for a junk layer's replacement: the fixture's page has real
@@ -785,9 +777,8 @@ mod tests {
     /// hits from the very layer the user rejected.
     #[test]
     fn search_document_uses_ocr_words_over_native_text_when_forced() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None);
+        let state = AppState::new(pdfium.get(), None);
         open_fixture(&state, "doc1");
         state.set_ocr_words("doc1", 1, vec![ocr_word("Scanned")]);
 
@@ -836,9 +827,8 @@ mod tests {
     /// cached OCR word for that page makes it a hit.
     #[test]
     fn search_document_falls_back_to_ocr_cache() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None);
+        let state = AppState::new(pdfium.get(), None);
         open_fixture(&state, "doc1");
         state.set_ocr_words("doc1", 1, vec![ocr_word("Banana")]);
 
@@ -864,11 +854,10 @@ mod tests {
     /// `extract_page_text` falls back to the cached OCR words.
     #[test]
     fn extract_page_text_falls_back_to_ocr_cache_on_blank_page() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None);
+        let state = AppState::new(pdfium.get(), None);
 
-        let mut doc = pdfium.create_new_pdf().expect("create pdf");
+        let mut doc = pdfium.get().create_new_pdf().expect("create pdf");
         doc.pages_mut()
             .create_page_at_index(
                 PdfPagePaperSize::new_custom(PdfPoints::new(200.0), PdfPoints::new(200.0)),
@@ -918,8 +907,7 @@ mod tests {
 
     /// Inserts an `n`-page blank document (no text layer) under `doc_id`.
     fn open_blank_doc(state: &AppState, doc_id: &str, pages: u32) {
-        let pdfium = crate::test_pdfium();
-        let mut doc = pdfium.create_new_pdf().expect("create pdf");
+                let mut doc = state.pdfium.create_new_pdf().expect("create pdf");
         for i in 0..pages {
             doc.pages_mut()
                 .create_page_at_index(
@@ -954,9 +942,8 @@ mod tests {
 
     #[test]
     fn export_text_uses_native_text_without_ocr() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None);
+        let state = AppState::new(pdfium.get(), None);
         open_fixture(&state, "doc1");
 
         let entry = state.get_document("doc1").expect("get document");
@@ -987,9 +974,8 @@ mod tests {
 
     #[test]
     fn export_text_ocr_fills_blank_page_and_populates_cache() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None);
+        let state = AppState::new(pdfium.get(), None);
         open_blank_doc(&state, "blank", 1);
 
         let entry = state.get_document("blank").expect("get document");
@@ -1028,9 +1014,8 @@ mod tests {
 
     #[test]
     fn export_text_without_ocr_keeps_placeholder_on_blank_page() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None);
+        let state = AppState::new(pdfium.get(), None);
         open_blank_doc(&state, "blank", 1);
 
         let entry = state.get_document("blank").expect("get document");
@@ -1057,9 +1042,8 @@ mod tests {
 
     #[test]
     fn export_text_cancellation_stops_before_writing() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None);
+        let state = AppState::new(pdfium.get(), None);
         open_blank_doc(&state, "blank", 3);
 
         let entry = state.get_document("blank").expect("get document");
@@ -1092,9 +1076,8 @@ mod tests {
     /// placeholder. This is what lets the Export prompt be skipped afterward.
     #[test]
     fn export_text_uses_cached_ocr_even_without_use_ocr() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None);
+        let state = AppState::new(pdfium.get(), None);
         open_blank_doc(&state, "blank", 1);
         // Simulate a prior Make Searchable having cached this page.
         state.set_ocr_words("blank", 1, vec![ocr_word("Scanned")]);
@@ -1129,9 +1112,8 @@ mod tests {
     /// Default (case-insensitive) search finds "Test Fixture" via lowercase query.
     #[test]
     fn test_search_case_insensitive_default() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None);
+        let state = AppState::new(pdfium.get(), None);
         open_fixture(&state, "doc1");
 
         let results = search_document_impl(
@@ -1150,9 +1132,8 @@ mod tests {
     /// With match_case=true the lowercase query must not match "Test Fixture".
     #[test]
     fn test_search_match_case_rejects_wrong_case() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None);
+        let state = AppState::new(pdfium.get(), None);
         open_fixture(&state, "doc1");
 
         let results = search_document_impl(
@@ -1174,9 +1155,8 @@ mod tests {
     /// With match_case=true the correctly-cased query must match.
     #[test]
     fn test_search_match_case_accepts_right_case() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None);
+        let state = AppState::new(pdfium.get(), None);
         open_fixture(&state, "doc1");
 
         let results = search_document_impl(
@@ -1195,9 +1175,8 @@ mod tests {
     /// With whole_word=true a prefix substring of a word must not match.
     #[test]
     fn test_search_whole_word_rejects_substring() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None);
+        let state = AppState::new(pdfium.get(), None);
         open_fixture(&state, "doc1");
 
         let results = search_document_impl(
@@ -1219,9 +1198,8 @@ mod tests {
     /// A regex pattern matching the fixture text must return one result.
     #[test]
     fn test_search_regex_finds_pattern() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None);
+        let state = AppState::new(pdfium.get(), None);
         open_fixture(&state, "doc1");
 
         let results = search_document_impl(
@@ -1241,9 +1219,8 @@ mod tests {
     /// returning empty results.
     #[test]
     fn test_search_invalid_regex_returns_err() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None);
+        let state = AppState::new(pdfium.get(), None);
         open_fixture(&state, "doc1");
 
         let result = search_document_impl(
@@ -1265,9 +1242,8 @@ mod tests {
     /// once per regex match without deduplication).
     #[test]
     fn test_search_regex_dedup_prevents_duplicate_rects() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None);
+        let state = AppState::new(pdfium.get(), None);
         open_fixture(&state, "doc1");
 
         // "e" (case-sensitive) matches twice in "Test Fixture" (positions 1 and 11).
@@ -1294,9 +1270,8 @@ mod tests {
     /// spanning multiple words (e.g. `Hello\s+World`) match correctly.
     #[test]
     fn test_search_ocr_regex_matches_across_word_tokens() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None);
+        let state = AppState::new(pdfium.get(), None);
         open_fixture(&state, "doc1");
         // "Hello" and "World" are not in the native fixture text, so pdfium
         // returns no hits and the OCR fallback runs.
@@ -1329,9 +1304,8 @@ mod tests {
     /// with the same characters.
     #[test]
     fn test_search_ocr_whole_word_matches_exact_token() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None);
+        let state = AppState::new(pdfium.get(), None);
         open_fixture(&state, "doc1");
 
         // Use words that are absent from the pdfium fixture ("Test Fixture")
@@ -1371,9 +1345,8 @@ mod tests {
 
     #[test]
     fn count_pages_without_text_counts_only_uncovered_pages() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None);
+        let state = AppState::new(pdfium.get(), None);
         open_fixture(&state, "text");
         open_blank_doc(&state, "blank", 1);
 

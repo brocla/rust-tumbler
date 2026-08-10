@@ -389,7 +389,6 @@ mod tests {
     /// pdfium can still open the edited bytes and reads back the new values.
     #[test]
     fn write_metadata_round_trip_with_pdfium() {
-        let _guard = crate::test_pdfium_guard();
         let bytes = std::fs::read(crate::fixture_path()).expect("read fixture");
 
         let update = MetadataUpdate {
@@ -403,7 +402,7 @@ mod tests {
         let edited = write_metadata(&bytes, &update).expect("write_metadata");
 
         let pdfium = crate::test_pdfium();
-        let doc = pdfium
+        let doc = pdfium.get()
             .load_pdf_from_byte_vec(edited, None)
             .expect("pdfium reload");
         let meta = doc.metadata();
@@ -422,7 +421,6 @@ mod tests {
     /// refreshed) and the file on disk stays untouched until an explicit save.
     #[test]
     fn set_metadata_returns_new_values_and_reloads_document_in_place() {
-        let _guard = crate::test_pdfium_guard();
         let src = crate::fixture_path();
 
         let tmp = std::env::temp_dir().join("tumbler_set_metadata_test.pdf");
@@ -430,9 +428,9 @@ mod tests {
         let file_path = tmp.to_string_lossy().into_owned();
 
         let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None);
+        let state = AppState::new(pdfium.get(), None);
 
-        let document = pdfium
+        let document = pdfium.get()
             .load_pdf_from_file(&file_path, None)
             .expect("load pdf");
         let original_meta = document.metadata();
@@ -514,10 +512,9 @@ mod tests {
 
     /// Save's stamp sets `/ModDate` and `/Producer` but never adds a
     /// `/CreationDate` — Tumbler doesn't author documents, so a blank creation
-    /// date stays blank. The result still opens in pdfium.
+    /// date stays blank. The result still opens in pdfium.get().
     #[test]
     fn stamp_save_metadata_sets_moddate_and_producer_without_adding_creationdate() {
-        let _guard = crate::test_pdfium_guard();
         let bytes = std::fs::read(crate::fixture_path()).expect("read fixture");
 
         let stamped = stamp_save_metadata(&bytes).expect("stamp");
@@ -527,7 +524,7 @@ mod tests {
         assert!(mod_date.starts_with("D:"), "ModDate not stamped: {mod_date}");
 
         let pdfium = crate::test_pdfium();
-        let doc = pdfium
+        let doc = pdfium.get()
             .load_pdf_from_byte_vec(stamped, None)
             .expect("pdfium reload");
         let meta = doc.metadata();
@@ -548,7 +545,6 @@ mod tests {
     /// the creation date, whether the document has one or not.
     #[test]
     fn stamp_save_metadata_preserves_existing_creationdate() {
-        let _guard = crate::test_pdfium_guard();
         let bytes = std::fs::read(crate::fixture_path()).expect("read fixture");
         // Seed a known CreationDate first.
         let mut doc = lopdf::Document::load_mem(&bytes).expect("load");
@@ -579,7 +575,7 @@ mod tests {
         let stamped = stamp_save_metadata(&seeded).expect("stamp");
 
         let pdfium = crate::test_pdfium();
-        let reloaded = pdfium
+        let reloaded = pdfium.get()
             .load_pdf_from_byte_vec(stamped, None)
             .expect("pdfium reload");
         assert_eq!(
@@ -593,7 +589,6 @@ mod tests {
     /// `write_metadata` (the stale-xref caveat applies to both).
     #[test]
     fn stamp_save_metadata_survives_reparse_on_pdf_with_prev_xref() {
-        let _guard = crate::test_pdfium_guard();
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/forms/f8946.pdf");
         let bytes = std::fs::read(&path).expect("read f8946");
@@ -602,7 +597,7 @@ mod tests {
         let twice = stamp_save_metadata(&once).expect("second stamp must reparse");
 
         let pdfium = crate::test_pdfium();
-        let doc = pdfium
+        let doc = pdfium.get()
             .load_pdf_from_byte_vec(twice, None)
             .expect("pdfium reload");
         assert_eq!(
@@ -617,7 +612,6 @@ mod tests {
     /// didn't until `write_metadata` dropped the stale `/Prev`/`/XRefStm`.
     #[test]
     fn consecutive_metadata_edits_survive_reparse_on_pdf_with_prev_xref() {
-        let _guard = crate::test_pdfium_guard();
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/forms/f8946.pdf");
         let bytes = std::fs::read(&path).expect("read f8946");
@@ -636,7 +630,7 @@ mod tests {
         let twice = write_metadata(&once, &update("Second")).expect("second write must reparse");
 
         let pdfium = crate::test_pdfium();
-        let doc = pdfium
+        let doc = pdfium.get()
             .load_pdf_from_byte_vec(twice, None)
             .expect("pdfium reload");
         assert_eq!(

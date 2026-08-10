@@ -507,24 +507,23 @@ mod tests {
     /// while sizing rotated pages wrongly in the viewer.
     #[test]
     fn page_sizes_agrees_with_loaded_pages_under_rotation() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
 
         // Third page is 400x200 — deliberately non-square, so a swap shows up.
-        let doc = make_multi_page_doc(pdfium);
+        let doc = make_multi_page_doc(pdfium.get());
         let path = tmp_path("tumbler_rotated_sizes.pdf");
         save_doc(&doc, &path);
         drop(doc);
 
         let bytes = std::fs::read(&path).expect("read");
-        let doc = pdfium.load_pdf_from_byte_vec(bytes, None).expect("load");
+        let doc = pdfium.get().load_pdf_from_byte_vec(bytes, None).expect("load");
         let mut page = doc.pages().get(2).expect("page 3");
         page.set_rotation(PdfPageRenderRotation::Degrees90);
         drop(page);
         let rotated = doc.save_to_bytes().expect("save");
         drop(doc);
 
-        let doc = pdfium.load_pdf_from_byte_vec(rotated, None).expect("reload");
+        let doc = pdfium.get().load_pdf_from_byte_vec(rotated, None).expect("reload");
         let info = page_info_from_doc(&doc).expect("page info");
 
         // Loading each page is the reference implementation this replaced.
@@ -552,10 +551,9 @@ mod tests {
     /// fixture used elsewhere can't catch an ordering slip or an off-by-one.
     #[test]
     fn page_info_from_doc_reports_every_page_in_order() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
 
-        let doc = make_multi_page_doc(pdfium);
+        let doc = make_multi_page_doc(pdfium.get());
         let info = page_info_from_doc(&doc).expect("page info");
 
         assert_eq!(info.page_count, 3);
@@ -566,11 +564,10 @@ mod tests {
 
     #[test]
     fn delete_page_reduces_count_and_preserves_others() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None);
+        let state = AppState::new(pdfium.get(), None);
 
-        let doc = make_multi_page_doc(pdfium);
+        let doc = make_multi_page_doc(pdfium.get());
         let path = tmp_path("tumbler_delete_test.pdf");
         save_doc(&doc, &path);
         open_doc_in_state(&state, "doc1", doc, &path);
@@ -599,11 +596,10 @@ mod tests {
 
     #[test]
     fn delete_pages_rejects_all_pages() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None);
+        let state = AppState::new(pdfium.get(), None);
 
-        let doc = make_multi_page_doc(pdfium);
+        let doc = make_multi_page_doc(pdfium.get());
         let path = tmp_path("tumbler_delete_all_test.pdf");
         save_doc(&doc, &path);
         open_doc_in_state(&state, "doc1", doc, &path);
@@ -620,11 +616,10 @@ mod tests {
 
     #[test]
     fn reorder_pages_changes_order() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None);
+        let state = AppState::new(pdfium.get(), None);
 
-        let doc = make_multi_page_doc(pdfium);
+        let doc = make_multi_page_doc(pdfium.get());
         let path = tmp_path("tumbler_reorder_test.pdf");
         save_doc(&doc, &path);
         open_doc_in_state(&state, "doc1", doc, &path);
@@ -648,11 +643,10 @@ mod tests {
 
     #[test]
     fn rotate_pages_sets_rotation() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None);
+        let state = AppState::new(pdfium.get(), None);
 
-        let doc = make_multi_page_doc(pdfium);
+        let doc = make_multi_page_doc(pdfium.get());
         let path = tmp_path("tumbler_rotate_test.pdf");
         save_doc(&doc, &path);
         open_doc_in_state(&state, "doc1", doc, &path);
@@ -672,11 +666,10 @@ mod tests {
 
     #[test]
     fn split_document_creates_page_range() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None);
+        let state = AppState::new(pdfium.get(), None);
 
-        let doc = make_multi_page_doc(pdfium);
+        let doc = make_multi_page_doc(pdfium.get());
         let src_path = tmp_path("tumbler_split_src.pdf");
         let dest_path = tmp_path("tumbler_split_dest.pdf");
         save_doc(&doc, &src_path);
@@ -685,7 +678,7 @@ mod tests {
         split_document_impl(&state, "doc1".to_string(), 2, 3, dest_path.clone())
             .expect("split pages 2-3");
 
-        let split_doc = pdfium
+        let split_doc = pdfium.get()
             .load_pdf_from_file(&dest_path, None)
             .expect("load split doc");
         assert_eq!(split_doc.pages().len(), 2);
@@ -699,16 +692,15 @@ mod tests {
 
     #[test]
     fn merge_document_appends_pages() {
-        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
-        let state = AppState::new(pdfium, None);
+        let state = AppState::new(pdfium.get(), None);
 
-        let doc = make_multi_page_doc(pdfium); // 3 pages
+        let doc = make_multi_page_doc(pdfium.get()); // 3 pages
         let base_path = tmp_path("tumbler_merge_base.pdf");
         save_doc(&doc, &base_path);
         open_doc_in_state(&state, "doc1", doc, &base_path);
 
-        let mut src = pdfium.create_new_pdf().expect("create src");
+        let mut src = pdfium.get().create_new_pdf().expect("create src");
         src.pages_mut()
             .create_page_at_index(
                 PdfPagePaperSize::new_custom(PdfPoints::new(100.0), PdfPoints::new(100.0)),
