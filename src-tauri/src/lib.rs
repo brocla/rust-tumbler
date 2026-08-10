@@ -188,8 +188,15 @@ pub fn resolve_qpdf_path() -> String {
 /// documents. pdfium-render's `thread_safe` feature serializes individual
 /// API calls, but multi-step operations (create + copy-pages + save + reload)
 /// can interleave between threads in ways that trigger pdfium internal races.
-/// Tests that do more than a single read should hold this guard for their
-/// duration.
+///
+/// **Every test that touches pdfium must hold this guard for its duration** —
+/// not just multi-step ones. The older "single reads are fine" rule left 47
+/// tests unguarded and the suite heap-corrupting under concurrency, which was
+/// masked by running everything with `--test-threads=1`. Holding it uniformly
+/// removed both the flag and the crash.
+///
+/// It must be held by the `#[test]` itself. A guard taken inside a helper is
+/// released when the helper returns, before the test body runs.
 #[cfg(test)]
 pub(crate) fn test_pdfium_guard() -> std::sync::MutexGuard<'static, ()> {
     use std::sync::{Mutex, OnceLock};

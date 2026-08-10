@@ -557,6 +557,7 @@ mod tests {
 
     #[test]
     fn cancel_print_job_sets_token_to_true() {
+        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
         let state = AppState::new(pdfium, None);
         let token = Arc::new(AtomicBool::new(false));
@@ -567,6 +568,7 @@ mod tests {
 
     #[test]
     fn take_print_job_removes_token_from_state() {
+        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
         let state = AppState::new(pdfium, None);
         let token = Arc::new(AtomicBool::new(false));
@@ -601,6 +603,7 @@ mod tests {
     /// removal.
     #[test]
     fn document_map_get_insert_remove() {
+        let _guard = crate::test_pdfium_guard();
         let src = crate::fixture_path();
 
         let pdfium = crate::test_pdfium();
@@ -717,6 +720,7 @@ mod tests {
     /// `DocEntry::load` seeds the buffer with the file's bytes and starts clean.
     #[test]
     fn doc_entry_load_seeds_buffer_from_file_and_is_clean() {
+        let _guard = crate::test_pdfium_guard();
         let src = crate::fixture_path();
         let pdfium = crate::test_pdfium();
 
@@ -772,6 +776,7 @@ mod tests {
     /// accessible on the main thread.
     #[test]
     fn locking_one_document_does_not_block_access_to_another() {
+        let _guard = crate::test_pdfium_guard();
         let src = crate::fixture_path();
         let pdfium = crate::test_pdfium();
         let state = AppState::new(pdfium, None);

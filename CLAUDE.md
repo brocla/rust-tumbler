@@ -251,9 +251,15 @@ Tests live alongside the components they test (`*.test.tsx`). Use `vi.mock` for 
 ### Backend
 ```sh
 cd src-tauri
-cargo test -- --test-threads=1   # serial required; see note below
+cargo test
 ```
-Tests use a shared `test_pdfium()` singleton (pdfium can only be bound once per process). Multi-step pdfium operations (create + edit + save) need the `test_pdfium_guard()` mutex to prevent races. The test teardown occasionally crashes under high concurrency — always run with `--test-threads=1`.
+**Any test that touches pdfium — directly via `test_pdfium()`, or through a helper that does — must start with `let _guard = crate::test_pdfium_guard();`.**
+
+pdfium can only be bound once per process, so tests share a `test_pdfium()` singleton. pdfium-render's `thread_safe` feature serializes individual API calls, but multi-step sequences (create + edit + save + reload) interleave into pdfium's internal races, which surface as `STATUS_HEAP_CORRUPTION` — often at teardown, and intermittently, so a green run proves little. The guard is what prevents that, and it only works if *every* pdfium test holds it.
+
+This used to be enforced by running the whole suite with `--test-threads=1`, with the guard applied case-by-case. That flag is no longer needed: the guard is now held uniformly, so pdfium tests serialize against each other while everything else runs in parallel (9.1s → 6.4s, verified over 18 consecutive runs at 16 and 32 threads).
+
+Note the guard must be held by the **test**, not by a helper — a guard taken inside a helper is released when the helper returns, before the test body does its pdfium work. Helpers like `open_fixture` and `saved_layer_loose_bounds` therefore document that their callers hold it.
 
 The fixture PDF (`tests/fixtures/sample.pdf`) is a single 200×200 page with the text "Test Fixture" at 24pt, near the top-left. Many backend tests depend on this layout; don't modify it.
 

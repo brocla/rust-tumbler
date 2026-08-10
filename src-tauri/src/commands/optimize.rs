@@ -1476,6 +1476,7 @@ mod tests {
     /// (the command applies them to the buffer via `set_buffer_and_refresh`).
     #[test]
     fn pipeline_records_steps_and_returns_valid_output() {
+        let _guard = crate::test_pdfium_guard();
         let pdf_bytes = std::fs::read(crate::fixture_path()).expect("read fixture");
 
         let steps = vec![

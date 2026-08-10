@@ -87,6 +87,7 @@ mod tests {
     /// sized `width * height * 4` for the resulting (square) bitmap.
     #[test]
     fn render_page_produces_rgba_buffer_of_expected_size() {
+        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
         let state = AppState::new(pdfium, None);
         open_fixture(&state, "doc1");
@@ -99,6 +100,7 @@ mod tests {
     /// proportionally (the fixture page is square, so width == height).
     #[test]
     fn render_page_scales_buffer_with_target_width() {
+        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
         let state = AppState::new(pdfium, None);
         open_fixture(&state, "doc1");
@@ -109,6 +111,7 @@ mod tests {
 
     #[test]
     fn render_page_for_missing_page_is_error() {
+        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
         let state = AppState::new(pdfium, None);
         open_fixture(&state, "doc1");
