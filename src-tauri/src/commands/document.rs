@@ -111,6 +111,7 @@ mod tests {
     /// the document in `state` under the returned `doc_id`.
     #[test]
     fn open_document_loads_fixture_with_page_dimensions() {
+        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
         let state = AppState::new(pdfium, None);
         let src = crate::fixture_path();
@@ -249,6 +250,7 @@ mod tests {
     /// An unencrypted document reports `encrypted == false`.
     #[test]
     fn open_document_unencrypted_is_not_flagged_encrypted() {
+        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
         let state = AppState::new(pdfium, None);
         let src = crate::fixture_path().to_string_lossy().into_owned();
@@ -259,6 +261,7 @@ mod tests {
 
     #[test]
     fn open_document_for_missing_file_is_error() {
+        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
         let state = AppState::new(pdfium, None);
 

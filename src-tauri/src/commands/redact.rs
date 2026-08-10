@@ -2606,6 +2606,7 @@ mod tests {
     /// length — the literal "attacker removes the incremental update" move.
     #[test]
     fn naive_incremental_cover_leaves_original_revision_recoverable() {
+        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
         let base = text_pdf_bytes(&["ZANZIBAR original"]);
         let (two_revision, split_at) = stack_incremental_revision(&base, "[REDACTED]");

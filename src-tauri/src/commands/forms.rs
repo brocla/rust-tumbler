@@ -1392,6 +1392,7 @@ mod tests {
 
     #[test]
     fn discovers_text_styling_from_da_and_q() {
+        let _guard = crate::test_pdfium_guard();
         let bytes = std::fs::read(styling_fixture()).expect("read styling fixture");
         let state = state_with_bytes(bytes, "mem.pdf");
         let fields = get_form_fields_impl(&state, "doc-1".into(), 1).expect("fields");
@@ -1416,6 +1417,7 @@ mod tests {
 
     #[test]
     fn discovers_signature_field() {
+        let _guard = crate::test_pdfium_guard();
         let bytes = std::fs::read(signature_fixture()).expect("read sig fixture");
         let state = state_with_bytes(bytes, "mem.pdf");
         let fields = get_form_fields_impl(&state, "doc-1".into(), 1).expect("fields");
@@ -1513,6 +1515,7 @@ mod tests {
 
     #[test]
     fn discovers_reset_and_unsupported_buttons() {
+        let _guard = crate::test_pdfium_guard();
         let bytes = std::fs::read(reset_fixture()).expect("read reset fixture");
         let state = state_with_bytes(bytes, "mem.pdf");
         let fields = get_form_fields_impl(&state, "doc-1".into(), 1).expect("fields");
@@ -1575,6 +1578,7 @@ mod tests {
 
     #[test]
     fn reset_scope_rejects_non_reset_button() {
+        let _guard = crate::test_pdfium_guard();
         let bytes = std::fs::read(reset_fixture()).expect("read reset fixture");
         let state = state_with_bytes(bytes, "mem.pdf");
         // jsBtn has a JavaScript action, not ResetForm.
@@ -1584,6 +1588,7 @@ mod tests {
 
     #[test]
     fn document_has_form_detects_forms() {
+        let _guard = crate::test_pdfium_guard();
         let with = std::fs::read(reset_fixture()).expect("read reset fixture");
         let state = state_with_bytes(with, "mem.pdf");
         assert!(document_has_form_impl(&state, "doc-1".into()).unwrap());
@@ -1594,6 +1599,7 @@ mod tests {
     /// but Tumbler can't run it) rather than being silently dropped.
     #[test]
     fn app117217_clear_button_is_unsupported() {
+        let _guard = crate::test_pdfium_guard();
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/forms/APP117217-06-01.pdf");
         let bytes = std::fs::read(&path).expect("read APP117217");
@@ -1642,6 +1648,7 @@ mod tests {
 
     #[test]
     fn discovers_every_field_type_on_the_fixture() {
+        let _guard = crate::test_pdfium_guard();
         let bytes = std::fs::read(forms_fixture()).expect("read fixture");
         let state = state_with_bytes(bytes, "mem.pdf");
 
@@ -1685,6 +1692,7 @@ mod tests {
 
     #[test]
     fn field_rect_is_top_left_origin() {
+        let _guard = crate::test_pdfium_guard();
         let bytes = std::fs::read(forms_fixture()).expect("read fixture");
         let state = state_with_bytes(bytes, "mem.pdf");
         let fields = get_form_fields_impl(&state, "doc-1".into(), 1).expect("fields");
@@ -1698,6 +1706,7 @@ mod tests {
 
     #[test]
     fn xfa_only_form_is_rejected_but_hybrid_is_accepted() {
+        let _guard = crate::test_pdfium_guard();
         // XFA present, no /Fields → dynamic XFA, unsupported.
         let xfa_only = build_form_pdf(Vec::new(), true);
         let state = state_with_bytes(xfa_only, "xfa.pdf");
@@ -1786,6 +1795,7 @@ mod tests {
     /// exercises the `/P`-reference page-association fallback.
     #[test]
     fn f8946_hybrid_form_is_discovered() {
+        let _guard = crate::test_pdfium_guard();
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/forms/f8946.pdf");
         let bytes = std::fs::read(&path).expect("read f8946");
@@ -1801,6 +1811,7 @@ mod tests {
     /// `max_len` on a genuine form, not just the synthetic fixture.
     #[test]
     fn f1040_has_comb_ssn_fields() {
+        let _guard = crate::test_pdfium_guard();
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/forms/f1040.pdf");
         let bytes = std::fs::read(&path).expect("read f1040");

@@ -671,6 +671,7 @@ mod tests {
 
     #[test]
     fn extract_page_text_for_missing_page_is_error() {
+        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
         let state = AppState::new(pdfium, None);
         open_fixture(&state, "doc1");
@@ -687,6 +688,7 @@ mod tests {
     /// `extract_page_text`.
     #[test]
     fn search_document_finds_known_word_with_nonempty_rect() {
+        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
         let state = AppState::new(pdfium, None);
         open_fixture(&state, "doc1");
@@ -713,6 +715,7 @@ mod tests {
 
     #[test]
     fn search_document_returns_empty_for_word_not_present() {
+        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
         let state = AppState::new(pdfium, None);
         open_fixture(&state, "doc1");
@@ -732,6 +735,7 @@ mod tests {
 
     #[test]
     fn search_document_returns_empty_for_empty_query() {
+        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
         let state = AppState::new(pdfium, None);
         open_fixture(&state, "doc1");
@@ -832,6 +836,7 @@ mod tests {
     /// cached OCR word for that page makes it a hit.
     #[test]
     fn search_document_falls_back_to_ocr_cache() {
+        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
         let state = AppState::new(pdfium, None);
         open_fixture(&state, "doc1");
@@ -949,6 +954,7 @@ mod tests {
 
     #[test]
     fn export_text_uses_native_text_without_ocr() {
+        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
         let state = AppState::new(pdfium, None);
         open_fixture(&state, "doc1");
@@ -1123,6 +1129,7 @@ mod tests {
     /// Default (case-insensitive) search finds "Test Fixture" via lowercase query.
     #[test]
     fn test_search_case_insensitive_default() {
+        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
         let state = AppState::new(pdfium, None);
         open_fixture(&state, "doc1");
@@ -1143,6 +1150,7 @@ mod tests {
     /// With match_case=true the lowercase query must not match "Test Fixture".
     #[test]
     fn test_search_match_case_rejects_wrong_case() {
+        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
         let state = AppState::new(pdfium, None);
         open_fixture(&state, "doc1");
@@ -1166,6 +1174,7 @@ mod tests {
     /// With match_case=true the correctly-cased query must match.
     #[test]
     fn test_search_match_case_accepts_right_case() {
+        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
         let state = AppState::new(pdfium, None);
         open_fixture(&state, "doc1");
@@ -1186,6 +1195,7 @@ mod tests {
     /// With whole_word=true a prefix substring of a word must not match.
     #[test]
     fn test_search_whole_word_rejects_substring() {
+        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
         let state = AppState::new(pdfium, None);
         open_fixture(&state, "doc1");
@@ -1209,6 +1219,7 @@ mod tests {
     /// A regex pattern matching the fixture text must return one result.
     #[test]
     fn test_search_regex_finds_pattern() {
+        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
         let state = AppState::new(pdfium, None);
         open_fixture(&state, "doc1");
@@ -1230,6 +1241,7 @@ mod tests {
     /// returning empty results.
     #[test]
     fn test_search_invalid_regex_returns_err() {
+        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
         let state = AppState::new(pdfium, None);
         open_fixture(&state, "doc1");
@@ -1253,6 +1265,7 @@ mod tests {
     /// once per regex match without deduplication).
     #[test]
     fn test_search_regex_dedup_prevents_duplicate_rects() {
+        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
         let state = AppState::new(pdfium, None);
         open_fixture(&state, "doc1");
@@ -1281,6 +1294,7 @@ mod tests {
     /// spanning multiple words (e.g. `Hello\s+World`) match correctly.
     #[test]
     fn test_search_ocr_regex_matches_across_word_tokens() {
+        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
         let state = AppState::new(pdfium, None);
         open_fixture(&state, "doc1");
@@ -1315,6 +1329,7 @@ mod tests {
     /// with the same characters.
     #[test]
     fn test_search_ocr_whole_word_matches_exact_token() {
+        let _guard = crate::test_pdfium_guard();
         let pdfium = crate::test_pdfium();
         let state = AppState::new(pdfium, None);
         open_fixture(&state, "doc1");
