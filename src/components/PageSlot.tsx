@@ -153,6 +153,9 @@ export function PageSlot({
   return (
     <div
       className="page-slot"
+      // Read by the highlight overlay: invert renders the page near-black, and
+      // an overlay blended for white paper is invisible against it.
+      data-display={displayMode}
       style={{ width: cssWidth, height: cssHeight }}
     >
       <canvas
