@@ -36,7 +36,7 @@ export function SearchPanel() {
   const currentPage = activeTab?.currentPage ?? 1;
   const searchResults = activeTab?.searchResults ?? [];
 
-  const totalMatches = searchResults.reduce((sum, r) => sum + r.rects.length, 0);
+  const totalMatches = searchResults.reduce((sum, r) => sum + r.matches.length, 0);
   const resultIndex = activeTab?.searchResultIndex ?? -1;
 
   const doSearch = useCallback(
@@ -269,7 +269,8 @@ export function SearchPanel() {
             >
               Page {result.page}
               <span className="search-result-count">
-                {result.rects.length} {result.rects.length === 1 ? "match" : "matches"}
+                {result.matches.length}{" "}
+                {result.matches.length === 1 ? "match" : "matches"}
               </span>
             </button>
           ))}

@@ -286,12 +286,12 @@ describe("usePdfStore", () => {
       const tab = makeTab({
         id: "tab-1",
         searchResults: [
-          { page: 1, rects: [{ x: 0, y: 0, width: 10, height: 10 }] },
+          { page: 1, matches: [{ rects: [{ x: 0, y: 0, width: 10, height: 10 }] }] },
           {
             page: 3,
-            rects: [
-              { x: 0, y: 0, width: 10, height: 10 },
-              { x: 0, y: 20, width: 10, height: 10 },
+            matches: [
+              { rects: [{ x: 0, y: 0, width: 10, height: 10 }] },
+              { rects: [{ x: 0, y: 20, width: 10, height: 10 }] },
             ],
           },
         ],
@@ -305,13 +305,13 @@ describe("usePdfStore", () => {
       expect(state.searchResultIndex).toBe(0);
       expect(state.currentPage).toBe(1);
 
-      // Second next → index 1 (page 3, first rect)
+      // Second next → index 1 (page 3, first match)
       usePdfStore.getState().nextSearchResult();
       state = usePdfStore.getState().tabs[0];
       expect(state.searchResultIndex).toBe(1);
       expect(state.currentPage).toBe(3);
 
-      // Third next → index 2 (page 3, second rect)
+      // Third next → index 2 (page 3, second match)
       usePdfStore.getState().nextSearchResult();
       state = usePdfStore.getState().tabs[0];
       expect(state.searchResultIndex).toBe(2);
@@ -328,8 +328,8 @@ describe("usePdfStore", () => {
       const tab = makeTab({
         id: "tab-1",
         searchResults: [
-          { page: 1, rects: [{ x: 0, y: 0, width: 10, height: 10 }] },
-          { page: 2, rects: [{ x: 0, y: 0, width: 10, height: 10 }] },
+          { page: 1, matches: [{ rects: [{ x: 0, y: 0, width: 10, height: 10 }] }] },
+          { page: 2, matches: [{ rects: [{ x: 0, y: 0, width: 10, height: 10 }] }] },
         ],
         searchResultIndex: 0,
       });

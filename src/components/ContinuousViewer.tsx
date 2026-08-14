@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useCallback, useMemo } from "react";
 import { usePdfStore } from "../store/usePdfStore";
 import { PageSlot } from "./PageSlot";
-import type { PageDimension, SearchResult, ZoomMode } from "../store/usePdfStore";
+import type { PageDimension, SearchMatch, SearchResult, ZoomMode } from "../store/usePdfStore";
 
 /**
  * Zoom percentage for a fit mode, clamped to the [10, 400] range. "fit-width"
@@ -24,7 +24,12 @@ export function fitZoom(
   return clamp(((clientHeight - padding) / dim.height) * 100);
 }
 
-/** Returns the {page, rect} for a given global result index, or null. */
+/**
+ * Returns the {page, rect} to scroll to for a given global *match* index, or
+ * null. A match that wraps a line has several rects; the first one (topmost,
+ * as the backend orders them) is where the match begins, so that is what the
+ * viewer scrolls to.
+ */
 export function activeSearchRect(
   results: SearchResult[],
   index: number,
@@ -32,11 +37,12 @@ export function activeSearchRect(
   if (index < 0) return null;
   let offset = 0;
   for (const result of results) {
-    const end = offset + result.rects.length;
+    const end = offset + result.matches.length;
     if (index >= offset && index < end) {
-      return { page: result.page, rect: result.rects[index - offset] };
+      const rect = result.matches[index - offset].rects[0];
+      return rect ? { page: result.page, rect } : null;
     }
-    offset += result.rects.length;
+    offset += result.matches.length;
   }
   return null;
 }
@@ -112,13 +118,15 @@ export function ContinuousViewer() {
   const searchResultIndex = activeTab?.searchResultIndex ?? -1;
   const redactedPreview = !!activeTab?.redactPreview;
 
-  // Build per-page highlight data: { rects, activeIndex } for each page
+  // Build per-page highlight data. `matchStartIndex` is where this page's
+  // matches begin in the global match numbering, so the active index can be
+  // rebased to a page-local one below.
   const pageHighlights = useMemo(() => {
-    const map = new Map<number, { rects: { x: number; y: number; width: number; height: number }[]; rectStartIndex: number }>();
+    const map = new Map<number, { matches: SearchMatch[]; matchStartIndex: number }>();
     let globalIdx = 0;
     for (const result of searchResults) {
-      map.set(result.page, { rects: result.rects, rectStartIndex: globalIdx });
-      globalIdx += result.rects.length;
+      map.set(result.page, { matches: result.matches, matchStartIndex: globalIdx });
+      globalIdx += result.matches.length;
     }
     return map;
   }, [searchResults]);
@@ -418,10 +426,10 @@ export function ContinuousViewer() {
               isInRenderWindow={!fitPending && isInRenderWindow(pageNum)}
               contentEpoch={contentEpoch}
               displayMode={displayMode}
-              highlightRects={pageHighlights.get(pageNum)?.rects ?? []}
-              activeHighlightIndex={
+              highlightMatches={pageHighlights.get(pageNum)?.matches ?? []}
+              activeMatchIndex={
                 searchResultIndex >= 0 && pageHighlights.has(pageNum)
-                  ? searchResultIndex - (pageHighlights.get(pageNum)?.rectStartIndex ?? 0)
+                  ? searchResultIndex - (pageHighlights.get(pageNum)?.matchStartIndex ?? 0)
                   : -1
               }
               redactedPreview={redactedPreview}
