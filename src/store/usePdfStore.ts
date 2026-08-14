@@ -94,9 +94,18 @@ export interface TabState {
  */
 export const suppressedReloadDocs = new Set<string>();
 
+/**
+ * One occurrence of the query. `rects` is normally a single box; a match
+ * broken across a line break has one per line. It is never one per character —
+ * the backend merges pdfium's per-glyph rects into line runs.
+ */
+export interface SearchMatch {
+  rects: { x: number; y: number; width: number; height: number }[];
+}
+
 export interface SearchResult {
   page: number;
-  rects: { x: number; y: number; width: number; height: number }[];
+  matches: SearchMatch[];
 }
 
 /**
@@ -479,24 +488,24 @@ export const usePdfStore = create<PdfStore>((set, get) => ({
       const tab = state.tabs.find((t) => t.id === state.activeTabId);
       if (!tab || tab.searchResults.length === 0) return state;
 
-      // Count total rects across all pages
-      const totalRects = tab.searchResults.reduce(
-        (sum, r) => sum + r.rects.length,
+      // Count total matches across all pages
+      const totalMatches = tab.searchResults.reduce(
+        (sum, r) => sum + r.matches.length,
         0,
       );
-      if (totalRects === 0) return state;
+      if (totalMatches === 0) return state;
 
-      const nextIndex = (tab.searchResultIndex + 1) % totalRects;
+      const nextIndex = (tab.searchResultIndex + 1) % totalMatches;
 
-      // Find which page this rect belongs to
+      // Find which page this match belongs to
       let count = 0;
       let targetPage = tab.currentPage;
       for (const result of tab.searchResults) {
-        if (count + result.rects.length > nextIndex) {
+        if (count + result.matches.length > nextIndex) {
           targetPage = result.page;
           break;
         }
-        count += result.rects.length;
+        count += result.matches.length;
       }
 
       return {
@@ -513,23 +522,23 @@ export const usePdfStore = create<PdfStore>((set, get) => ({
       const tab = state.tabs.find((t) => t.id === state.activeTabId);
       if (!tab || tab.searchResults.length === 0) return state;
 
-      const totalRects = tab.searchResults.reduce(
-        (sum, r) => sum + r.rects.length,
+      const totalMatches = tab.searchResults.reduce(
+        (sum, r) => sum + r.matches.length,
         0,
       );
-      if (totalRects === 0) return state;
+      if (totalMatches === 0) return state;
 
       const prevIndex =
-        (tab.searchResultIndex - 1 + totalRects) % totalRects;
+        (tab.searchResultIndex - 1 + totalMatches) % totalMatches;
 
       let count = 0;
       let targetPage = tab.currentPage;
       for (const result of tab.searchResults) {
-        if (count + result.rects.length > prevIndex) {
+        if (count + result.matches.length > prevIndex) {
           targetPage = result.page;
           break;
         }
-        count += result.rects.length;
+        count += result.matches.length;
       }
 
       return {

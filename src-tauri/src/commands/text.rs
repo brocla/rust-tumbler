@@ -30,10 +30,20 @@ pub struct TextItem {
     pub font_size: f32,
 }
 
-#[derive(Serialize)]
+/// One occurrence of the query on a page.
+///
+/// `rects` holds the highlight boxes for that single occurrence — normally one,
+/// but a match broken across a line break legitimately needs two. It is *not*
+/// one rect per character: see [`merge_line_runs`].
+#[derive(Serialize, Debug)]
+pub struct SearchMatch {
+    pub rects: Vec<TextRect>,
+}
+
+#[derive(Serialize, Debug)]
 pub struct SearchResult {
     pub page: u32,
-    pub rects: Vec<TextRect>,
+    pub matches: Vec<SearchMatch>,
 }
 
 #[derive(Serialize)]
@@ -77,6 +87,61 @@ pub(crate) fn page_text_in_document_order(text: &PdfPageText) -> String {
         .iter()
         .filter_map(|ch| ch.unicode_char())
         .collect()
+}
+
+/// Collapses the rects of a *single* match into one box per line.
+///
+/// pdfium's `FPDFText_CountRects` starts a new rectangle at every text-object
+/// change, and a great many real PDFs place each glyph in its own show-text
+/// operator — one `Td … Tj` per character inside a shared `BT … ET`. On such a
+/// document a search for an eight-letter word comes back as eight rects, which
+/// draws as eight gapped boxes and (before this grouping existed) counted as
+/// eight separate matches to step through.
+///
+/// Every rect passed here belongs to the same occurrence of the query, so
+/// unioning the ones that share a line is exactly the match's extent on that
+/// line. A match that wraps keeps one rect per line, which is what a highlight
+/// should look like.
+///
+/// Lines are found by vertical overlap rather than by equal `y`: per-character
+/// boxes are tight, so a capital and a lowercase letter on the same baseline
+/// differ in both top edge and height.
+pub(crate) fn merge_line_runs(rects: Vec<TextRect>) -> Vec<TextRect> {
+    let mut lines: Vec<TextRect> = Vec::new();
+
+    for rect in rects {
+        match lines.iter_mut().find(|line| shares_line(line, &rect)) {
+            Some(line) => *line = union_rect(line, &rect),
+            None => lines.push(rect),
+        }
+    }
+
+    // Reading order: top to bottom, then left to right.
+    lines.sort_by(|a, b| {
+        a.y.total_cmp(&b.y).then_with(|| a.x.total_cmp(&b.x))
+    });
+    lines
+}
+
+/// True when two rects overlap vertically by more than half the shorter one —
+/// the test for "on the same line" (y is top-left origin, so a rect spans
+/// `y ..= y + height`).
+fn shares_line(a: &TextRect, b: &TextRect) -> bool {
+    let overlap = (a.y + a.height).min(b.y + b.height) - a.y.max(b.y);
+    overlap > 0.5 * a.height.min(b.height)
+}
+
+fn union_rect(a: &TextRect, b: &TextRect) -> TextRect {
+    let left = a.x.min(b.x);
+    let top = a.y.min(b.y);
+    let right = (a.x + a.width).max(b.x + b.width);
+    let bottom = (a.y + a.height).max(b.y + b.height);
+    TextRect {
+        x: left,
+        y: top,
+        width: right - left,
+        height: bottom - top,
+    }
 }
 
 #[tauri::command]
@@ -289,11 +354,11 @@ pub(crate) fn search_document_impl(
         };
 
         let page_num = (page_idx + 1) as u32;
-        let mut page_rects = Vec::new();
+        let mut page_matches: Vec<SearchMatch> = Vec::new();
 
         // A force-re-OCR'd page (issue #97): the user has declared its native
         // text layer junk, so don't search that layer at all. Leaving
-        // `page_rects` empty routes the page into the cached-OCR block below,
+        // `page_matches` empty routes the page into the cached-OCR block below,
         // which is the same path a plain scan takes.
         let search_native = !state.ocr_overrides_native_text(&doc_id, page_num);
 
@@ -316,21 +381,12 @@ pub(crate) fn search_document_impl(
             for matched_str in &unique_matches {
                 if let Ok(search) = text.search(matched_str, &lit_options) {
                     for match_segments in search.iter(PdfSearchDirection::SearchForward) {
-                        for i in 0..match_segments.len() {
-                            if let Ok(segment) = match_segments.get(i) {
-                                let bounds = segment.bounds();
-                                let x = bounds.left().value - origin_x;
-                                let y = page_height - (bounds.top().value - origin_y);
-                                let w = bounds.right().value - bounds.left().value;
-                                let h = bounds.top().value - bounds.bottom().value;
-                                page_rects.push(TextRect {
-                                    x,
-                                    y,
-                                    width: w,
-                                    height: h,
-                                });
-                            }
-                        }
+                        page_matches.extend(segments_to_match(
+                            &match_segments,
+                            page_height,
+                            origin_x,
+                            origin_y,
+                        ));
                     }
                 }
             }
@@ -341,34 +397,23 @@ pub(crate) fn search_document_impl(
                 Err(_) => continue,
             };
 
-            // Each match returns PdfPageTextSegments — one or more visual
-            // rectangles (e.g. a match that spans a line break yields two rects).
-            // These rects come from FPDFText_GetRect, which is the canonical
-            // pdfium function for computing highlight positions.
+            // Each hit yields one PdfPageTextSegments — the rects covering that
+            // single occurrence, from FPDFText_GetRect (pdfium's canonical
+            // highlight-position function). One hit becomes one SearchMatch.
             for match_segments in search.iter(PdfSearchDirection::SearchForward) {
-                for i in 0..match_segments.len() {
-                    if let Ok(segment) = match_segments.get(i) {
-                        let bounds = segment.bounds();
-                        let x = bounds.left().value - origin_x;
-                        let y = page_height - (bounds.top().value - origin_y);
-                        let w = bounds.right().value - bounds.left().value;
-                        let h = bounds.top().value - bounds.bottom().value;
-
-                        page_rects.push(TextRect {
-                            x,
-                            y,
-                            width: w,
-                            height: h,
-                        });
-                    }
-                }
+                page_matches.extend(segments_to_match(
+                    &match_segments,
+                    page_height,
+                    origin_x,
+                    origin_y,
+                ));
             }
         }
 
         // No native hits on this page — either it has no text layer, or its
         // layer was skipped as junk above. If OCR words are cached for it (a
         // scanned page made searchable), match the query against them.
-        if page_rects.is_empty() {
+        if page_matches.is_empty() {
             if let Some(words) = state.get_ocr_words(&doc_id, page_num) {
                 if let Some(ref re) = regex_pattern {
                     // Regex mode: reconstruct page text with per-word byte
@@ -382,18 +427,20 @@ pub(crate) fn search_document_impl(
                         word_spans.push((start, page_text.len()));
                         page_text.push(' ');
                     }
+                    // One regex match spanning several word tokens is one
+                    // match, holding that run of word boxes.
                     for mat in re.find_iter(&page_text) {
                         let (ms, me) = (mat.start(), mat.end());
-                        for (i, &(ws, we)) in word_spans.iter().enumerate() {
-                            if ws < me && we > ms {
-                                let word = &words[i];
-                                page_rects.push(TextRect {
-                                    x: word.rect.x,
-                                    y: page_height - (word.rect.y + word.rect.height),
-                                    width: word.rect.width,
-                                    height: word.rect.height,
-                                });
-                            }
+                        let rects: Vec<TextRect> = word_spans
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, &(ws, we))| ws < me && we > ms)
+                            .map(|(i, _)| ocr_word_rect(&words[i], page_height))
+                            .collect();
+                        if !rects.is_empty() {
+                            page_matches.push(SearchMatch {
+                                rects: merge_line_runs(rects),
+                            });
                         }
                     }
                 } else {
@@ -421,11 +468,9 @@ pub(crate) fn search_document_impl(
                             }
                         };
                         if matches {
-                            page_rects.push(TextRect {
-                                x: word.rect.x,
-                                y: page_height - (word.rect.y + word.rect.height),
-                                width: word.rect.width,
-                                height: word.rect.height,
+                            // One matching token is one match, one rect.
+                            page_matches.push(SearchMatch {
+                                rects: vec![ocr_word_rect(word, page_height)],
                             });
                         }
                     }
@@ -433,15 +478,56 @@ pub(crate) fn search_document_impl(
             }
         }
 
-        if !page_rects.is_empty() {
+        if !page_matches.is_empty() {
             results.push(SearchResult {
                 page: page_num,
-                rects: page_rects,
+                matches: page_matches,
             });
         }
     }
 
     Ok(results)
+}
+
+/// Turns one search hit's segments into a [`SearchMatch`], converting each rect
+/// from PDF user space (origin bottom-left) into the top-left origin the UI
+/// uses, and collapsing per-glyph rects into one box per line.
+///
+/// Returns `None` for a hit that yields no readable rects, so it can be fed
+/// straight to `extend`.
+fn segments_to_match(
+    segments: &PdfPageTextSegments,
+    page_height: f32,
+    origin_x: f32,
+    origin_y: f32,
+) -> Option<SearchMatch> {
+    let rects: Vec<TextRect> = (0..segments.len())
+        .filter_map(|i| segments.get(i).ok())
+        .map(|segment| {
+            let bounds = segment.bounds();
+            TextRect {
+                x: bounds.left().value - origin_x,
+                y: page_height - (bounds.top().value - origin_y),
+                width: bounds.right().value - bounds.left().value,
+                height: bounds.top().value - bounds.bottom().value,
+            }
+        })
+        .collect();
+
+    (!rects.is_empty()).then(|| SearchMatch {
+        rects: merge_line_runs(rects),
+    })
+}
+
+/// Converts a cached OCR word's box (PDF user space, origin bottom-left) into
+/// the top-left origin used by search rects.
+fn ocr_word_rect(word: &crate::commands::ocr::OcrWord, page_height: f32) -> TextRect {
+    TextRect {
+        x: word.rect.x,
+        y: page_height - (word.rect.y + word.rect.height),
+        width: word.rect.width,
+        height: word.rect.height,
+    }
 }
 
 /// Counts pages that would still need OCR: no native text layer **and** no
@@ -700,9 +786,10 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].page, 1);
-        assert_eq!(results[0].rects.len(), 1);
+        assert_eq!(results[0].matches.len(), 1);
+        assert_eq!(results[0].matches[0].rects.len(), 1);
 
-        let rect = &results[0].rects[0];
+        let rect = &results[0].matches[0].rects[0];
         assert!(rect.width > 0.0, "unexpected width: {}", rect.width);
         assert!(rect.height > 0.0, "unexpected height: {}", rect.height);
         assert!(rect.x >= 0.0 && rect.y >= 0.0);
@@ -809,11 +896,17 @@ mod tests {
     }
 
     fn ocr_word(text: &str) -> OcrWord {
-        // Rect in PDF user space (origin bottom-left), as the cache stores it.
+        ocr_word_at(text, 10.0)
+    }
+
+    /// An OCR word at a given left edge, so tests can place two words side by
+    /// side on one line. Rect is in PDF user space (origin bottom-left), as the
+    /// cache stores it.
+    fn ocr_word_at(text: &str, x: f32) -> OcrWord {
         OcrWord {
             text: text.to_string(),
             rect: TextRect {
-                x: 10.0,
+                x,
                 y: 150.0,
                 width: 40.0,
                 height: 12.0,
@@ -844,9 +937,9 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].page, 1);
-        assert_eq!(results[0].rects.len(), 1);
+        assert_eq!(results[0].matches.len(), 1);
         // y is flipped from the bottom-left cache rect into top-left space.
-        let rect = &results[0].rects[0];
+        let rect = &results[0].matches[0].rects[0];
         assert!((rect.y - (200.0 - (150.0 + 12.0))).abs() < 0.1, "y: {}", rect.y);
     }
 
@@ -1237,9 +1330,9 @@ mod tests {
 
     /// The regex path deduplicates matched strings before calling
     /// text.search(), so each unique literal is searched once.  The fixture
-    /// contains two 'e' characters; with dedup, text.search("e") is called
-    /// once and returns 2 rects — not 4 (which would result from calling it
-    /// once per regex match without deduplication).
+    /// contains two 'e' characters; with dedup, text.search("e") yields 2
+    /// matches — not 4 (which would result from calling it once per regex
+    /// match without deduplication).
     #[test]
     fn test_search_regex_dedup_prevents_duplicate_rects() {
         let pdfium = crate::test_pdfium();
@@ -1259,10 +1352,10 @@ mod tests {
 
         assert_eq!(results.len(), 1, "should find matches on page 1");
         assert_eq!(
-            results[0].rects.len(),
+            results[0].matches.len(),
             2,
-            "exactly 2 rects expected (one per 'e'); got {} — dedup may be broken",
-            results[0].rects.len()
+            "exactly 2 matches expected (one per 'e'); got {} — dedup may be broken",
+            results[0].matches.len()
         );
     }
 
@@ -1275,10 +1368,11 @@ mod tests {
         open_fixture(&state, "doc1");
         // "Hello" and "World" are not in the native fixture text, so pdfium
         // returns no hits and the OCR fallback runs.
+        // Side by side on one line, so the merged rect must span both.
         state.set_ocr_words(
             "doc1",
             1,
-            vec![ocr_word("Hello"), ocr_word("World")],
+            vec![ocr_word_at("Hello", 10.0), ocr_word_at("World", 60.0)],
         );
 
         let results = search_document_impl(
@@ -1293,9 +1387,19 @@ mod tests {
 
         assert_eq!(results.len(), 1, "regex should find the cross-word OCR match");
         assert_eq!(
-            results[0].rects.len(),
-            2,
-            "both word tokens (Hello, World) should be highlighted"
+            results[0].matches.len(),
+            1,
+            "one pattern occurrence is one match, not one per word token"
+        );
+        // Both word boxes ride along inside that single match, merged into one
+        // box because they share a line.
+        let rects = &results[0].matches[0].rects;
+        assert_eq!(rects.len(), 1, "same-line word boxes should merge");
+        assert!((rects[0].x - 10.0).abs() < 0.1, "x: {}", rects[0].x);
+        assert!(
+            (rects[0].width - 90.0).abs() < 0.1,
+            "merged box must span both words, width: {}",
+            rects[0].width
         );
     }
 
@@ -1341,6 +1445,202 @@ mod tests {
         )
         .expect("search");
         assert_eq!(matched.len(), 1, "whole_word should match the exact token");
+    }
+
+    // ── Per-glyph text objects (the character-by-character search bug) ─────
+
+    fn rect(x: f32, y: f32, width: f32, height: f32) -> TextRect {
+        TextRect { x, y, width, height }
+    }
+
+    /// The measured shape of the bug: eight per-character boxes from one word,
+    /// with the tight-box variation a real document shows — a capital sits
+    /// higher and taller than the lowercase letters beside it. All eight are
+    /// one line and must collapse to one box spanning them.
+    #[test]
+    fn merge_line_runs_collapses_per_character_boxes() {
+        let chars = vec![
+            rect(45.20, 30.81, 7.12, 8.19),
+            rect(53.28, 32.78, 5.03, 6.22),
+            rect(59.84, 30.33, 5.30, 8.78),
+            rect(66.74, 32.78, 5.10, 6.32),
+            rect(73.38, 32.78, 3.47, 6.22),
+            rect(77.58, 32.78, 4.28, 6.32),
+            rect(82.98, 32.78, 5.54, 6.32),
+            rect(90.10, 32.78, 5.03, 6.22),
+        ];
+
+        let merged = merge_line_runs(chars);
+
+        assert_eq!(merged.len(), 1, "one word on one line is one box");
+        assert!((merged[0].x - 45.20).abs() < 0.01, "x: {}", merged[0].x);
+        // Spans from the first glyph's left edge to the last glyph's right.
+        assert!(
+            (merged[0].width - (95.13 - 45.20)).abs() < 0.01,
+            "width: {}",
+            merged[0].width
+        );
+        // Tallest glyph's extent, top ('n' at 30.33) to bottom (39.11).
+        assert!((merged[0].y - 30.33).abs() < 0.01, "y: {}", merged[0].y);
+    }
+
+    /// A match broken by a line break stays two boxes — it is one result, but
+    /// it genuinely occupies two places on the page.
+    #[test]
+    fn merge_line_runs_keeps_one_box_per_line() {
+        let merged = merge_line_runs(vec![
+            rect(150.0, 100.0, 10.0, 12.0),
+            rect(160.0, 100.0, 10.0, 12.0),
+            rect(20.0, 130.0, 10.0, 12.0),
+            rect(30.0, 130.0, 10.0, 12.0),
+        ]);
+
+        assert_eq!(merged.len(), 2);
+        // Sorted into reading order: the earlier line first.
+        assert!((merged[0].y - 100.0).abs() < 0.01);
+        assert!((merged[0].x - 150.0).abs() < 0.01);
+        assert!((merged[0].width - 20.0).abs() < 0.01);
+        assert!((merged[1].y - 130.0).abs() < 0.01);
+        assert!((merged[1].x - 20.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn merge_line_runs_on_empty_input_is_empty() {
+        assert!(merge_line_runs(Vec::new()).is_empty());
+    }
+
+    /// Writes a one-page PDF whose glyphs are each their own show-text
+    /// operator — `Td … Tj` per character inside one `BT … ET`, the shape
+    /// emitted by the PDF generator that surfaced this bug. pdfium builds one
+    /// text object per `Tj`, and `FPDFText_CountRects` starts a new rect at
+    /// every text-object change, so a search for `word` yields one rect per
+    /// character. `tests/fixtures/sample.pdf` cannot reproduce this: its text
+    /// is a single object, which pdfium merges into one rect on its own.
+    fn write_per_glyph_pdf(path: &str, word: &str) {
+        use lopdf::{dictionary, Dictionary, Document, Object, Stream};
+
+        // Advance by the previous glyph's real width in 12pt Helvetica.
+        // Uniform spacing leaves a gap after a narrow letter, and pdfium reads
+        // a wide enough gap as a word break — which would split the word in the
+        // extracted text and defeat the point of the fixture.
+        let advance = |ch: char| -> f32 {
+            let per_1000 = match ch {
+                'M' => 833.0,
+                'r' => 333.0,
+                's' => 500.0,
+                _ => 556.0, // e, a, n, d
+            };
+            per_1000 * 12.0 / 1000.0
+        };
+
+        let mut content = String::from("BT\n/F1 12 Tf\n20 100 Td\n");
+        let mut prev: Option<char> = None;
+        for ch in word.chars() {
+            // Each glyph advances from the previous one, exactly as the real
+            // document does; only the first is placed absolutely.
+            if let Some(prev) = prev {
+                content.push_str(&format!("{:.4} 0 Td ", advance(prev)));
+            }
+            content.push_str(&format!("({ch}) Tj\n"));
+            prev = Some(ch);
+        }
+        content.push_str("ET\n");
+
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        let contents_id = doc.add_object(Stream::new(Dictionary::new(), content.into_bytes()));
+        let font_id = doc.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "Helvetica",
+        });
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "Contents" => contents_id,
+            "Resources" => dictionary! {
+                "Font" => dictionary! { "F1" => Object::Reference(font_id) },
+            },
+            "MediaBox" => vec![
+                Object::Integer(0), Object::Integer(0),
+                Object::Integer(300), Object::Integer(200),
+            ],
+        });
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![Object::Reference(page_id)],
+                "Count" => Object::Integer(1),
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        doc.trailer.set("Root", catalog_id);
+        doc.save(path).expect("write per-glyph pdf");
+    }
+
+    /// The regression this whole change exists for: on a per-glyph document,
+    /// one word is **one** match with **one** highlight box — not eight of
+    /// each, which is what made search step through a phrase letter by letter.
+    #[test]
+    fn search_on_per_glyph_document_is_one_match_with_one_rect() {
+        let pdfium = crate::test_pdfium();
+        let state = AppState::new(pdfium.get(), None);
+
+        let path = temp_txt("tumbler_per_glyph.pdf");
+        write_per_glyph_pdf(&path, "Meanders");
+        let entry = DocEntry::load(state.pdfium, &path, None).expect("load");
+        state.insert_document("glyphs".to_string(), entry).expect("insert");
+
+        // Pin the premise: pdfium really does hand back one rect per character
+        // here. If a future pdfium merges them itself this assertion moves,
+        // and the reason for the merge below is on record.
+        {
+            let entry = state.get_document("glyphs").expect("get");
+            let entry = lock_mutex(&entry).expect("lock");
+            let page = entry.document.pages().get(0).expect("page");
+            let text = page.text().expect("text");
+            let search = text
+                .search("Meanders", &PdfSearchOptions::new())
+                .expect("search");
+            let raw: Vec<usize> = search
+                .iter(PdfSearchDirection::SearchForward)
+                .map(|segments| segments.len())
+                .collect();
+            assert_eq!(
+                page_text_in_document_order(&text),
+                "Meanders",
+                "glyph advances must not read as a word break"
+            );
+            assert_eq!(raw, vec![8], "expected pdfium to split per character");
+        }
+
+        let results = search_document_impl(
+            &state,
+            "glyphs".to_string(),
+            "Meanders".to_string(),
+            false,
+            false,
+            false,
+        )
+        .expect("search");
+
+        assert_eq!(results.len(), 1, "one page of results");
+        assert_eq!(results[0].matches.len(), 1, "one occurrence is one match");
+        let rects = &results[0].matches[0].rects;
+        assert_eq!(rects.len(), 1, "one line is one highlight box");
+        // The box spans the whole word, not a single glyph: "Meanders" in
+        // 12pt Helvetica is ~53pt wide.
+        assert!(
+            rects[0].width > 40.0,
+            "highlight must cover the word, width: {}",
+            rects[0].width
+        );
+
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]

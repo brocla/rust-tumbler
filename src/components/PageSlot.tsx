@@ -8,11 +8,8 @@ import { HighlightLayer } from "./HighlightLayer";
 import { RedactLayer } from "./RedactLayer";
 import { TypewriterLayer } from "./TypewriterLayer";
 
-interface HighlightRect {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
+interface HighlightMatch {
+  rects: { x: number; y: number; width: number; height: number }[];
 }
 
 interface PageSlotProps {
@@ -26,8 +23,9 @@ interface PageSlotProps {
   // so re-running the render effect repaints this slot from cache (no blank).
   contentEpoch: number;
   displayMode: "normal" | "invert" | "sepia";
-  highlightRects: HighlightRect[];
-  activeHighlightIndex: number;
+  highlightMatches: HighlightMatch[];
+  // Index of the active match within this page's matches, or -1.
+  activeMatchIndex: number;
   // True while the tab previews a staged redacted copy (issue #1): the page
   // is rendered from the staged bytes via render_redacted_page (cached under
   // a separate key), and the interactive overlays are hidden — the preview is
@@ -50,8 +48,8 @@ export function PageSlot({
   isInRenderWindow,
   contentEpoch,
   displayMode,
-  highlightRects,
-  activeHighlightIndex,
+  highlightMatches,
+  activeMatchIndex,
   redactedPreview = false,
 }: PageSlotProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -177,8 +175,8 @@ export function PageSlot({
             zoom={zoom}
           />
           <HighlightLayer
-            rects={highlightRects}
-            activeIndex={activeHighlightIndex}
+            matches={highlightMatches}
+            activeIndex={activeMatchIndex}
             zoom={zoom}
           />
           <RedactLayer

@@ -38,8 +38,20 @@ describe("fitZoom", () => {
 
 describe("activeSearchRect", () => {
   const results: SearchResult[] = [
-    { page: 1, rects: [{ x: 0, y: 10, width: 50, height: 12 }, { x: 0, y: 50, width: 50, height: 12 }] },
-    { page: 3, rects: [{ x: 0, y: 200, width: 50, height: 12 }] },
+    {
+      page: 1,
+      matches: [
+        { rects: [{ x: 0, y: 10, width: 50, height: 12 }] },
+        // A match broken across a line break: two rects, still one result.
+        {
+          rects: [
+            { x: 40, y: 50, width: 20, height: 12 },
+            { x: 0, y: 66, width: 30, height: 12 },
+          ],
+        },
+      ],
+    },
+    { page: 3, matches: [{ rects: [{ x: 0, y: 200, width: 50, height: 12 }] }] },
   ];
 
   it("returns null for index -1", () => {
@@ -54,16 +66,25 @@ describe("activeSearchRect", () => {
     expect(activeSearchRect(results, 3)).toBeNull();
   });
 
-  it("returns the first rect on the first page", () => {
-    expect(activeSearchRect(results, 0)).toEqual({ page: 1, rect: results[0].rects[0] });
+  it("returns the first match on the first page", () => {
+    expect(activeSearchRect(results, 0)).toEqual({
+      page: 1,
+      rect: results[0].matches[0].rects[0],
+    });
   });
 
-  it("returns the second rect on the first page", () => {
-    expect(activeSearchRect(results, 1)).toEqual({ page: 1, rect: results[0].rects[1] });
+  it("returns the first rect of a multi-rect (line-wrapped) match", () => {
+    expect(activeSearchRect(results, 1)).toEqual({
+      page: 1,
+      rect: results[0].matches[1].rects[0],
+    });
   });
 
-  it("returns the rect on the second page (index spans across pages)", () => {
-    expect(activeSearchRect(results, 2)).toEqual({ page: 3, rect: results[1].rects[0] });
+  it("returns the match on the second page (index spans across pages)", () => {
+    expect(activeSearchRect(results, 2)).toEqual({
+      page: 3,
+      rect: results[1].matches[0].rects[0],
+    });
   });
 });
 

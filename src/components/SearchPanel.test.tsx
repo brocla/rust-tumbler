@@ -50,8 +50,8 @@ describe("SearchPanel", () => {
 
   it("renders the result list for a query with matches", () => {
     const results: SearchResult[] = [
-      { page: 1, rects: [{ x: 0, y: 0, width: 10, height: 10 }] },
-      { page: 3, rects: [{ x: 0, y: 0, width: 10, height: 10 }] },
+      { page: 1, matches: [{ rects: [{ x: 0, y: 0, width: 10, height: 10 }] }] },
+      { page: 3, matches: [{ rects: [{ x: 0, y: 0, width: 10, height: 10 }] }] },
     ];
     setTab({ searchQuery: "test", searchResults: results, searchResultIndex: 0 });
 
@@ -72,7 +72,10 @@ describe("SearchPanel", () => {
       if (cmd === "ocr_page") return Promise.resolve([]);
       if (cmd === "search_document")
         return Promise.resolve([
-          { page: 2, rects: [{ x: 0, y: 0, width: 10, height: 10 }] },
+          {
+            page: 2,
+            matches: [{ rects: [{ x: 0, y: 0, width: 10, height: 10 }] }],
+          },
         ] as SearchResult[]);
       return Promise.resolve(undefined);
     });

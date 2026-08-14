@@ -1099,10 +1099,14 @@ fn find_redaction_matches_impl(
         search_document_impl(state, doc_id, query, match_case, whole_word, use_regex)?
             .into_iter()
             .flat_map(|result| {
+                // Every rect of every match needs covering; a match that wraps
+                // a line contributes one region per line.
+                let page = result.page;
                 result
-                    .rects
+                    .matches
                     .into_iter()
-                    .map(move |rect| RedactRegion { page: result.page, rect })
+                    .flat_map(|m| m.rects)
+                    .map(move |rect| RedactRegion { page, rect })
             })
             .collect(),
     )
