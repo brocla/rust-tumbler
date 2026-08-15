@@ -123,6 +123,19 @@ export function SearchPanel() {
     }
   };
 
+  /**
+   * Flips a search mode and hands focus back to the query box.
+   *
+   * Clicking a button focuses it, and Enter on a focused button activates that
+   * button — so after toggling a mode, Enter would re-toggle it instead of
+   * stepping to the next match. Returning focus to the input keeps the one
+   * key that means "next match" pointed at the thing the user is searching.
+   */
+  const toggleMode = (set: React.Dispatch<React.SetStateAction<boolean>>) => () => {
+    set((v) => !v);
+    inputRef.current?.focus();
+  };
+
   // Focus and select input when panel opens
   useEffect(() => {
     inputRef.current?.focus();
@@ -137,6 +150,42 @@ export function SearchPanel() {
     },
     [],
   );
+
+  // Enter steps to the next match from anywhere on the page, not only from
+  // inside the query box. Clicking the document — the natural thing to do
+  // while reading a hit — used to leave Enter with nothing bound to it.
+  //
+  // This listener lives here, so it exists only while the search panel is
+  // open. It deliberately declines the event in two cases: anything editable
+  // keeps Enter for its own purposes (the query box included — it has its own
+  // handler, and taking it here as well would advance twice), and a focused
+  // button or link keeps native keyboard activation, which is how a keyboard
+  // user operates the mode toggles at all.
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== "Enter" || e.ctrlKey || e.altKey || e.metaKey) return;
+      if (totalMatches === 0) return;
+
+      const target = e.target as HTMLElement | null;
+      if (
+        target &&
+        (["INPUT", "TEXTAREA", "SELECT", "BUTTON", "A"].includes(target.tagName) ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
+
+      e.preventDefault();
+      if (e.shiftKey) {
+        prevSearchResult();
+      } else {
+        nextSearchResult();
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [totalMatches, nextSearchResult, prevSearchResult]);
 
   // Clear any stale search/OCR state when switching tabs.
   useEffect(() => {
@@ -210,7 +259,7 @@ export function SearchPanel() {
       <div className="search-mode-row">
         <button
           className={`toolbar-button${matchCase ? " active" : ""}`}
-          onClick={() => setMatchCase(v => !v)}
+          onClick={toggleMode(setMatchCase)}
           title="Match case"
           aria-pressed={matchCase}
         >
@@ -218,7 +267,7 @@ export function SearchPanel() {
         </button>
         <button
           className={`toolbar-button${wholeWord ? " active" : ""}`}
-          onClick={() => setWholeWord(v => !v)}
+          onClick={toggleMode(setWholeWord)}
           title="Whole word"
           aria-pressed={wholeWord}
         >
@@ -226,7 +275,7 @@ export function SearchPanel() {
         </button>
         <button
           className={`toolbar-button${useRegex ? " active" : ""}`}
-          onClick={() => setUseRegex(v => !v)}
+          onClick={toggleMode(setUseRegex)}
           title="Regular expression"
           aria-pressed={useRegex}
         >

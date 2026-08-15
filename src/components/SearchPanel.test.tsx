@@ -244,6 +244,119 @@ describe("SearchPanel", () => {
     });
   });
 
+  describe("Enter steps through matches", () => {
+    const withMatches = () =>
+      setTab({
+        searchQuery: "x",
+        searchResultIndex: 0,
+        searchResults: [
+          {
+            page: 1,
+            matches: [
+              { rects: [{ x: 0, y: 0, width: 9, height: 9 }] },
+              { rects: [{ x: 0, y: 20, width: 9, height: 9 }] },
+            ],
+          },
+          { page: 3, matches: [{ rects: [{ x: 0, y: 0, width: 9, height: 9 }] }] },
+        ],
+      });
+
+    const index = () => usePdfStore.getState().tabs[0].searchResultIndex;
+
+    it("advances from the query box", () => {
+      withMatches();
+      render(<SearchPanel />);
+
+      fireEvent.keyDown(screen.getByPlaceholderText("Search..."), { key: "Enter" });
+      expect(index()).toBe(1);
+
+      fireEvent.keyDown(screen.getByPlaceholderText("Search..."), {
+        key: "Enter",
+        shiftKey: true,
+      });
+      expect(index()).toBe(0);
+    });
+
+    /**
+     * The reported bug: after clicking anywhere in the document, focus is no
+     * longer in the query box and Enter had nothing bound to it.
+     */
+    it("advances when focus is out in the document", () => {
+      withMatches();
+      render(<SearchPanel />);
+
+      fireEvent.keyDown(document.body, { key: "Enter" });
+      expect(index()).toBe(1);
+
+      fireEvent.keyDown(document.body, { key: "Enter", shiftKey: true });
+      expect(index()).toBe(0);
+    });
+
+    it("advances exactly once when pressed in the query box", () => {
+      withMatches();
+      render(<SearchPanel />);
+
+      // The input has its own handler and the event also reaches the window
+      // listener; only one of them may act.
+      fireEvent.keyDown(screen.getByPlaceholderText("Search..."), { key: "Enter" });
+      expect(index()).toBe(1);
+    });
+
+    it("leaves Enter alone for other text fields and focused buttons", () => {
+      withMatches();
+      render(<SearchPanel />);
+
+      // A form field elsewhere in the app.
+      const field = document.createElement("textarea");
+      document.body.appendChild(field);
+      fireEvent.keyDown(field, { key: "Enter" });
+      expect(index()).toBe(0);
+      field.remove();
+
+      // A focused control keeps native keyboard activation — that is how a
+      // keyboard user works the mode toggles at all.
+      fireEvent.keyDown(screen.getByTitle("Regular expression"), { key: "Enter" });
+      expect(index()).toBe(0);
+    });
+
+    it("does nothing when the search found no matches", () => {
+      setTab({ searchQuery: "zzz", searchResults: [], searchResultIndex: -1 });
+      render(<SearchPanel />);
+
+      fireEvent.keyDown(document.body, { key: "Enter" });
+      expect(usePdfStore.getState().tabs[0].searchResultIndex).toBe(-1);
+    });
+
+    it("stops listening once the panel is closed", () => {
+      withMatches();
+      const { unmount } = render(<SearchPanel />);
+      unmount();
+
+      fireEvent.keyDown(document.body, { key: "Enter" });
+      expect(index()).toBe(0);
+    });
+
+    /**
+     * Clicking a mode button focuses it, and Enter on a focused button
+     * activates that button — so Enter would re-toggle the mode instead of
+     * stepping to the next match. Focus goes back to the query box.
+     */
+    it("returns focus to the query box after a mode toggle", () => {
+      withMatches();
+      render(<SearchPanel />);
+
+      // A real click focuses the button; jsdom's fireEvent.click does not, so
+      // focus it explicitly or this asserts nothing.
+      const button = screen.getByTitle("Regular expression");
+      button.focus();
+      expect(document.activeElement).toBe(button);
+
+      fireEvent.click(button);
+
+      expect(document.activeElement).toBe(screen.getByPlaceholderText("Search..."));
+    });
+  });
+
   /**
    * Typing arms a 300ms debounce that captures the flags as they were at that
    * keystroke. Reaching for a mode button straight after typing — the natural
