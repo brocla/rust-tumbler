@@ -175,11 +175,17 @@ pub struct OcrLine {
     pub rect: TextRect,
 }
 
-/// Groups recognized words into visual lines. Words are in PDF user space
-/// (origin bottom-left), so a larger `y` sits higher on the page. Lines are
-/// ordered top→bottom, words within a line left→right; each line's text joins
-/// its words with single spaces and its rect is the union of their boxes.
-pub fn ocr_words_to_lines(words: &[OcrWord]) -> Vec<OcrLine> {
+/// Groups recognized words into visual lines, keeping the individual words.
+///
+/// Words are in PDF user space (origin bottom-left), so a larger `y` sits
+/// higher on the page. Lines are ordered top→bottom, words within a line
+/// left→right.
+///
+/// [`ocr_words_to_lines`] flattens each group into a single string and box;
+/// search needs the grouping *and* the per-word boxes it collapses — the line
+/// structure to make `^`/`$` mean the same thing on a scan as on a native page,
+/// and the boxes to highlight the words a match actually covers.
+pub fn ocr_words_to_line_groups(words: &[OcrWord]) -> Vec<Vec<&OcrWord>> {
     if words.is_empty() {
         return Vec::new();
     }
@@ -215,15 +221,24 @@ pub fn ocr_words_to_lines(words: &[OcrWord]) -> Vec<OcrLine> {
         }
     }
 
+    for line in &mut groups {
+        line.sort_by(|a, b| {
+            a.rect
+                .x
+                .partial_cmp(&b.rect.x)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+    }
     groups
+}
+
+/// Groups recognized words into visual lines. Lines are ordered top→bottom;
+/// each line's text joins its words with single spaces and its rect is the
+/// union of their boxes.
+pub fn ocr_words_to_lines(words: &[OcrWord]) -> Vec<OcrLine> {
+    ocr_words_to_line_groups(words)
         .into_iter()
-        .map(|mut line| {
-            line.sort_by(|a, b| {
-                a.rect
-                    .x
-                    .partial_cmp(&b.rect.x)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
+        .map(|line| {
             let text = line
                 .iter()
                 .map(|w| w.text.as_str())
