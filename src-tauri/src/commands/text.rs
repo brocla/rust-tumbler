@@ -1,8 +1,8 @@
 use crate::commands::ocr::{
-    cache_get, ocr_page_into_cache, ocr_words_to_lines, ocr_words_to_text, OcrCache, OcrEngine,
-    OcrLine, OcrProgress,
+    cache_get, ocr_page_into_cache, ocr_words_to_line_groups, ocr_words_to_lines, ocr_words_to_text,
+    OcrCache, OcrEngine, OcrLine, OcrProgress,
 };
-use regex::Regex;
+use regex::RegexBuilder;
 use crate::error::AppError;
 use crate::state::{lock_mutex, AppState, DocEntry};
 use pdfium_render::prelude::*;
@@ -83,10 +83,61 @@ pub(crate) fn page_origin(page: &PdfPage) -> (f32, f32) {
 /// geometric sort entirely — it is the correct reading order for well-authored
 /// documents and preserves any line breaks encoded into the glyph stream.
 pub(crate) fn page_text_in_document_order(text: &PdfPageText) -> String {
-    text.chars()
-        .iter()
-        .filter_map(|ch| ch.unicode_char())
-        .collect()
+    page_text_with_char_index(text).text
+}
+
+/// A page's text together with the pdfium character index each piece came from.
+///
+/// Regex search needs both: the regex reports **byte** offsets into `text`,
+/// while pdfium's `segments_subset` — the call that yields highlight rectangles
+/// — wants **character indices**. The two do not line up. `text` is built with
+/// `filter_map`, silently dropping any character pdfium cannot decode, and
+/// every drop shifts the correspondence. Recovering the index by counting
+/// characters (`text[..m.start()].chars().count()`) is therefore wrong on
+/// exactly the documents most likely to contain odd encodings, and wrong
+/// quietly — it returns rectangles for the wrong glyphs rather than failing.
+pub(crate) struct PageText {
+    pub text: String,
+    /// `(byte offset in `text`, pdfium character index)` for every character
+    /// actually appended, in ascending order of both.
+    offsets: Vec<(usize, usize)>,
+}
+
+impl PageText {
+    /// Maps a byte range of `text` onto the `(start, count)` character range
+    /// `PdfPageText::segments_subset` expects, or `None` if the range covers no
+    /// characters.
+    ///
+    /// The count spans from the first to the last character of the match
+    /// *inclusive of anything dropped in between*, since those undecodable
+    /// characters still sit physically between the two on the page.
+    pub fn pdfium_range(&self, byte_start: usize, byte_end: usize) -> Option<(usize, usize)> {
+        let first = self.offsets.partition_point(|(b, _)| *b < byte_start);
+        let last = self.offsets.partition_point(|(b, _)| *b < byte_end);
+        if first >= last {
+            return None;
+        }
+        let start = self.offsets[first].1;
+        let end = self.offsets[last - 1].1;
+        Some((start, end - start + 1))
+    }
+}
+
+/// Builds a page's text in document order, recording where each character came
+/// from. See [`PageText`] for why the mapping cannot be reconstructed after the
+/// fact, and [`page_text_in_document_order`] for the reading-order rationale.
+pub(crate) fn page_text_with_char_index(text: &PdfPageText) -> PageText {
+    let mut out = String::new();
+    let mut offsets = Vec::new();
+    for ch in text.chars().iter() {
+        if let Some(c) = ch.unicode_char() {
+            // The char's own index, not the loop counter: the two agree today
+            // but only the former is pdfium's answer.
+            offsets.push((out.len(), ch.index()));
+            out.push(c);
+        }
+    }
+    PageText { text: out, offsets }
 }
 
 /// Collapses the rects of a *single* match into one box per line.
@@ -320,9 +371,24 @@ pub(crate) fn search_document_impl(
 
     // Compile the regex once (before any page loop) if regex mode is active.
     // An invalid pattern returns an error immediately.
+    //
+    // Multi-line and CRLF modes are on by default so `^` and `$` mean what a
+    // user coming from any text editor expects — the start and end of a *line*
+    // — without having to know that a page is matched as one long string.
+    // Inline flags still win, so `(?-m)^Invoice` restores whole-page anchoring.
+    //
+    // CRLF mode is not merely a convenience. pdfium extracts pages with `\r\n`
+    // endings, and plain multi-line `$` matches only immediately before the
+    // `\n` — i.e. *after* the `\r` — so a line ending in the query never
+    // matches at all. It also stops `.` from swallowing the `\r`, which matters
+    // because a match carrying a trailing carriage return would map to
+    // rectangles that include the line break.
     let regex_pattern = if use_regex {
         Some(
-            Regex::new(&query)
+            RegexBuilder::new(&query)
+                .multi_line(true)
+                .crlf(true)
+                .build()
                 .map_err(|e| AppError::Other(format!("Invalid regex: {e}")))?,
         )
     } else {
@@ -365,30 +431,29 @@ pub(crate) fn search_document_impl(
         if !search_native {
             // Nothing to do — the OCR fallback below owns this page.
         } else if let Some(ref re) = regex_pattern {
-            // Regex mode: extract the full page text, find all matches,
-            // then use pdfium's text.search() on each unique literal matched
-            // string to obtain the highlight rectangles.
-            // Deduplication prevents calling text.search() N times for the
-            // same string, which would return all page-wide occurrences each
-            // time and produce duplicate rects.
-            let full_text = page_text_in_document_order(&text);
-            let unique_matches: std::collections::HashSet<&str> =
-                re.find_iter(&full_text).map(|m| m.as_str()).collect();
-            // Use match_case(true): matched_str is the exact string the regex
-            // found, so the rect lookup must be case-exact so it does not also
-            // return rects for case-variants the regex did not select.
-            let lit_options = PdfSearchOptions::new().match_case(true);
-            for matched_str in &unique_matches {
-                if let Ok(search) = text.search(matched_str, &lit_options) {
-                    for match_segments in search.iter(PdfSearchDirection::SearchForward) {
-                        page_matches.extend(segments_to_match(
-                            &match_segments,
-                            page_height,
-                            origin_x,
-                            origin_y,
-                        ));
-                    }
-                }
+            // Regex mode: match against the page's text, then take each match's
+            // rectangles straight from its character offsets.
+            //
+            // This used to re-search the page for the matched *string* and take
+            // whatever pdfium found. That made an anchor decide only whether a
+            // page had any hit at all: `^Total` matched one line, then every
+            // "Total" on the page lit up, mid-line ones included. Going through
+            // the offsets means a match highlights the occurrence the regex
+            // actually selected — and the dedup that re-search needed (to stop
+            // one string returning its page-wide hits once per match) goes with
+            // it, so matches now come back in reading order rather than in
+            // whatever order a HashSet produced.
+            let page = page_text_with_char_index(&text);
+            for m in re.find_iter(&page.text) {
+                let Some((start, count)) = page.pdfium_range(m.start(), m.end()) else {
+                    continue;
+                };
+                page_matches.extend(segments_to_match(
+                    &text.segments_subset(start, count),
+                    page_height,
+                    origin_x,
+                    origin_y,
+                ));
             }
         } else {
             // Non-regex mode: delegate match_case / whole_word to pdfium.
@@ -419,23 +484,36 @@ pub(crate) fn search_document_impl(
                     // Regex mode: reconstruct page text with per-word byte
                     // offsets so patterns spanning multiple tokens (e.g.
                     // `Test\s+Fixture`) can match across word boundaries.
+                    //
+                    // Words are laid out in visual lines separated by `\n`, not
+                    // strung together with spaces: without the line breaks a
+                    // scanned page is one endless line, and `^`/`$` would mean
+                    // something different here than on a page with a native
+                    // text layer. Same grouping the text overlay uses, so the
+                    // lines agree with what the user sees.
                     let mut page_text = String::new();
-                    let mut word_spans: Vec<(usize, usize)> = Vec::new();
-                    for word in &words {
-                        let start = page_text.len();
-                        page_text.push_str(&word.text);
-                        word_spans.push((start, page_text.len()));
-                        page_text.push(' ');
+                    let mut spans: Vec<(usize, usize, &crate::commands::ocr::OcrWord)> = Vec::new();
+                    for (i, line) in ocr_words_to_line_groups(&words).into_iter().enumerate() {
+                        if i > 0 {
+                            page_text.push('\n');
+                        }
+                        for (j, word) in line.into_iter().enumerate() {
+                            if j > 0 {
+                                page_text.push(' ');
+                            }
+                            let start = page_text.len();
+                            page_text.push_str(&word.text);
+                            spans.push((start, page_text.len(), word));
+                        }
                     }
                     // One regex match spanning several word tokens is one
                     // match, holding that run of word boxes.
                     for mat in re.find_iter(&page_text) {
                         let (ms, me) = (mat.start(), mat.end());
-                        let rects: Vec<TextRect> = word_spans
+                        let rects: Vec<TextRect> = spans
                             .iter()
-                            .enumerate()
-                            .filter(|(_, &(ws, we))| ws < me && we > ms)
-                            .map(|(i, _)| ocr_word_rect(&words[i], page_height))
+                            .filter(|&&(ws, we, _)| ws < me && we > ms)
+                            .map(|&(_, _, word)| ocr_word_rect(word, page_height))
                             .collect();
                         if !rects.is_empty() {
                             page_matches.push(SearchMatch {
@@ -903,11 +981,17 @@ mod tests {
     /// side on one line. Rect is in PDF user space (origin bottom-left), as the
     /// cache stores it.
     fn ocr_word_at(text: &str, x: f32) -> OcrWord {
+        ocr_word_xy(text, x, 150.0)
+    }
+
+    /// An OCR word at an explicit position, so a test can lay out more than one
+    /// visual line. PDF user space, origin bottom-left: a larger `y` is higher.
+    fn ocr_word_xy(text: &str, x: f32, y: f32) -> OcrWord {
         OcrWord {
             text: text.to_string(),
             rect: TextRect {
                 x,
-                y: 150.0,
+                y,
                 width: 40.0,
                 height: 12.0,
             },
@@ -1328,13 +1412,16 @@ mod tests {
         assert!(result.is_err(), "invalid regex should return an error");
     }
 
-    /// The regex path deduplicates matched strings before calling
-    /// text.search(), so each unique literal is searched once.  The fixture
-    /// contains two 'e' characters; with dedup, text.search("e") yields 2
-    /// matches — not 4 (which would result from calling it once per regex
-    /// match without deduplication).
+    /// Each regex match is one result, and repeated text does not multiply.
+    ///
+    /// This used to pin a deduplication step: the old implementation re-searched
+    /// the page for each matched *string*, which returned that string's
+    /// page-wide occurrences once per match, so two 'e's produced four rects
+    /// unless the strings were deduplicated first. Matches now come from their
+    /// own character offsets, so there is nothing to deduplicate — but the
+    /// count it asserts is still exactly right, and still worth holding.
     #[test]
-    fn test_search_regex_dedup_prevents_duplicate_rects() {
+    fn test_search_regex_one_result_per_match() {
         let pdfium = crate::test_pdfium();
         let state = AppState::new(pdfium.get(), None);
         open_fixture(&state, "doc1");
@@ -1354,7 +1441,7 @@ mod tests {
         assert_eq!(
             results[0].matches.len(),
             2,
-            "exactly 2 matches expected (one per 'e'); got {} — dedup may be broken",
+            "exactly 2 matches expected, one per 'e'; got {}",
             results[0].matches.len()
         );
     }
@@ -1641,6 +1728,261 @@ mod tests {
         );
 
         std::fs::remove_file(&path).ok();
+    }
+
+    // ── Regex line anchors (issue #113) ────────────────────────────────────
+
+    /// Writes a one-page PDF with each string on its own visual line. pdfium
+    /// extracts these separated by `\r\n`, which is the whole reason `$` needs
+    /// CRLF mode.
+    fn write_lines_pdf(path: &str, lines: &[&str]) {
+        use lopdf::{dictionary, Dictionary, Document, Object, Stream};
+
+        let mut content = String::from("BT\n/F1 12 Tf\n20 150 Td\n");
+        for (i, line) in lines.iter().enumerate() {
+            if i > 0 {
+                content.push_str("0 -20 Td ");
+            }
+            content.push_str(&format!("({line}) Tj\n"));
+        }
+        content.push_str("ET\n");
+
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        let contents_id = doc.add_object(Stream::new(Dictionary::new(), content.into_bytes()));
+        let font_id = doc.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "Helvetica",
+        });
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "Contents" => contents_id,
+            "Resources" => dictionary! {
+                "Font" => dictionary! { "F1" => Object::Reference(font_id) },
+            },
+            "MediaBox" => vec![
+                Object::Integer(0), Object::Integer(0),
+                Object::Integer(300), Object::Integer(200),
+            ],
+        });
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![Object::Reference(page_id)],
+                "Count" => Object::Integer(1),
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        doc.trailer.set("Root", catalog_id);
+        doc.save(path).expect("write lines pdf");
+    }
+
+    /// Opens a two-line page reading "Total 5" / "Subtotal Total" under
+    /// `doc_id`, and returns its temp path for cleanup.
+    fn open_two_line_doc(state: &AppState, doc_id: &str) -> String {
+        let path = temp_txt(&format!("tumbler_lines_{doc_id}.pdf"));
+        write_lines_pdf(&path, &["Total 5", "Subtotal Total"]);
+        let entry = DocEntry::load(state.pdfium, &path, None).expect("load");
+        state.insert_document(doc_id.to_string(), entry).expect("insert");
+        path
+    }
+
+    fn regex_matches(state: &AppState, doc_id: &str, pattern: &str) -> Vec<SearchResult> {
+        search_document_impl(
+            state,
+            doc_id.to_string(),
+            pattern.to_string(),
+            false, // match_case
+            false, // whole_word
+            true,  // use_regex
+        )
+        .expect("search")
+    }
+
+    fn match_count(results: &[SearchResult]) -> usize {
+        results.iter().map(|r| r.matches.len()).sum()
+    }
+
+    /// `^` and `$` mean start and end of a *line*, with no flags typed. The
+    /// user should not have to know that a page is matched as one long string.
+    #[test]
+    fn regex_anchors_are_line_anchors_by_default() {
+        let pdfium = crate::test_pdfium();
+        let state = AppState::new(pdfium.get(), None);
+        let path = open_two_line_doc(&state, "lines");
+
+        // Sanity: the page really is two CRLF-separated lines.
+        {
+            let entry = state.get_document("lines").expect("get");
+            let entry = lock_mutex(&entry).expect("lock");
+            let page = entry.document.pages().get(0).expect("page");
+            assert_eq!(
+                page_text_in_document_order(&page.text().expect("text")),
+                "Total 5\r\nSubtotal Total"
+            );
+        }
+
+        // Unanchored: both capital-T "Total"s ("Subtotal" is lowercase inside).
+        assert_eq!(match_count(&regex_matches(&state, "lines", "Total")), 2);
+
+        // Line start: only line 1 begins with it.
+        assert_eq!(
+            match_count(&regex_matches(&state, "lines", "^Total")),
+            1,
+            "^ should anchor to a line, and select only that occurrence"
+        );
+
+        // Line end: only line 2 ends with it. Without CRLF mode the `\r` would
+        // sit between "Total" and the line break and this would find nothing.
+        assert_eq!(
+            match_count(&regex_matches(&state, "lines", "Total$")),
+            1,
+            "$ must see through the CRLF line ending"
+        );
+
+        // Whole line.
+        assert_eq!(match_count(&regex_matches(&state, "lines", "^Total 5$")), 1);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// The escape hatch: inline flags still beat the defaults, so anyone who
+    /// wants the old whole-page anchoring can still ask for it.
+    #[test]
+    fn regex_inline_flag_restores_page_anchoring() {
+        let pdfium = crate::test_pdfium();
+        let state = AppState::new(pdfium.get(), None);
+        let path = open_two_line_doc(&state, "lines");
+
+        // Page-anchored: matches at the very start of the page text only.
+        assert_eq!(match_count(&regex_matches(&state, "lines", "(?-m)^Total")), 1);
+        // ...and nothing ends the *page* with "Total 5".
+        assert!(regex_matches(&state, "lines", "(?-m)Total 5$").is_empty());
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// The regression for the heart of issue #113: an anchored pattern must
+    /// select the occurrence it matched, not merely mark the page as having a
+    /// hit. Before the fix `^Total` highlighted both "Total"s on this page,
+    /// because the rectangles came from re-searching the page for the matched
+    /// *string* rather than from the match's own offsets.
+    #[test]
+    fn regex_anchor_selects_only_the_matched_occurrence() {
+        let pdfium = crate::test_pdfium();
+        let state = AppState::new(pdfium.get(), None);
+        let path = open_two_line_doc(&state, "lines");
+
+        let results = regex_matches(&state, "lines", "^Total");
+        assert_eq!(match_count(&results), 1);
+
+        // It is line 1's occurrence, not line 2's. Line 1 sits higher on the
+        // page, so in top-left coordinates it has the smaller y.
+        let anchored = &results[0].matches[0].rects[0];
+        let line2 = {
+            let all = regex_matches(&state, "lines", "Total$");
+            all[0].matches[0].rects[0].y
+        };
+        assert!(
+            anchored.y < line2,
+            "^Total selected the wrong line: y={} vs line 2 y={line2}",
+            anchored.y
+        );
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// Matches come back in reading order. The old implementation collected
+    /// matched strings into a `HashSet`, so the order results arrived in was
+    /// whatever the hasher produced — which the "next match" button walks.
+    #[test]
+    fn regex_matches_are_in_reading_order() {
+        let pdfium = crate::test_pdfium();
+        let state = AppState::new(pdfium.get(), None);
+        let path = temp_txt("tumbler_order.pdf");
+        write_lines_pdf(&path, &["alpha", "beta", "gamma", "delta"]);
+        let entry = DocEntry::load(state.pdfium, &path, None).expect("load");
+        state.insert_document("ord".to_string(), entry).expect("insert");
+
+        let results = regex_matches(&state, "ord", "^[a-z]+$");
+        assert_eq!(match_count(&results), 4);
+        let ys: Vec<f32> = results[0].matches.iter().map(|m| m.rects[0].y).collect();
+        assert!(
+            ys.windows(2).all(|w| w[0] < w[1]),
+            "matches out of reading order: {ys:?}"
+        );
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// A page whose text drops a character pdfium cannot decode: the byte
+    /// offsets the regex reports no longer line up with pdfium's character
+    /// indices, and the highlight would land on the wrong glyphs.
+    ///
+    /// Authoring a PDF with an undecodable glyph is fiddly and fragile, so this
+    /// pins the mapping directly. The layout below is what
+    /// `page_text_with_char_index` produces for a page whose pdfium characters
+    /// are `A`, <undecodable>, `B`, `C` — the text is "ABC", but `B` is pdfium
+    /// character 2, not 1.
+    #[test]
+    fn page_text_char_index_survives_dropped_characters() {
+        let page = PageText {
+            text: "ABC".to_string(),
+            offsets: vec![(0, 0), (1, 2), (2, 3)],
+        };
+
+        // "A" alone: pdfium character 0, one character.
+        assert_eq!(page.pdfium_range(0, 1), Some((0, 1)));
+        // "B" alone: character 2 — counting chars in "A" would have said 1.
+        assert_eq!(page.pdfium_range(1, 2), Some((2, 1)));
+        // "BC": characters 2..=3.
+        assert_eq!(page.pdfium_range(1, 3), Some((2, 2)));
+        // "ABC" spans 0..=3 — four characters, because the dropped one still
+        // sits physically between A and B on the page.
+        assert_eq!(page.pdfium_range(0, 3), Some((0, 4)));
+        // An empty range selects nothing rather than panicking.
+        assert_eq!(page.pdfium_range(1, 1), None);
+    }
+
+    /// Anchors mean the same thing on a scanned page as on a native one. The
+    /// OCR fallback lays its words out in visual lines separated by `\n`; when
+    /// it strung them together with spaces, a scan was one endless line and
+    /// `^`/`$` silently degraded to page start/end.
+    #[test]
+    fn regex_anchors_work_on_ocr_pages() {
+        let pdfium = crate::test_pdfium();
+        let state = AppState::new(pdfium.get(), None);
+        open_blank_doc(&state, "scan", 1);
+
+        // Two visual lines: "Total 5" over "Subtotal Total".
+        // Larger y is higher up the page, so line 1 is y=150.
+        state.set_ocr_words(
+            "scan",
+            1,
+            vec![
+                ocr_word_xy("Total", 10.0, 150.0),
+                ocr_word_xy("5", 60.0, 150.0),
+                ocr_word_xy("Subtotal", 10.0, 120.0),
+                ocr_word_xy("Total", 70.0, 120.0),
+            ],
+        );
+
+        assert_eq!(match_count(&regex_matches(&state, "scan", "Total")), 2);
+        assert_eq!(
+            match_count(&regex_matches(&state, "scan", "^Total")),
+            1,
+            "^ must anchor to an OCR line, not to the whole page"
+        );
+        assert_eq!(
+            match_count(&regex_matches(&state, "scan", "Total$")),
+            1,
+            "$ must anchor to an OCR line, not to the whole page"
+        );
+        // Cross-line patterns still work, since the lines are one string.
+        assert_eq!(match_count(&regex_matches(&state, "scan", r"5\s+Subtotal")), 1);
     }
 
     #[test]
