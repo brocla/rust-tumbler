@@ -73,3 +73,11 @@ jobs:
           releaseBody: "See the assets below to download and install Tumbler."
           releaseDraft: false
           prerelease: false
+          # Restores the "What's Changed" / "New Contributors" / "Full
+          # Changelog" sections GitHub generates from the merged PRs since the
+          # previous release. Releases published by hand before this workflow
+          # existed had them, because the UI's "Generate release notes" button
+          # asks for them; the API does not unless told to, and this input
+          # defaults to false. `releaseBody` above is pre-pended to the
+          # generated notes rather than replacing them.
+          generateReleaseNotes: true
