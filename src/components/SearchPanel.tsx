@@ -27,9 +27,11 @@ export function SearchPanel() {
   const [useRegex, setUseRegex] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout>>();
-  // Tracks whether the component has completed its first render so the
-  // search-mode effect can skip the initial (no-op) run.
-  const isMountedRef = useRef(false);
+  // Set once, on the first render, and never again: the search-mode effect
+  // uses it only to skip its initial (no-op) run. Nothing else may reset it —
+  // a ref written by one effect and read by another is how the first toggle
+  // after a tab switch used to be swallowed.
+  const didMountRef = useRef(false);
 
   const docId = activeTab?.docId ?? "";
   const tabId = activeTab?.id ?? "";
@@ -127,24 +129,36 @@ export function SearchPanel() {
     inputRef.current?.select();
   }, []);
 
+  // Drop any armed keystroke search on the way out, so a panel closed
+  // mid-typing doesn't fire a search against an unmounted component.
+  useEffect(
+    () => () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+    },
+    [],
+  );
+
   // Clear any stale search/OCR state when switching tabs.
-  // Also reset isMountedRef so the toggle-mode effect does not fire a
-  // cross-tab search on the first toggle after a tab switch.
   useEffect(() => {
     setSearchError(null);
     setOcrError(null);
     setOcrDonePages(new Set());
-    isMountedRef.current = false;
   }, [tabId]);
 
   // Re-run search when a mode toggle changes (if there is an active query).
   // Skip the initial mount — the effect only matters when the user toggles
   // a mode after the component is already showing results.
   useEffect(() => {
-    if (!isMountedRef.current) {
-      isMountedRef.current = true;
+    if (!didMountRef.current) {
+      didMountRef.current = true;
       return;
     }
+    // A recent keystroke may have armed a debounced search that still carries
+    // the *previous* flags — it was queued before this toggle. Letting it fire
+    // would overwrite the results below with a search in the old mode, a
+    // fraction of a second after they appear. Typing "^Print" and reaching for
+    // the regex button is exactly that sequence.
+    if (debounceRef.current) clearTimeout(debounceRef.current);
     if (query.length > 0) {
       doSearch(query);
     }

@@ -244,6 +244,68 @@ describe("SearchPanel", () => {
     });
   });
 
+  /**
+   * Typing arms a 300ms debounce that captures the flags as they were at that
+   * keystroke. Reaching for a mode button straight after typing — the natural
+   * way to use these toggles — used to let that stale timer fire *after* the
+   * toggle's own search, overwriting correct results with a search in the old
+   * mode. The visible symptom was a button that appeared to do nothing.
+   */
+  it("toggling a mode cancels a debounce armed by an earlier keystroke", async () => {
+    vi.useFakeTimers();
+    try {
+      setTab();
+      vi.mocked(invoke).mockResolvedValue([]);
+      render(<SearchPanel />);
+
+      const input = screen.getByPlaceholderText("Search...");
+      fireEvent.change(input, { target: { value: "^Print" } });
+
+      // Toggle before the debounce elapses.
+      await act(async () => {
+        fireEvent.click(screen.getByTitle("Regular expression"));
+      });
+
+      const afterToggle = vi.mocked(invoke).mock.calls.length;
+      expect(afterToggle).toBe(1);
+      expect(vi.mocked(invoke).mock.calls[0][1]).toMatchObject({
+        query: "^Print",
+        useRegex: true,
+      });
+
+      // Let the old timer's deadline pass: it must not fire.
+      await act(async () => {
+        vi.advanceTimersByTime(600);
+      });
+
+      expect(vi.mocked(invoke).mock.calls.length).toBe(afterToggle);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a debounced search armed before unmount never fires", async () => {
+    vi.useFakeTimers();
+    try {
+      setTab();
+      vi.mocked(invoke).mockResolvedValue([]);
+      const { unmount } = render(<SearchPanel />);
+
+      fireEvent.change(screen.getByPlaceholderText("Search..."), {
+        target: { value: "Print" },
+      });
+      unmount();
+
+      await act(async () => {
+        vi.advanceTimersByTime(600);
+      });
+
+      expect(invoke).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("toggling a flag after a tab switch does not fire a cross-tab search", async () => {
     // Start on tab A with an active query.
     usePdfStore.setState({
@@ -259,8 +321,6 @@ describe("SearchPanel", () => {
 
     const { rerender } = render(<SearchPanel />);
 
-    // Switch to tab B — this should reset isMountedRef so the next toggle
-    // skips the search (avoids a cross-tab invoke with doc-a's query).
     await act(async () => {
       usePdfStore.setState({ activeTabId: "tab-b" });
       rerender(<SearchPanel />);
@@ -268,19 +328,23 @@ describe("SearchPanel", () => {
 
     vi.mocked(invoke).mockClear();
 
-    // Toggle a flag on tab B. Because isMountedRef was reset, the effect
-    // skips this first run and does NOT call invoke.
     await act(async () => {
       fireEvent.click(screen.getByTitle("Match case"));
       await new Promise((r) => setTimeout(r, 50));
     });
 
-    // invoke must not have been called with doc-a's stale query.
-    const crossTabCall = vi.mocked(invoke).mock.calls.find(
-      (call) =>
-        call[0] === "search_document" &&
-        (call[1] as Record<string, unknown>)["docId"] === "doc-a",
-    );
-    expect(crossTabCall).toBeUndefined();
+    // The search must run against the tab now in front, never the one left
+    // behind. `doSearch` reads the current docId, so this was never actually
+    // at risk — the guard that used to swallow this toggle entirely was
+    // protecting against something that could not happen, at the cost of a
+    // button that did nothing once per tab switch.
+    const calls = vi
+      .mocked(invoke)
+      .mock.calls.filter((call) => call[0] === "search_document");
+    expect(calls).toHaveLength(1);
+    expect(calls[0][1]).toMatchObject({ docId: "doc-b", matchCase: true });
+    expect(
+      calls.some((c) => (c[1] as Record<string, unknown>)["docId"] === "doc-a"),
+    ).toBe(false);
   });
 });
