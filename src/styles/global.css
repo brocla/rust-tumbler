@@ -850,7 +850,7 @@ input[type="radio"].form-check:checked {
   /* Restarted by a key change in HighlightLayer every time the active match
      moves — including when the new match was already on screen, which is
      exactly the case where nothing else on the page changes. */
-  animation: search-highlight-pulse 600ms ease-out 2;
+  animation: search-highlight-pulse 600ms ease-out 1;
 }
 
 @keyframes search-highlight-pulse {
