@@ -23,8 +23,15 @@
   --color-error: #d13438;
   --color-warning: #f7630c;
 
-  --color-highlight: rgba(255, 210, 0, 0.35);
-  --color-highlight-active: rgba(255, 150, 0, 0.5);
+  /* Search highlights. The inactive fill is multiplied into the page, so it
+     reads as ink on paper and leaves glyphs legible. The active match instead
+     paints normally and carries a solid ring: magenta because it has to be
+     unmistakable against both the yellow of its neighbours and the black text,
+     blue links and red stamps of an ordinary document. */
+  --color-highlight: rgba(255, 214, 0, 0.4);
+  --color-highlight-active: rgba(255, 0, 170, 0.25);
+  --color-highlight-ring: #ff007f;
+  --color-highlight-glow: rgba(255, 0, 127, 0.45);
 
   --toolbar-h: 42px;
   --tabbar-h: 34px;
@@ -86,6 +93,15 @@
 
     --color-error: LinkText;
     --color-warning: LinkText;
+
+    /* System colors, per the rest of this block. The inactive fill stays
+       multiplied, which with an opaque source keeps dark glyphs dark and only
+       tints the paper. The active match drops its fill entirely and is marked
+       by the ring alone, so nothing is painted over the text. */
+    --color-highlight: Highlight;
+    --color-highlight-active: transparent;
+    --color-highlight-ring: Highlight;
+    --color-highlight-glow: transparent;
 
     --shadow-sm: none;
     --shadow-md: none;
@@ -280,6 +296,11 @@ body {
   }
   .birthday-notes {
     display: none;
+  }
+  /* The ring and its contrast against everything else still mark the active
+     match; only the pulse that draws the eye to it is dropped. */
+  .search-highlight.active {
+    animation: none;
   }
 }
 
@@ -803,8 +824,51 @@ input[type="radio"].form-check:checked {
   border-radius: 1px;
 }
 
+/* Invert display mode filters the *canvas*, not this overlay, so the page goes
+   near-black while the highlight does not. Multiplying yellow into black is
+   black — the highlights simply disappear. Screen is multiply's mirror image:
+   bright against the dark paper, and it leaves the (now white) glyphs alone.
+   Sepia keeps the page light, so it still wants multiply. The active match is
+   excluded on purpose: it sets its own blend below, and this selector is the
+   more specific one, so without the :not() it would quietly win. */
+.page-slot[data-display="invert"] .search-highlight:not(.active) {
+  mix-blend-mode: screen;
+}
+
+/* The one the user is standing on. It opts out of the blend entirely:
+   mix-blend-mode applies to everything an element paints, ring and glow
+   included, so leaving it on would multiply the ring into the page and sink it
+   on dark content. A translucent fill keeps the text readable underneath while
+   the solid ring does the work of being seen. */
 .search-highlight.active {
+  mix-blend-mode: normal;
   background: var(--color-highlight-active);
+  border-radius: 2px;
+  box-shadow:
+    0 0 0 2px var(--color-highlight-ring),
+    0 0 8px 3px var(--color-highlight-glow);
+  /* Restarted by a key change in HighlightLayer every time the active match
+     moves — including when the new match was already on screen, which is
+     exactly the case where nothing else on the page changes. */
+  animation: search-highlight-pulse 600ms ease-out 1;
+}
+
+@keyframes search-highlight-pulse {
+  0% {
+    box-shadow:
+      0 0 0 2px var(--color-highlight-ring),
+      0 0 0 0 var(--color-highlight-glow);
+  }
+  50% {
+    box-shadow:
+      0 0 0 4px var(--color-highlight-ring),
+      0 0 14px 6px var(--color-highlight-glow);
+  }
+  100% {
+    box-shadow:
+      0 0 0 2px var(--color-highlight-ring),
+      0 0 8px 3px var(--color-highlight-glow);
+  }
 }
 
 /* Empty state */
