@@ -187,6 +187,18 @@ pub(crate) fn encode_for_font(text: &str) -> Vec<u8> {
     text.chars().filter_map(win_ansi_byte).collect()
 }
 
+/// Test-only convenience: [`build_invisible_text_stream_runs`] at line
+/// granularity, which is what every production caller outside redaction asks
+/// for.
+///
+/// Compiled only for tests — `commands` is a private module, so a wrapper
+/// nothing in the crate calls is genuinely unreachable, and rustc reports it
+/// as dead rather than taking `pub` at face value.
+#[cfg(test)]
+pub fn build_invisible_text_stream(words: &[OcrWord], font_name: &str) -> Result<Vec<u8>, AppError> {
+    build_invisible_text_stream_runs(words, font_name, false)
+}
+
 /// Builds the invisible-text content stream for one page's worth of OCR words.
 ///
 /// Words are grouped into visual **lines** with the same [`ocr_words_to_lines`]
@@ -210,12 +222,8 @@ pub(crate) fn encode_for_font(text: &str) -> Vec<u8> {
 /// page) — a legitimate "nothing to write". An encoding failure is returned as
 /// `Err` rather than collapsed into an empty stream, so the caller can't mistake
 /// a real error for an empty page and silently drop the layer.
-pub fn build_invisible_text_stream(words: &[OcrWord], font_name: &str) -> Result<Vec<u8>, AppError> {
-    build_invisible_text_stream_runs(words, font_name, false)
-}
-
-/// [`build_invisible_text_stream`] with a run-granularity switch. With
-/// `per_word` set, every OCR word becomes its own run at its own (tight) box
+///
+/// With `per_word` set, every OCR word becomes its own run at its own (tight) box
 /// instead of being grouped into lines. Redaction (issue #1) needs this for
 /// its re-OCR of flattened pages: a line-unioned run would be Tz-stretched
 /// across the burned gap where a mid-line word was redacted, positioning
