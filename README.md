@@ -126,3 +126,11 @@ npm test           # frontend (Vitest)
 cargo test         # backend (from src-tauri/)
 ```
 
+
+## License
+
+Tumbler is released under the [MIT License](LICENSE).
+
+The Windows installers also redistribute PDFium (BSD-3-Clause), qpdf
+(Apache-2.0) and the Microsoft Visual C++ runtime, each under its own terms.
+See [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
