@@ -64,8 +64,14 @@ pub trait Linearizer: Send + Sync {
 
 /// Test-only: copies bytes unchanged, so command logic (temp-file handoff,
 /// destination guards, cleanup) can be exercised without a real qpdf.dll.
+///
+/// Compiled only for tests, so the claim above is enforced rather than merely
+/// asserted — `commands` is a private module, so an item nothing in the crate
+/// calls is genuinely unreachable, and rustc says so.
+#[cfg(test)]
 pub struct StubLinearizer;
 
+#[cfg(test)]
 impl Linearizer for StubLinearizer {
     fn linearize(&self, src: &Path, dest: &Path) -> Result<(), AppError> {
         std::fs::copy(src, dest).map_err(|e| AppError::io("Failed to copy PDF (stub)", e))?;
