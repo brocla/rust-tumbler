@@ -4,6 +4,7 @@ members = [".", "thumbnailer"]
 [package]
 name = "tumbler"
 version = "2.14.2"
+license = "MIT"
 edition = "2021"
 
 [lib]

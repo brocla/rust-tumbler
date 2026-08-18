@@ -1,6 +1,7 @@
 [package]
 name = "tumbler-thumbnailer"
 version = "2.0.0"
+license = "MIT"
 edition = "2021"
 
 [lib]
