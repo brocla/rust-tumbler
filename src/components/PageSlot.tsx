@@ -7,6 +7,8 @@ import { FormLayer } from "./FormLayer";
 import { HighlightLayer } from "./HighlightLayer";
 import { RedactLayer } from "./RedactLayer";
 import { TypewriterLayer } from "./TypewriterLayer";
+import { InkLayer } from "./InkLayer";
+import { usePdfStore } from "../store/usePdfStore";
 
 interface HighlightMatch {
   rects: { x: number; y: number; width: number; height: number }[];
@@ -52,6 +54,9 @@ export function PageSlot({
   activeMatchIndex,
   redactedPreview = false,
 }: PageSlotProps) {
+  // Mounted only while the Ink Signature tool is open, so the drawing surface
+  // never sits over the page (swallowing clicks) at any other time.
+  const inkActive = usePdfStore((s) => s.activeSidebarTool === "ink");
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [rendered, setRendered] = useState(false);
   const [failed, setFailed] = useState(false);
@@ -192,6 +197,9 @@ export function PageSlot({
             pageNumber={pageNumber}
             zoom={zoom}
           />
+          {inkActive && (
+            <InkLayer docId={docId} pageNumber={pageNumber} zoom={zoom} />
+          )}
         </>
       )}
       {!rendered && !failed && <div className="page-loading">Loading...</div>}

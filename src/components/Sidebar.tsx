@@ -8,6 +8,7 @@ import { OptimizePanel } from "./OptimizePanel";
 import { MarginsPanel } from "./MarginsPanel";
 import { RedactPanel } from "./RedactPanel";
 import { TypewriterPanel } from "./TypewriterPanel";
+import { InkPanel } from "./InkPanel";
 
 const MIN_WIDTH = 150;
 const MAX_WIDTH = 500;
@@ -80,6 +81,7 @@ export function Sidebar() {
         {activeTool === "margins" && <MarginsPanel />}
         {activeTool === "redact" && <RedactPanel />}
         {activeTool === "typewriter" && <TypewriterPanel />}
+        {activeTool === "ink" && <InkPanel />}
       </div>
       <div className="sidebar-resize-handle" onMouseDown={handleMouseDown} />
     </div>
