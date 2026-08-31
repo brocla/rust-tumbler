@@ -27,6 +27,7 @@
 //!   display fit is conjugated through the page's rotation to produce the
 //!   user-space wrap matrix.
 
+use crate::commands::page_space::{inherited_rect, inherited_rotate};
 use crate::commands::pages::{emit_pages_edited, page_info_from_doc};
 use crate::commands::text_layer::contents_refs;
 use crate::commands::typewriter::{
@@ -221,7 +222,7 @@ fn analyze_margins_impl(
 // ── Fit math (pure) ──────────────────────────────────────────────────────────
 
 /// Affine matrix in PDF `cm` order: `x' = a·x + c·y + e`, `y' = b·x + d·y + f`.
-type Mat = [f32; 6];
+use crate::commands::page_space::Mat;
 
 const IDENTITY: Mat = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
 
@@ -302,52 +303,6 @@ fn user_fit_matrix(display: Mat, rotate: i64, ebox: [f32; 4]) -> Mat {
 }
 
 // ── lopdf page geometry ──────────────────────────────────────────────────────
-
-/// Resolves a page's (possibly inherited) rect entry — `/MediaBox` or
-/// `/CropBox` — normalized so `x0 < x1`, `y0 < y1`.
-fn inherited_rect(doc: &Document, page_id: ObjectId, key: &[u8]) -> Option<[f32; 4]> {
-    let mut current = page_id;
-    for _ in 0..64 {
-        let dict = doc.get_object(current).ok()?.as_dict().ok()?;
-        if let Ok(value) = dict.get(key) {
-            let arr = match value {
-                Object::Reference(r) => doc.get_object(*r).ok()?.as_array().ok()?,
-                Object::Array(a) => a,
-                _ => return None,
-            };
-            if arr.len() >= 4 {
-                let v: Vec<f32> = arr.iter().map(object_as_f32).collect();
-                return Some([
-                    v[0].min(v[2]),
-                    v[1].min(v[3]),
-                    v[0].max(v[2]),
-                    v[1].max(v[3]),
-                ]);
-            }
-        }
-        current = dict.get(b"Parent").ok()?.as_reference().ok()?;
-    }
-    None
-}
-
-/// A page's (possibly inherited) `/Rotate`, defaulting to 0.
-fn inherited_rotate(doc: &Document, page_id: ObjectId) -> i64 {
-    let mut current = page_id;
-    for _ in 0..64 {
-        let Some(dict) = doc.get_object(current).ok().and_then(|o| o.as_dict().ok()) else {
-            return 0;
-        };
-        match dict.get(b"Rotate") {
-            Ok(Object::Integer(r)) => return *r,
-            _ => {}
-        }
-        match dict.get(b"Parent").and_then(|p| p.as_reference()) {
-            Ok(parent) => current = parent,
-            Err(_) => return 0,
-        }
-    }
-    0
-}
 
 /// The box pdfium displays: `/CropBox` when present, else `/MediaBox`, else
 /// US Letter.
