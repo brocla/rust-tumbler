@@ -65,7 +65,7 @@ rust-tumbler/
 | `text_layer.rs` | embed an invisible OCR text layer into the document buffer (lopdf; issue #4) |
 | `typewriter.rs` | place free-text "typewriter" notes anywhere on a page as FreeText annotations with a generated appearance stream (lopdf on the buffer; re-hydrated on open; issue #99) |
 | `ink.rs` | Ink Signature: freehand strokes flattened into the page content stream (lopdf on the buffer; issue #120) |
-| `page_space.rs` | not a command — the shared conversion between the frontend's coordinates and PDF user space, for pages with a `/Rotate` or a CropBox. Used by Typewriter, Ink and Expand Margins (issue #121) |
+| `page_space.rs` | not a command — the shared conversion between the frontend's coordinates and PDF user space, for pages with a `/Rotate` or a CropBox. Used by Typewriter and Ink; its inherited box / rotate readers are also used by Expand Margins (issue #121) |
 | `forms.rs` | AcroForm field discovery + inline value writes (lopdf on the buffer; issue #2) |
 | `signature.rs` | digital-signature integrity verification, read-only (lopdf `/ByteRange` parse; CMS parsed via Windows CryptoAPI `CryptMsg*`, which handles Adobe's BER encoding; issues #17, #39) |
 | `conformance.rs` | declared ISO sub-format detection — PDF/A, PDF/X, PDF/E, PDF/UA — from the XMP packet (lopdf) |

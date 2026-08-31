@@ -340,6 +340,47 @@ mod tests {
         assert!(text.contains("20.00 180.00 m"), "stroke start lost: {text}");
     }
 
+    /// The seam the two halves of this meet at: the rotation the *app* writes
+    /// versus the rotation the ink writer reads.
+    ///
+    /// Every other rotation test authors `/Rotate` with lopdf. This one goes
+    /// through the real user flow — rotate the page in Tumbler, then sign it —
+    /// so the `/Rotate` under test is the one pdfium produced via
+    /// `rotate_pages_impl` and `save_to_bytes`, read back by lopdf's
+    /// `inherited_rotate`. Nothing else covers that hand-off, and it is the
+    /// path a user is most likely to take: pages get rotated because they were
+    /// scanned sideways, and a sideways scan is exactly what needs signing.
+    ///
+    /// The square fixture is enough here — the width/height swap is pinned on
+    /// non-square pages above, and ignoring rotation still moves an off-centre
+    /// point on a square page.
+    #[test]
+    fn ink_lands_correctly_after_the_page_is_rotated_through_the_app() {
+        let pdfium = crate::test_pdfium();
+        let state = fixture_state(pdfium.get());
+
+        crate::commands::pages::rotate_pages_impl(&state, "doc1".to_string(), vec![1], 1)
+            .expect("rotate the page 90° the way the toolbar does");
+
+        assert!(
+            apply_ink_impl(&state, "doc1".to_string(), 1, vec![STROKE.to_vec()]).expect("apply"),
+            "ink must be applied"
+        );
+
+        let buffer = {
+            let entry = state.get_document("doc1").expect("get");
+            let entry = lock_mutex(&entry).expect("lock");
+            entry.buffer.clone()
+        };
+
+        crate::assert_mark_landed(
+            crate::rendered_mark_bbox(pdfium.get(), buffer, false, is_ink),
+            STROKE_BOX,
+            NIB_TOL,
+            "rotated through the page-ops path",
+        );
+    }
+
     /// The end-to-end question the unit tests cannot answer: after the ink is
     /// flattened, does pdfium actually *draw* it? Renders the edited document
     /// and looks for a blue pixel. If the stream were appended wrongly — bad
