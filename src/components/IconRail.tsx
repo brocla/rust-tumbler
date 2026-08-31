@@ -74,7 +74,10 @@ export function IconRail() {
         onClick={() => setSidebarTool("ink")}
         title="Ink Signature"
       >
-        <PenTool size={20} />
+        {/* Rotated: lucide's nib points up-right, which reads as a vector
+            pen-path tool. Turned 180° it points down-left, the way a pen is
+            held to sign. */}
+        <PenTool size={20} style={{ transform: "rotate(180deg)" }} />
       </button>
     </div>
   );
