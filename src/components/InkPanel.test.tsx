@@ -36,8 +36,7 @@ const inkCalls = () =>
 describe("InkPanel", () => {
   beforeEach(() => {
     vi.mocked(invoke).mockReset();
-    // page_rotation answers 0 (unrotated) unless a test says otherwise.
-    vi.mocked(invoke).mockResolvedValue(0 as never);
+    vi.mocked(invoke).mockResolvedValue(undefined as never);
     setTab();
   });
 
@@ -137,16 +136,6 @@ describe("InkPanel", () => {
     fireEvent.keyDown(window, { key: "z", ctrlKey: true });
 
     expect(usePdfStore.getState().ink!.strokes).toHaveLength(1);
-  });
-
-  it("refuses to draw on a rotated page rather than misplace the ink", async () => {
-    vi.mocked(invoke).mockResolvedValue(90 as never);
-
-    await act(async () => {
-      render(<InkPanel />);
-    });
-
-    expect(screen.getByText(/rotated 90°/)).toBeInTheDocument();
   });
 
   it("says plainly that this is not a digital signature", () => {

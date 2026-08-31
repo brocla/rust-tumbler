@@ -54,7 +54,6 @@ pub fn run() {
             commands::text_layer::add_text_layer,
             commands::typewriter::apply_typewriter,
             commands::ink::apply_ink,
-            commands::ink::page_rotation,
             commands::typewriter::read_typewriter,
             commands::ocr::ocr_page,
             commands::ocr::ocr_document,

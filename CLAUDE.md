@@ -64,6 +64,8 @@ rust-tumbler/
 | `margins.rs` | Expand Margins: detect each page's ink bounding box (pdfium raster scan) and scale content uniformly to fill the page (lopdf `q cm … Q` wrap; annotations ride along) |
 | `text_layer.rs` | embed an invisible OCR text layer into the document buffer (lopdf; issue #4) |
 | `typewriter.rs` | place free-text "typewriter" notes anywhere on a page as FreeText annotations with a generated appearance stream (lopdf on the buffer; re-hydrated on open; issue #99) |
+| `ink.rs` | Ink Signature: freehand strokes flattened into the page content stream (lopdf on the buffer; issue #120) |
+| `page_space.rs` | not a command — the shared conversion between the frontend's coordinates and PDF user space, for pages with a `/Rotate` or a CropBox. Used by Typewriter, Ink and Expand Margins (issue #121) |
 | `forms.rs` | AcroForm field discovery + inline value writes (lopdf on the buffer; issue #2) |
 | `signature.rs` | digital-signature integrity verification, read-only (lopdf `/ByteRange` parse; CMS parsed via Windows CryptoAPI `CryptMsg*`, which handles Adobe's BER encoding; issues #17, #39) |
 | `conformance.rs` | declared ISO sub-format detection — PDF/A, PDF/X, PDF/E, PDF/UA — from the XMP packet (lopdf) |
@@ -140,6 +142,38 @@ let pdf_page = entry.page(page_index_0based)?;
 The limit of 6 is deliberate: each retained page holds its decoded bitmap (tens of MB for a high-resolution scan), so this is sized for the viewer's render window plus the matching sidebar thumbnails, not for a whole document.
 
 Related frontend constraint: `ContinuousViewer` does not render pages until the one-shot open zoom (`fit-width-90`, issue #38) resolves to a real value. Rendering at the placeholder zoom rasterises every page at a throwaway size, and on a large page that oversized bitmap overflows pdfium's own image cache — evicting the decode, so the render that follows pays for it a second time.
+
+---
+
+## Page-authoring tools and rotated pages
+
+Typewriter and Ink take coordinates from the frontend in PDF points with a
+**top-left** origin, measured against the page *as pdfium rendered it*. pdfium
+renders the **CropBox**, and it renders it **rotated**, so on a `/Rotate` 90 or
+270 page the rendered width and height are swapped relative to user space.
+`commands::page_space::PageSpace` is the one place that conversion lives —
+anything placing content from frontend coordinates goes through it rather than
+reaching for a page box directly.
+
+Rotation lands differently depending on where the content goes:
+
+- **Flattened into the content stream** (Ink): mapping each point is enough. A
+  quarter turn is rigid, so a rotated polyline is a polyline through rotated
+  points.
+- **As an annotation** (Typewriter): `/Rect` is in *unrotated* user space (so a
+  wide, short note becomes a tall, narrow rect at 90 and 270), while the
+  appearance stream stays upright in its own space and gets a `/Matrix`
+  countering the page rotation. Read-back must invert the same mapping, or
+  every reopen drifts the note.
+
+**Test these by rendering, not by reading the content stream.** The failure mode
+is invisible: the content is written into the file at coordinates nobody can
+see, so stream assertions pass happily while the user sees nothing — which is
+how issue #121 shipped. `crate::rendered_mark_bbox` renders a page at one pixel
+per point and returns where the marks landed, in the same space the tool was
+given; `crate::geometry_page_bytes` builds the fixture. Use a **non-square**
+page: on a square one the 90/270 width/height swap cancels and a broken mapping
+passes.
 
 ---
 

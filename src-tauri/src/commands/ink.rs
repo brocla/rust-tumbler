@@ -100,40 +100,6 @@ pub(crate) fn ink_content_stream(strokes: &[Stroke], space: &PageSpace) -> Vec<u
     s.into_bytes()
 }
 
-/// A page's rotation in degrees (0, 90, 180 or 270).
-///
-/// The Ink Signature tool refuses to draw on a rotated page (issue #121):
-/// placing a signature in the wrong position and orientation is worse than
-/// declining, so the frontend asks for this and disables itself.
-///
-/// Read through the page cache rather than the page tree, so it costs nothing
-/// on a page the viewer has already rendered — which, since the tool only asks
-/// about the page in view, it always has.
-#[tauri::command]
-pub fn page_rotation(state: State<'_, AppState>, doc_id: String, page: u32) -> Result<u32, String> {
-    page_rotation_impl(&state, &doc_id, page).map_err(String::from)
-}
-
-pub(crate) fn page_rotation_impl(
-    state: &AppState,
-    doc_id: &str,
-    page: u32,
-) -> Result<u32, AppError> {
-    use pdfium_render::prelude::PdfPageRenderRotation;
-
-    let entry = state.get_document(doc_id)?;
-    let mut entry = lock_mutex(&entry)?;
-    let pdf_page = entry.page(page.saturating_sub(1) as i32)?;
-    Ok(
-        match pdf_page.rotation().unwrap_or(PdfPageRenderRotation::None) {
-            PdfPageRenderRotation::Degrees90 => 90,
-            PdfPageRenderRotation::Degrees180 => 180,
-            PdfPageRenderRotation::Degrees270 => 270,
-            PdfPageRenderRotation::None => 0,
-        },
-    )
-}
-
 /// Flattens one page's stroke group into the document buffer.
 ///
 /// `page` is 1-based. Empty input is a no-op: the document is left clean rather
@@ -372,30 +338,6 @@ mod tests {
 
         assert!(text.contains("0.043 0.208 0.722 RG"), "ink colour lost: {text}");
         assert!(text.contains("20.00 180.00 m"), "stroke start lost: {text}");
-    }
-
-    /// The rotation guard's input. The fixture is unrotated; rotating it
-    /// through the page-ops path must be visible here, or the tool would
-    /// happily draw on a page it cannot place ink on (issue #121).
-    #[test]
-    fn page_rotation_reports_the_pages_rotation() {
-        let pdfium = crate::test_pdfium();
-        let state = fixture_state(pdfium.get());
-
-        assert_eq!(
-            page_rotation_impl(&state, "doc1", 1).expect("rotation"),
-            0,
-            "fixture page should be unrotated"
-        );
-
-        crate::commands::pages::rotate_pages_impl(&state, "doc1".to_string(), vec![1], 1)
-            .expect("rotate");
-
-        assert_eq!(
-            page_rotation_impl(&state, "doc1", 1).expect("rotation"),
-            90,
-            "rotation must be visible to the ink guard"
-        );
     }
 
     /// The end-to-end question the unit tests cannot answer: after the ink is
