@@ -188,3 +188,47 @@ describe("commitOpenInk", () => {
     expect(inkCalls()).toHaveLength(0);
   });
 });
+
+/**
+ * Pending ink is unsaved work the backend has not seen: the buffer is untouched
+ * until the group closes, so `isDirty` stays false. Everything that asks "are
+ * there unsaved changes?" has to account for it — otherwise Save is greyed out
+ * over a drawn signature, and closing the tab throws it away without asking.
+ */
+describe("pending ink counts as unsaved work", () => {
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset();
+    vi.mocked(invoke).mockResolvedValue(undefined as never);
+    setTab();
+  });
+
+  it("is reported for the document being drawn on", async () => {
+    const { hasPendingInk } = await import("../utils/inkCommit");
+
+    expect(hasPendingInk("doc-1")).toBe(false);
+    withStrokes();
+    expect(hasPendingInk("doc-1")).toBe(true);
+    expect(hasPendingInk("other-doc")).toBe(false);
+  });
+
+  it("is not reported for a group with no strokes yet", async () => {
+    const { hasPendingInk } = await import("../utils/inkCommit");
+    usePdfStore.getState().inkBegin("doc-1", 1);
+
+    expect(hasPendingInk("doc-1")).toBe(false);
+  });
+
+  /**
+   * A failed commit used to destroy the signature: the group is cleared on the
+   * way out, so an error left nothing to retry with and nothing on screen.
+   */
+  it("puts the strokes back when the commit fails", async () => {
+    withStrokes();
+    vi.mocked(invoke).mockRejectedValueOnce(new Error("disk on fire") as never);
+    const { commitOpenInk } = await import("../utils/inkCommit");
+
+    await expect(commitOpenInk()).rejects.toThrow("disk on fire");
+
+    expect(usePdfStore.getState().ink?.strokes).toHaveLength(1);
+  });
+});

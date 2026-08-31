@@ -33,13 +33,12 @@
 //! (`/Rotate`) are not handled: the frontend disables the tool on them rather
 //! than place a signature in the wrong place (issue #121).
 
-use crate::commands::save::dirty_changed_payload;
 use crate::commands::text_layer::{append_content_stream, contents_refs};
 use crate::commands::typewriter::page_render_box;
 use crate::error::AppError;
 use crate::state::{lock_mutex, AppState};
 use lopdf::{Dictionary, Document, Object, Stream};
-use tauri::{Emitter, State};
+use tauri::State;
 
 /// Ink colour, `#0B35B8` — "bright ballpoint".
 ///
@@ -145,10 +144,17 @@ pub fn apply_ink(
 ) -> Result<(), String> {
     let changed = apply_ink_impl(&state, doc_id.clone(), page, strokes).map_err(String::from)?;
     if changed {
-        let _ = app.emit(
-            "document-dirty-changed",
-            dirty_changed_payload(&state, doc_id, true),
-        );
+        // Ink rewrites the page's content stream, so the frontend has to drop
+        // its cached bitmap and re-render — a dirty flag alone leaves the old
+        // picture on screen and the signature looks like it vanished. This is
+        // the same signal a page edit or a compression run sends, and it also
+        // re-verifies the digital signature the ink just invalidated.
+        let info = {
+            let entry = state.get_document(&doc_id).map_err(String::from)?;
+            let entry = lock_mutex(&entry).map_err(String::from)?;
+            crate::commands::pages::page_info_from_doc(&entry.document).map_err(String::from)?
+        };
+        crate::commands::pages::emit_pages_edited(&app, &state, doc_id, &info);
     }
     Ok(())
 }
@@ -378,6 +384,49 @@ mod tests {
             page_rotation_impl(&state, "doc1", 1).expect("rotation"),
             90,
             "rotation must be visible to the ink guard"
+        );
+    }
+
+    /// The end-to-end question the unit tests cannot answer: after the ink is
+    /// flattened, does pdfium actually *draw* it? Renders the edited document
+    /// and looks for a blue pixel. If the stream were appended wrongly — bad
+    /// /Contents array, unbalanced q/Q, coordinates off the page — the bytes
+    /// would still be there and every other test would still pass, while the
+    /// user saw nothing.
+    #[test]
+    fn flattened_ink_is_visible_in_a_render() {
+        use pdfium_render::prelude::*;
+
+        let pdfium = crate::test_pdfium();
+        let bytes = std::fs::read(crate::fixture_path()).expect("read fixture");
+        // A thick diagonal across the middle of the 200x200 fixture page.
+        let out = write_ink(&bytes, 1, &[vec![[20.0, 100.0], [180.0, 100.0]]])
+            .expect("write")
+            .expect("bytes");
+
+        let doc = pdfium
+            .get()
+            .load_pdf_from_byte_vec(out, None)
+            .expect("reload edited pdf");
+        let page = doc.pages().get(0).expect("page 1");
+        let bitmap = page
+            .render_with_config(
+                &PdfRenderConfig::new().set_target_width(200),
+            )
+            .expect("render");
+
+        let rgba = bitmap.as_rgba_bytes();
+        let blue_pixels = rgba
+            .chunks_exact(4)
+            .filter(|p| {
+                // #0B35B8-ish: clearly blue-dominant and not white paper.
+                p[2] > 120 && p[2] as i16 - p[0] as i16 > 60 && p[2] as i16 - p[1] as i16 > 40
+            })
+            .count();
+
+        assert!(
+            blue_pixels > 50,
+            "expected a visible blue stroke, found {blue_pixels} blue pixels"
         );
     }
 

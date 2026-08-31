@@ -25,6 +25,7 @@ import type { SignatureInfo } from "./utils/signature";
 import { contrastTextColor } from "./utils/color";
 import { reconstructCopyText, type CopyToken } from "./utils/textSelection";
 import { evictDoc, evictPages } from "./utils/renderCache";
+import { hasPendingInk } from "./utils/inkCommit";
 
 interface DocInfo {
   docId: string;
@@ -353,7 +354,7 @@ function App() {
       if (!tab) return;
       if (e.shiftKey) {
         void saveTabAs(tab);
-      } else if (tab.isDirty) {
+      } else if (tab.isDirty || hasPendingInk(tab.docId)) {
         void saveTab(tab);
       }
     };
@@ -368,7 +369,9 @@ function App() {
   useEffect(() => {
     const appWindow = getCurrentWindow();
     const unlisten = appWindow.onCloseRequested(async (event) => {
-      const dirtyTabs = usePdfStore.getState().tabs.filter((t) => t.isDirty);
+      const dirtyTabs = usePdfStore
+        .getState()
+        .tabs.filter((t) => t.isDirty || hasPendingInk(t.docId));
       if (dirtyTabs.length === 0) return;
       event.preventDefault();
       for (const tab of dirtyTabs) {

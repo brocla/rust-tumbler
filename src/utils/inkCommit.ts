@@ -17,9 +17,30 @@ import { usePdfStore } from "../store/usePdfStore";
 export async function commitOpenInk(): Promise<void> {
   const group = usePdfStore.getState().inkTake();
   if (!group) return;
-  await invoke("apply_ink", {
-    docId: group.docId,
-    page: group.page,
-    strokes: group.strokes,
-  });
+  try {
+    await invoke("apply_ink", {
+      docId: group.docId,
+      page: group.page,
+      strokes: group.strokes,
+    });
+  } catch (err) {
+    // The group was cleared on the way out, so a failed commit would otherwise
+    // destroy the signature silently — put it back and let the caller report.
+    usePdfStore.setState({ ink: { ...group, redo: [] } });
+    throw err;
+  }
+}
+
+/**
+ * True when `docId` has ink drawn but not yet flattened into the buffer.
+ *
+ * Pending ink is unsaved work that the backend does not know about yet — the
+ * buffer is untouched until the group closes, so `isDirty` is still false.
+ * Anything asking "are there unsaved changes?" has to consider this too, or
+ * Save stays greyed out over a drawn signature and closing the tab discards it
+ * without asking.
+ */
+export function hasPendingInk(docId: string): boolean {
+  const ink = usePdfStore.getState().ink;
+  return !!ink && ink.docId === docId && ink.strokes.length > 0;
 }

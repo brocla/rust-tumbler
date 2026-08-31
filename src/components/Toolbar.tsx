@@ -41,6 +41,12 @@ export function Toolbar({ onOpenFile, onPrint }: ToolbarProps) {
   const activeTab = usePdfStore((s) =>
     s.tabs.find((t) => t.id === s.activeTabId),
   );
+  // Ink drawn but not yet flattened is unsaved work the backend has not seen,
+  // so isDirty is still false. Without this the Save button stays greyed out
+  // over a drawn signature (issue #120).
+  const pendingInk = usePdfStore(
+    (s) => !!s.ink && s.ink.strokes.length > 0 && s.ink.docId === s.getActiveTab()?.docId,
+  );
   const updateTab = usePdfStore((s) => s.updateTab);
   const setOcrProgress = usePdfStore((s) => s.setOcrProgress);
   const bumpFormEpoch = usePdfStore((s) => s.bumpFormEpoch);
@@ -443,7 +449,7 @@ export function Toolbar({ onOpenFile, onPrint }: ToolbarProps) {
             <button
               className="toolbar-button"
               onClick={() => void saveTab(activeTab)}
-              disabled={!activeTab.isDirty}
+              disabled={!activeTab.isDirty && !pendingInk}
               title="Save (Ctrl+S)"
             >
               <Save size={18} />
