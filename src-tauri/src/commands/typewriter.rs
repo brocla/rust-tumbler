@@ -265,12 +265,6 @@ pub(crate) fn inherited_box(doc: &Document, page_id: ObjectId, key: &[u8]) -> Op
     None
 }
 
-/// Page origin and size in points: `(origin_x, origin_y, width, height)`.
-/// Falls back to US Letter if the MediaBox can't be read.
-fn page_media_box(doc: &Document, page_id: ObjectId) -> (f32, f32, f32, f32) {
-    box_origin_and_size(inherited_box(doc, page_id, b"MediaBox"))
-}
-
 /// The box the viewer actually renders: `CropBox` when present, else
 /// `MediaBox`. Returns `(origin_x, origin_y, width, height)` in points.
 ///
@@ -280,9 +274,6 @@ fn page_media_box(doc: &Document, page_id: ObjectId) -> (f32, f32, f32, f32) {
 /// sends are relative to that crop — `page_origin` in `text.rs` makes the same
 /// choice for search rectangles.
 ///
-/// (Typewriter predates this and still measures from the MediaBox, so it
-/// places notes wrongly on a cropped page. Same class of bug as the rotation
-/// gap in #121, and worth fixing alongside it.)
 pub(crate) fn page_render_box(doc: &Document, page_id: ObjectId) -> (f32, f32, f32, f32) {
     box_origin_and_size(
         inherited_box(doc, page_id, b"CropBox").or_else(|| inherited_box(doc, page_id, b"MediaBox")),
@@ -400,7 +391,7 @@ fn add_tumbler_annots(doc: &mut Document, annots: &[TypewriterAnnot]) -> Result<
         let Some(&page_id) = pages.get(&annot.page) else {
             continue; // page out of range — drop rather than error
         };
-        let (ox, oy, _w, h) = page_media_box(doc, page_id);
+        let (ox, oy, _w, h) = page_render_box(doc, page_id);
         // Top-left origin (frontend) → bottom-left user space.
         let x1 = ox + annot.x;
         let x2 = ox + annot.x + annot.width;
@@ -618,7 +609,7 @@ fn add_tumbler_text_layer(doc: &mut Document, annots: &[TypewriterAnnot]) -> Res
 
     for (page_num, page_annots) in by_page {
         let page_id = pages[&page_num];
-        let (ox, oy, _w, h) = page_media_box(doc, page_id);
+        let (ox, oy, _w, h) = page_render_box(doc, page_id);
         let content = build_text_layer_content(&page_annots, h, ox, oy)?;
         if content.is_empty() {
             continue;
@@ -718,7 +709,7 @@ pub fn read_typewriter_annots(buffer: &[u8]) -> Result<Vec<TypewriterAnnot>, App
         .map_err(|e| AppError::lopdf("Failed to parse PDF for typewriter read", e))?;
     let mut out = Vec::new();
     for (page_num, page_id) in doc.get_pages() {
-        let (ox, oy, _w, h) = page_media_box(&doc, page_id);
+        let (ox, oy, _w, h) = page_render_box(&doc, page_id);
         for r in page_annot_refs(&doc, page_id) {
             let Some(dict) = doc.get_object(r).ok().and_then(|o| o.as_dict().ok()) else {
                 continue;
@@ -956,6 +947,84 @@ mod tests {
             write_typewriter_annots(&cleared, &[]).expect("noop").is_none(),
             "nothing to do → None"
         );
+    }
+
+    /// True for a pixel dark enough to be painted glyph rather than paper.
+    fn is_glyph(px: &[u8]) -> bool {
+        px[0] < 128 && px[1] < 128 && px[2] < 128
+    }
+
+    /// A note whose text nearly fills its box, so the rendered glyph run is a
+    /// tight, predictable stand-in for the box itself. Capital H is a full-
+    /// height, full-width glyph with no descender, which keeps the painted
+    /// area square to the box.
+    fn probe_note(x: f32, y: f32) -> TypewriterAnnot {
+        TypewriterAnnot {
+            text: "HHHHHHHHHHHHH".to_string(),
+            color: [0.0, 0.0, 0.0],
+            x,
+            y,
+            width: 120.0,
+            height: 20.0,
+            ..sample_annot()
+        }
+    }
+
+    /// Where [`probe_note`]'s glyphs must land, in render space, for a note
+    /// placed at `(x, y)`. Derived from the layout constants rather than
+    /// hard-coded, so a deliberate change to the insets moves the expectation
+    /// with it: text starts one inset in, and the first line's cap height
+    /// hangs between the inset and the baseline drop.
+    fn probe_glyph_box(x: f32, y: f32) -> [f32; 4] {
+        const CAP_HEIGHT_RATIO: f32 = 0.717; // Helvetica capital H
+        let size = sample_annot().font_size;
+        let run = run_width(b"HHHHHHHHHHHHH", "Helvetica", size);
+        let top = y + INSET + size * ASCENT_RATIO - size * CAP_HEIGHT_RATIO;
+        [x + INSET, top, x + INSET + run, top + size * CAP_HEIGHT_RATIO]
+    }
+
+    /// Glyph rasterization is not pixel-exact and the probe leans on nominal
+    /// Helvetica metrics, which drift about 0.2pt per glyph against pdfium's
+    /// rasterized advances — so a 13-glyph run's right edge is the loosest
+    /// component here. Still far tighter than any misplacement being guarded
+    /// against: the crop origin is tens of points, a rotation error hundreds.
+    const GLYPH_TOL: f32 = 3.5;
+
+    /// pdfium renders the **CropBox**, so the coordinates the frontend sends
+    /// are relative to that crop. Measuring from the MediaBox instead put a
+    /// note off by exactly the crop origin on any cropped page — and plenty of
+    /// real scans have a CropBox strictly inside their MediaBox.
+    #[test]
+    fn notes_are_placed_against_the_cropbox_not_the_mediabox() {
+        let pdfium = crate::test_pdfium();
+        // A 200x400 sheet cropped to a 160x340 window at a non-zero origin.
+        let page = crate::geometry_page_bytes(200.0, 400.0, 0, Some([15.0, 25.0, 175.0, 365.0]));
+        let bytes = write_typewriter_annots(&page, &[probe_note(20.0, 30.0)])
+            .expect("write")
+            .expect("bytes");
+
+        crate::assert_mark_landed(
+            crate::rendered_mark_bbox(pdfium.get(), bytes, true, is_glyph),
+            probe_glyph_box(20.0, 30.0),
+            GLYPH_TOL,
+            "cropped page",
+        );
+    }
+
+    /// The read-back path shares the same box choice, so a note written to a
+    /// cropped page must re-hydrate at the coordinates it was placed at rather
+    /// than drifting by the crop each time the file is reopened.
+    #[test]
+    fn notes_on_a_cropped_page_round_trip_their_coordinates() {
+        let page = crate::geometry_page_bytes(200.0, 400.0, 0, Some([15.0, 25.0, 175.0, 365.0]));
+        let bytes = write_typewriter_annots(&page, &[probe_note(20.0, 30.0)])
+            .expect("write")
+            .expect("bytes");
+
+        let read = read_typewriter_annots(&bytes).expect("read");
+        assert_eq!(read.len(), 1);
+        assert!((read[0].x - 20.0).abs() < 0.5, "x drifted: {}", read[0].x);
+        assert!((read[0].y - 30.0).abs() < 0.5, "y drifted: {}", read[0].y);
     }
 
     #[test]
