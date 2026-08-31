@@ -16,11 +16,22 @@
 //! the appearance stream exists purely for interoperability with other viewers.
 //!
 //! Coordinate note: the frontend sends each note's rect in PDF points with a
-//! **top-left** origin (the same space as search/redaction rects); this module
-//! flips it to PDF user space (bottom-left) using the page MediaBox. Rotated
-//! pages (`/Rotate`) are not specially handled in this first cut — the common
-//! unrotated page is authored correctly.
+//! **top-left** origin (the same space as search/redaction rects), measured
+//! against the page as pdfium drew it. [`PageSpace`] flips it to PDF user
+//! space (bottom-left), accounting for the render box and the page's
+//! `/Rotate` (issue #121).
+//!
+//! Rotation lands differently here than it does for ink, which flattens into
+//! the content stream and only has to move its points. A note is an
+//! *annotation*: its `/Rect` is in unrotated user space — so at 90 and 270 a
+//! wide, short note box becomes a tall, narrow rect — while the appearance
+//! stream is drawn upright in its own space and turned into place by the
+//! form's `/Matrix`, which is what keeps the text level on screen after the
+//! viewer applies the page rotation. The invisible page-text run carries the
+//! same turn in its text matrix, so search and selection agree with what is
+//! drawn.
 
+use crate::commands::page_space::PageSpace;
 use crate::commands::save::dirty_changed_payload;
 use crate::commands::text_layer::{
     contents_refs, encode_for_font, helvetica_width_1000, merged_resources_with_font,
@@ -238,60 +249,6 @@ pub(crate) fn object_as_f32(obj: &Object) -> f32 {
     }
 }
 
-/// Resolves a page's (possibly inherited) box named `key` — `MediaBox` or
-/// `CropBox` — as `[x0, y0, x1, y1]`, following `/Parent` up the page tree.
-/// `None` if unreadable.
-pub(crate) fn inherited_box(doc: &Document, page_id: ObjectId, key: &[u8]) -> Option<[f32; 4]> {
-    let mut current = page_id;
-    for _ in 0..64 {
-        let dict = doc.get_object(current).ok()?.as_dict().ok()?;
-        if let Ok(value) = dict.get(key) {
-            let arr = match value {
-                Object::Reference(r) => doc.get_object(*r).ok()?.as_array().ok()?,
-                Object::Array(a) => a,
-                _ => return None,
-            };
-            if arr.len() >= 4 {
-                return Some([
-                    object_as_f32(&arr[0]),
-                    object_as_f32(&arr[1]),
-                    object_as_f32(&arr[2]),
-                    object_as_f32(&arr[3]),
-                ]);
-            }
-        }
-        current = dict.get(b"Parent").ok()?.as_reference().ok()?;
-    }
-    None
-}
-
-/// The box the viewer actually renders: `CropBox` when present, else
-/// `MediaBox`. Returns `(origin_x, origin_y, width, height)` in points.
-///
-/// Anything converting *frontend* coordinates into user space wants this one.
-/// pdfium renders the CropBox, so a page whose CropBox is smaller than its
-/// MediaBox is displayed cropped, and the overlay coordinates the frontend
-/// sends are relative to that crop — `page_origin` in `text.rs` makes the same
-/// choice for search rectangles.
-///
-pub(crate) fn page_render_box(doc: &Document, page_id: ObjectId) -> (f32, f32, f32, f32) {
-    box_origin_and_size(
-        inherited_box(doc, page_id, b"CropBox").or_else(|| inherited_box(doc, page_id, b"MediaBox")),
-    )
-}
-
-fn box_origin_and_size(rect: Option<[f32; 4]>) -> (f32, f32, f32, f32) {
-    match rect {
-        Some([x0, y0, x1, y1]) => (
-            x0.min(x1),
-            y0.min(y1),
-            (x1 - x0).abs(),
-            (y1 - y0).abs(),
-        ),
-        None => (0.0, 0.0, 612.0, 792.0),
-    }
-}
-
 // ── Annotation list plumbing ─────────────────────────────────────────────────
 
 /// The indirect references in a page's `/Annots`, normalized across its shapes
@@ -391,12 +348,11 @@ fn add_tumbler_annots(doc: &mut Document, annots: &[TypewriterAnnot]) -> Result<
         let Some(&page_id) = pages.get(&annot.page) else {
             continue; // page out of range — drop rather than error
         };
-        let (ox, oy, _w, h) = page_render_box(doc, page_id);
-        // Top-left origin (frontend) → bottom-left user space.
-        let x1 = ox + annot.x;
-        let x2 = ox + annot.x + annot.width;
-        let y2 = oy + h - annot.y;
-        let y1 = oy + h - (annot.y + annot.height);
+        // Top-left origin (frontend) → bottom-left, unrotated user space.
+        // On a quarter-turned page this is where the note's width and height
+        // exchange: the rect is as tall as the box is wide.
+        let space = PageSpace::of(doc, page_id);
+        let [x1, y1, x2, y2] = space.rect_to_user(annot.x, annot.y, annot.width, annot.height);
 
         let base = base_font_name(&annot.font_family, annot.bold, annot.italic);
         let font_id = *font_ids.entry(base).or_insert_with(|| {
@@ -417,6 +373,14 @@ fn add_tumbler_annots(doc: &mut Document, annots: &[TypewriterAnnot]) -> Result<
                 Object::Real(0.0), Object::Real(0.0),
                 Object::Real(annot.width), Object::Real(annot.height),
             ]),
+            // The appearance is drawn upright in its own space; this turns it
+            // to counter the page rotation, so the viewer's own turn brings
+            // the text back level. A viewer maps the transformed BBox onto
+            // /Rect (PDF 32000-1 §12.5.5), and because the same rotation is
+            // in both, the two agree in size and the note lands square.
+            "Matrix" => Object::Array(
+                space.upright_matrix().iter().map(|v| Object::Real(*v)).collect(),
+            ),
             "Resources" => dictionary! {
                 "Font" => dictionary! { FONT_RES => Object::Reference(font_id) },
             },
@@ -479,9 +443,7 @@ fn add_tumbler_annots(doc: &mut Document, annots: &[TypewriterAnnot]) -> Result<
 /// the visible note text. Empty when no note has representable text.
 fn build_text_layer_content(
     annots: &[&TypewriterAnnot],
-    page_height: f32,
-    ox: f32,
-    oy: f32,
+    space: &PageSpace,
 ) -> Result<Vec<u8>, AppError> {
     // `q`/`ET`-wrapped so our text state can't leak into (or inherit from) the
     // page's own content beyond a balanced default state.
@@ -507,13 +469,16 @@ fn build_text_layer_content(
             }
             any = true;
             let y_tl = annot.y + INSET + annot.font_size * ASCENT_RATIO + i as f32 * leading;
-            let x = ox + annot.x + INSET;
-            let y = oy + page_height - y_tl;
+            let [x, y] = space.to_user([annot.x + INSET, y_tl]);
+            // The linear part turns the run to counter the page rotation, so
+            // the extracted glyph boxes sit under the visible text rather than
+            // running off across the page at right angles to it.
+            let [a, b, c, d, _, _] = space.upright_matrix();
             ops.push(Operation::new(
                 "Tm",
                 vec![
-                    Object::Real(1.0), Object::Real(0.0), Object::Real(0.0),
-                    Object::Real(1.0), Object::Real(x), Object::Real(y),
+                    Object::Real(a), Object::Real(b), Object::Real(c),
+                    Object::Real(d), Object::Real(x), Object::Real(y),
                 ],
             ));
             ops.push(Operation::new(
@@ -609,8 +574,7 @@ fn add_tumbler_text_layer(doc: &mut Document, annots: &[TypewriterAnnot]) -> Res
 
     for (page_num, page_annots) in by_page {
         let page_id = pages[&page_num];
-        let (ox, oy, _w, h) = page_render_box(doc, page_id);
-        let content = build_text_layer_content(&page_annots, h, ox, oy)?;
+        let content = build_text_layer_content(&page_annots, &PageSpace::of(doc, page_id))?;
         if content.is_empty() {
             continue;
         }
@@ -660,7 +624,7 @@ pub fn write_typewriter_annots(
 }
 
 /// Reconstructs a note from one of our FreeText annotation dictionaries.
-fn reconstruct(dict: &Dictionary, page: u32, ox: f32, oy: f32, page_height: f32) -> Option<TypewriterAnnot> {
+fn reconstruct(dict: &Dictionary, page: u32, space: &PageSpace) -> Option<TypewriterAnnot> {
     let id = String::from_utf8_lossy(dict.get(TW_ID_KEY).ok()?.as_str().ok()?).into_owned();
     let rect = dict.get(b"Rect").ok()?.as_array().ok()?;
     if rect.len() < 4 {
@@ -687,13 +651,23 @@ fn reconstruct(dict: &Dictionary, page: u32, ox: f32, oy: f32, page_height: f32)
         .unwrap_or_else(|| "Helvetica".to_string());
     let dict_bool = |key: &[u8]| matches!(dict.get(key), Ok(Object::Boolean(true)));
 
+    // Back through the same mapping, so a note re-hydrates at the coordinates
+    // it was placed at — including the width/height exchange on a quarter-
+    // turned page, which a hand-written inverse gets backwards.
+    let (x, y, width, height) = space.rect_to_render([
+        x1.min(x2),
+        y1.min(y2),
+        x1.max(x2),
+        y1.max(y2),
+    ]);
+
     Some(TypewriterAnnot {
         id,
         page,
-        x: x1 - ox,
-        y: (oy + page_height) - y2,
-        width: (x2 - x1).abs(),
-        height: (y2 - y1).abs(),
+        x,
+        y,
+        width,
+        height,
         text: dict.get(b"Contents").ok().map(decode_pdf_text_string).unwrap_or_default(),
         font_family,
         bold: dict_bool(b"TWbold"),
@@ -709,7 +683,7 @@ pub fn read_typewriter_annots(buffer: &[u8]) -> Result<Vec<TypewriterAnnot>, App
         .map_err(|e| AppError::lopdf("Failed to parse PDF for typewriter read", e))?;
     let mut out = Vec::new();
     for (page_num, page_id) in doc.get_pages() {
-        let (ox, oy, _w, h) = page_render_box(&doc, page_id);
+        let space = PageSpace::of(&doc, page_id);
         for r in page_annot_refs(&doc, page_id) {
             let Some(dict) = doc.get_object(r).ok().and_then(|o| o.as_dict().ok()) else {
                 continue;
@@ -717,7 +691,7 @@ pub fn read_typewriter_annots(buffer: &[u8]) -> Result<Vec<TypewriterAnnot>, App
             if !dict.has(TW_ID_KEY) {
                 continue;
             }
-            if let Some(annot) = reconstruct(dict, page_num, ox, oy, h) {
+            if let Some(annot) = reconstruct(dict, page_num, &space) {
                 out.push(annot);
             }
         }
@@ -1025,6 +999,147 @@ mod tests {
         assert_eq!(read.len(), 1);
         assert!((read[0].x - 20.0).abs() < 0.5, "x drifted: {}", read[0].x);
         assert!((read[0].y - 30.0).abs() < 0.5, "y drifted: {}", read[0].y);
+    }
+
+    /// **The bug in issue #121.** A note is placed against the page pdfium
+    /// rendered; on a `/Rotate` page that render is turned, and at 90 and 270
+    /// its width and height are swapped relative to user space. Written
+    /// without accounting for that, the note lands somewhere else on the page
+    /// — or off it — while the annotation is present, well-formed and
+    /// extractable, so every other test here still passes.
+    ///
+    /// The page is 200x400, deliberately not square: on a square page the
+    /// 90/270 swap cancels and this would pass against the broken code. The
+    /// note is placed off-centre, so 0 and 180 are told apart too.
+    #[test]
+    fn notes_land_where_they_were_placed_on_a_rotated_page() {
+        let pdfium = crate::test_pdfium();
+
+        for rotate in [0, 90, 180, 270] {
+            let page = crate::geometry_page_bytes(200.0, 400.0, rotate, None);
+            let bytes = write_typewriter_annots(&page, &[probe_note(20.0, 30.0)])
+                .expect("write")
+                .expect("bytes");
+
+            crate::assert_mark_landed(
+                crate::rendered_mark_bbox(pdfium.get(), bytes, true, is_glyph),
+                probe_glyph_box(20.0, 30.0),
+                GLYPH_TOL,
+                &format!("/Rotate {rotate}"),
+            );
+        }
+    }
+
+    /// Rotation and a crop together: pdfium renders the CropBox and *then*
+    /// turns it, so the origin offset belongs in user space before the turn.
+    #[test]
+    fn notes_land_correctly_on_a_page_that_is_both_cropped_and_rotated() {
+        let pdfium = crate::test_pdfium();
+        let crop = Some([15.0, 25.0, 175.0, 365.0]);
+
+        for rotate in [0, 90, 180, 270] {
+            let page = crate::geometry_page_bytes(200.0, 400.0, rotate, crop);
+            let bytes = write_typewriter_annots(&page, &[probe_note(20.0, 30.0)])
+                .expect("write")
+                .expect("bytes");
+
+            crate::assert_mark_landed(
+                crate::rendered_mark_bbox(pdfium.get(), bytes, true, is_glyph),
+                probe_glyph_box(20.0, 30.0),
+                GLYPH_TOL,
+                &format!("cropped, /Rotate {rotate}"),
+            );
+        }
+    }
+
+    /// The glyph box above pins position; this pins *orientation*. A note that
+    /// lands in the right place but on its side is still wrong, and the two
+    /// failures are separable: the `/Rect` can be correct while the appearance
+    /// `/Matrix` is not. A run of capital H's is far wider than it is tall, so
+    /// a quarter-turned appearance inverts the comparison.
+    #[test]
+    fn note_text_reads_upright_whatever_the_page_rotation() {
+        let pdfium = crate::test_pdfium();
+
+        for rotate in [0, 90, 180, 270] {
+            let page = crate::geometry_page_bytes(200.0, 400.0, rotate, None);
+            let bytes = write_typewriter_annots(&page, &[probe_note(20.0, 30.0)])
+                .expect("write")
+                .expect("bytes");
+            let [x0, y0, x1, y1] = crate::rendered_mark_bbox(pdfium.get(), bytes, true, is_glyph)
+                .expect("note must be visible");
+
+            assert!(
+                x1 - x0 > 3.0 * (y1 - y0),
+                "/Rotate {rotate}: text is not level — rendered {}x{}",
+                x1 - x0,
+                y1 - y0
+            );
+        }
+    }
+
+    /// Read-back has to invert the same mapping, including the width/height
+    /// exchange at 90 and 270. If it does not, every reopen shifts and
+    /// reshapes the note — and re-applying then writes the drifted version
+    /// back, so the damage compounds.
+    #[test]
+    fn notes_round_trip_their_coordinates_on_a_rotated_page() {
+        for rotate in [0, 90, 180, 270] {
+            let page = crate::geometry_page_bytes(200.0, 400.0, rotate, None);
+            let placed = probe_note(20.0, 30.0);
+            let bytes = write_typewriter_annots(&page, &[placed.clone()])
+                .expect("write")
+                .expect("bytes");
+
+            let read = read_typewriter_annots(&bytes).expect("read");
+            assert_eq!(read.len(), 1, "/Rotate {rotate}");
+            let got = &read[0];
+            for (name, g, w) in [
+                ("x", got.x, placed.x),
+                ("y", got.y, placed.y),
+                ("width", got.width, placed.width),
+                ("height", got.height, placed.height),
+            ] {
+                assert!(
+                    (g - w).abs() < 0.5,
+                    "/Rotate {rotate}: {name} drifted, {g} vs {w}"
+                );
+            }
+        }
+    }
+
+    /// The invisible page-text run is what makes a note searchable and
+    /// selectable. Its text matrix carries the same turn as the appearance, so
+    /// this is the cheap proof that rotating it did not break extraction.
+    ///
+    /// Reads through `page_text_in_document_order`, which is what search and
+    /// selection actually use. `PdfPageText::all()` returns an empty string
+    /// for the `/Rotate 270` case even though the glyphs are present and
+    /// correctly placed — it reconstructs reading order from glyph geometry
+    /// and gives up on a run that advances downward (issue #80). That is the
+    /// documented reason production avoids it, and a test using it here would
+    /// report a placement bug that does not exist.
+    #[test]
+    fn note_text_stays_extractable_on_a_rotated_page() {
+        use crate::commands::text::page_text_in_document_order;
+
+        let pdfium = crate::test_pdfium();
+
+        for rotate in [0, 90, 180, 270] {
+            let page = crate::geometry_page_bytes(200.0, 400.0, rotate, None);
+            let bytes = write_typewriter_annots(&page, &[sample_annot()])
+                .expect("write")
+                .expect("bytes");
+
+            let doc = pdfium.get().load_pdf_from_byte_vec(bytes, None).expect("open");
+            let page = doc.pages().get(0).expect("page 1");
+            let page_text = page.text().expect("text");
+            let text = page_text_in_document_order(&page_text);
+            assert!(
+                text.contains("Hello world"),
+                "/Rotate {rotate}: note text missing from extraction: {text:?}"
+            );
+        }
     }
 
     #[test]

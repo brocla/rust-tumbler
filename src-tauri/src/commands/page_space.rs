@@ -119,18 +119,27 @@ impl PageSpace {
         }
     }
 
-    pub(crate) fn rotate(&self) -> i64 {
-        self.rotate
-    }
-
     /// The render box's width and height **in user space** — not swapped for a
-    /// rotated page. Use [`Self::render_size`] for what the viewer showed.
-    pub(crate) fn size(&self) -> (f32, f32) {
+    /// rotated page. See [`Self::render_size`] for what the viewer showed.
+    fn size(&self) -> (f32, f32) {
         (self.ebox[2] - self.ebox[0], self.ebox[3] - self.ebox[1])
     }
 
-    /// The page's size as rendered: width and height exchanged at 90 and 270.
-    pub(crate) fn render_size(&self) -> (f32, f32) {
+    /// The normalized rotation, and the page's size as the viewer showed it —
+    /// width and height exchanged at 90 and 270.
+    ///
+    /// Both are `cfg(test)`: production code goes through the conversions
+    /// below, which is the point of having them. These describe the same
+    /// geometry from the frontend's side, so the tests can state their
+    /// expectations in the terms the user experiences rather than
+    /// re-deriving the swap they are checking for.
+    #[cfg(test)]
+    fn rotate(&self) -> i64 {
+        self.rotate
+    }
+
+    #[cfg(test)]
+    fn render_size(&self) -> (f32, f32) {
         let (w, h) = self.size();
         if self.rotate == 90 || self.rotate == 270 {
             (h, w)
