@@ -238,13 +238,14 @@ pub(crate) fn object_as_f32(obj: &Object) -> f32 {
     }
 }
 
-/// Resolves a page's (possibly inherited) MediaBox as `[x0, y0, x1, y1]`,
-/// following `/Parent` up the page tree. `None` if unreadable.
-fn inherited_media_box(doc: &Document, page_id: ObjectId) -> Option<[f32; 4]> {
+/// Resolves a page's (possibly inherited) box named `key` — `MediaBox` or
+/// `CropBox` — as `[x0, y0, x1, y1]`, following `/Parent` up the page tree.
+/// `None` if unreadable.
+pub(crate) fn inherited_box(doc: &Document, page_id: ObjectId, key: &[u8]) -> Option<[f32; 4]> {
     let mut current = page_id;
     for _ in 0..64 {
         let dict = doc.get_object(current).ok()?.as_dict().ok()?;
-        if let Ok(value) = dict.get(b"MediaBox") {
+        if let Ok(value) = dict.get(key) {
             let arr = match value {
                 Object::Reference(r) => doc.get_object(*r).ok()?.as_array().ok()?,
                 Object::Array(a) => a,
@@ -267,8 +268,35 @@ fn inherited_media_box(doc: &Document, page_id: ObjectId) -> Option<[f32; 4]> {
 /// Page origin and size in points: `(origin_x, origin_y, width, height)`.
 /// Falls back to US Letter if the MediaBox can't be read.
 fn page_media_box(doc: &Document, page_id: ObjectId) -> (f32, f32, f32, f32) {
-    match inherited_media_box(doc, page_id) {
-        Some([x0, y0, x1, y1]) => (x0, y0, (x1 - x0).abs(), (y1 - y0).abs()),
+    box_origin_and_size(inherited_box(doc, page_id, b"MediaBox"))
+}
+
+/// The box the viewer actually renders: `CropBox` when present, else
+/// `MediaBox`. Returns `(origin_x, origin_y, width, height)` in points.
+///
+/// Anything converting *frontend* coordinates into user space wants this one.
+/// pdfium renders the CropBox, so a page whose CropBox is smaller than its
+/// MediaBox is displayed cropped, and the overlay coordinates the frontend
+/// sends are relative to that crop — `page_origin` in `text.rs` makes the same
+/// choice for search rectangles.
+///
+/// (Typewriter predates this and still measures from the MediaBox, so it
+/// places notes wrongly on a cropped page. Same class of bug as the rotation
+/// gap in #121, and worth fixing alongside it.)
+pub(crate) fn page_render_box(doc: &Document, page_id: ObjectId) -> (f32, f32, f32, f32) {
+    box_origin_and_size(
+        inherited_box(doc, page_id, b"CropBox").or_else(|| inherited_box(doc, page_id, b"MediaBox")),
+    )
+}
+
+fn box_origin_and_size(rect: Option<[f32; 4]>) -> (f32, f32, f32, f32) {
+    match rect {
+        Some([x0, y0, x1, y1]) => (
+            x0.min(x1),
+            y0.min(y1),
+            (x1 - x0).abs(),
+            (y1 - y0).abs(),
+        ),
         None => (0.0, 0.0, 612.0, 792.0),
     }
 }

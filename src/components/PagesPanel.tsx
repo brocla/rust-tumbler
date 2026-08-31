@@ -7,6 +7,7 @@ import { usePdfStore, suppressedReloadDocs } from "../store/usePdfStore";
 import { permuteDoc, getThumb, putThumb, evictDoc } from "../utils/renderCache";
 import { confirmBreakingEdit } from "../utils/confirmBreakingEdit";
 import { isSigned, SIGNATURE_EDIT_WARNING } from "../utils/signature";
+import { commitOpenInk } from "../utils/inkCommit";
 
 const THUMBNAIL_SCALE = 0.18;
 
@@ -135,6 +136,10 @@ export function PagesPanel() {
   const clearSelection = () => setSelected(new Set());
 
   async function runOp(op: () => Promise<PageInfo | void>) {
+    // Page ops rewrite the document; any ink still pending has to land
+    // first or it would be flattened onto a page that no longer exists,
+    // or vanish with the rewrite (issue #120).
+    await commitOpenInk();
     // Page operations rewrite the file, invalidating any signature. Warn first
     // (overridable).
     if (isSigned(signatureStatus)) {
@@ -215,6 +220,8 @@ export function PagesPanel() {
     if (!destPath) return;
     setBusy(true);
     try {
+      // Split reads the buffer, so pending ink belongs in it first.
+      await commitOpenInk();
       await invoke("split_document", { docId, firstPage: first, lastPage: last, destPath });
       setSplitForm(null);
     } catch (err) {
@@ -322,6 +329,7 @@ export function PagesPanel() {
 
           void (async () => {
             try {
+              await commitOpenInk();
               await invoke<PageInfo>("reorder_pages", { docId, newOrder: order });
             } catch (err) {
               // The file was not changed — roll back the optimistic reorder by

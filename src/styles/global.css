@@ -2534,3 +2534,34 @@ input[type="radio"].form-check:checked {
   margin: 6px 0 0;
   padding-left: 18px;
 }
+
+/* Ink Signature drawing surface (issue #120). Always interactive: the layer is
+   only mounted while the tool is active, so there is no armed/disarmed state to
+   distinguish. `touch-action: none` is what makes a finger or stylus draw
+   instead of scrolling the page out from under the stroke. */
+.ink-layer {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: auto;
+  touch-action: none;
+  cursor: crosshair;
+  z-index: 4;
+}
+
+.ink-panel-hint {
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+  line-height: 1.5;
+}
+
+.ink-panel-blocked {
+  color: var(--color-warning);
+  font-size: var(--font-size-sm);
+  line-height: 1.5;
+}
+
+.ink-panel-row {
+  display: flex;
+  gap: 8px;
+}

@@ -11,6 +11,7 @@ import {
   saveRedactedCopyAs,
 } from "../utils/redactSave";
 import { evictDoc } from "../utils/renderCache";
+import { commitOpenInk } from "../utils/inkCommit";
 
 /** Mirrors the backend's `RedactionResult` (serde camelCase). */
 interface RedactionResult {
@@ -163,6 +164,7 @@ export function RedactPanel() {
     setRunning(true);
     setSaved(false);
     try {
+      await commitOpenInk();
       const res = await invoke<RedactionResult>("apply_redactions", {
         docId,
         regions,

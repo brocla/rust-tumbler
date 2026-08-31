@@ -9,6 +9,7 @@
 //! XFA `/datasets` — agrees with what Tumbler wrote.
 
 use crate::commands::text::TextRect;
+use crate::commands::ink::{INK_RGB, INK_WIDTH_PT};
 use crate::error::AppError;
 use crate::state::{lock_mutex, AppState};
 use lopdf::{dictionary, Dictionary, Document, Object, ObjectId, StringFormat};
@@ -703,9 +704,12 @@ fn set_signature_strokes_impl(
 /// yields a blank stream (clears the signature).
 fn signature_appearance_stream(strokes: &[Vec<[f32; 2]>], w: f32, h: f32) -> String {
     // Redraw the box border (setting /AP replaces the widget's auto border), then
-    // the ink.
+    // the ink. The border stays black — it is part of the form, not the
+    // signature; only the ink is blue, and it uses the same colour and width as
+    // the page-level Ink Signature tool (issue #120) so the two cannot drift.
+    let [r, g, b] = INK_RGB;
     let mut s = format!(
-        "0.5 w 0 G\n0.50 0.50 {:.2} {:.2} re S\n1.5 w 1 J 1 j\n",
+        "0.5 w 0 G\n0.50 0.50 {:.2} {:.2} re S\n{r:.3} {g:.3} {b:.3} RG\n{INK_WIDTH_PT} w 1 J 1 j\n",
         (w - 1.0).max(0.0),
         (h - 1.0).max(0.0),
     );
@@ -1510,6 +1514,23 @@ mod tests {
         assert!(s.trim_end().ends_with('S'), "path is stroked: {s}");
         // Empty strokes → blank (just the graphics-state preamble, no paths).
         assert!(!signature_appearance_stream(&[], 100.0, 40.0).contains('m'));
+    }
+
+    /// Signature ink is blue (issue #120), matching the page-level Ink
+    /// Signature tool. The field's *border* stays black: it belongs to the
+    /// form, not to the signature.
+    #[test]
+    fn signature_ink_is_blue_and_the_border_stays_black() {
+        let s = signature_appearance_stream(&[vec![[0.0, 0.0], [1.0, 1.0]]], 100.0, 40.0);
+
+        assert!(s.contains("0 G"), "border should still stroke black: {s}");
+        assert!(s.contains("0.043 0.208 0.722 RG"), "ink should be #0B35B8: {s}");
+        // The border is drawn before the colour switch, so it cannot pick up
+        // the blue.
+        let border = s.find("re S").expect("border");
+        let blue = s.find("RG").expect("ink colour");
+        assert!(border < blue, "colour must be set after the border: {s}");
+        assert!(s.contains(&format!("{INK_WIDTH_PT} w")), "shared width: {s}");
     }
 
     #[test]

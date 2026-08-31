@@ -383,7 +383,7 @@ pub(crate) fn contents_refs(doc: &Document, page_id: ObjectId) -> Vec<ObjectId> 
 /// passed in as ids so this only edits the page dictionary. When the page has no
 /// existing content there's nothing to reset, so `/Contents` is set to our
 /// stream alone and the guard ids are ignored.
-fn append_content_stream(
+pub(crate) fn append_content_stream(
     page: &mut Dictionary,
     existing: &[ObjectId],
     save_id: ObjectId,

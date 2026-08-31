@@ -1,3 +1,4 @@
+import type { InkStroke } from "../utils/ink";
 import { create } from "zustand";
 import type { SignatureStatus } from "../utils/signature";
 
@@ -203,8 +204,23 @@ interface PdfStore {
     | "margins"
     | "redact"
     | "typewriter"
+    | "ink"
     | null;
   sidebarWidth: number;
+  // The Ink Signature group currently being drawn (issue #120): strokes the
+  // user has laid down but not yet committed to the document buffer.
+  //
+  // Global rather than per-tab because only one group is open at a time — the
+  // group closes on a tab switch, by design. It carries its own docId and page
+  // so whoever commits it knows where the ink belongs even if the view has
+  // already moved on.
+  ink: {
+    docId: string;
+    page: number;
+    strokes: InkStroke[];
+    /** Strokes lifted by undo, for redo. Cleared as soon as a new stroke lands. */
+    redo: InkStroke[];
+  } | null;
   // Progress of an in-flight document-wide OCR run — "Make Searchable" or
   // Export Text's OCR pass (driven by Tauri `ocr-progress` events). Null when
   // none is running. Shared here so the Toolbar (which triggers the run) and
@@ -251,6 +267,18 @@ interface PdfStore {
   resolveUnsaved: (choice: UnsavedChoice) => void;
   askPassword: (fileName: string, retry: boolean) => Promise<string | null>;
   resolvePassword: (password: string | null) => void;
+  /** Opens a group for a page, discarding any group already open. */
+  inkBegin: (docId: string, page: number) => void;
+  inkAddStroke: (stroke: InkStroke) => void;
+  inkUndo: () => void;
+  inkRedo: () => void;
+  /** Throws the open group away — Esc, and the discard half of a tab close. */
+  inkDiscard: () => void;
+  /**
+   * Hands the open group to the caller and clears it, so a commit cannot run
+   * twice against the same strokes when two close triggers fire together.
+   */
+  inkTake: () => { docId: string; page: number; strokes: InkStroke[] } | null;
   setSidebarTool: (tool: PdfStore["activeSidebarTool"]) => void;
   setSidebarWidth: (width: number) => void;
   setOcrProgress: (progress: { page: number; total: number } | null) => void;
@@ -296,6 +324,7 @@ export const usePdfStore = create<PdfStore>((set, get) => ({
   activeTabId: null,
   activeSidebarTool: "thumbnails",
   sidebarWidth: 250,
+  ink: null,
   ocrProgress: null,
   compressProgress: null,
   redactProgress: null,
@@ -427,6 +456,46 @@ export const usePdfStore = create<PdfStore>((set, get) => ({
       ),
     })),
 
+  inkBegin: (docId, page) => set({ ink: { docId, page, strokes: [], redo: [] } }),
+
+  inkAddStroke: (stroke) =>
+    set((state) =>
+      state.ink
+        // A new stroke invalidates the redo stack, as in any editor.
+        ? { ink: { ...state.ink, strokes: [...state.ink.strokes, stroke], redo: [] } }
+        : state,
+    ),
+
+  inkUndo: () =>
+    set((state) => {
+      if (!state.ink || state.ink.strokes.length === 0) return state;
+      const strokes = state.ink.strokes.slice(0, -1);
+      const lifted = state.ink.strokes[state.ink.strokes.length - 1];
+      return { ink: { ...state.ink, strokes, redo: [...state.ink.redo, lifted] } };
+    }),
+
+  inkRedo: () =>
+    set((state) => {
+      if (!state.ink || state.ink.redo.length === 0) return state;
+      const restored = state.ink.redo[state.ink.redo.length - 1];
+      return {
+        ink: {
+          ...state.ink,
+          strokes: [...state.ink.strokes, restored],
+          redo: state.ink.redo.slice(0, -1),
+        },
+      };
+    }),
+
+  inkDiscard: () => set({ ink: null }),
+
+  inkTake: () => {
+    const open = get().ink;
+    set({ ink: null });
+    if (!open || open.strokes.length === 0) return null;
+    return { docId: open.docId, page: open.page, strokes: open.strokes };
+  },
+
   setSidebarTool: (tool) =>
     set((state) => ({
       activeSidebarTool: state.activeSidebarTool === tool ? null : tool,
@@ -453,7 +522,14 @@ export const usePdfStore = create<PdfStore>((set, get) => ({
           newActiveId = state.activeTabId;
         }
       }
-      return { tabs: newTabs, activeTabId: newActiveId };
+      // An ink group belongs to a document, not to the app. Leaving it behind
+      // when its document closes means every later commit fires at a doc_id
+      // the backend has dropped — "Document not found", forever, on whatever
+      // document the user opens next (issue #120).
+      const closing = state.tabs[idx]?.docId;
+      const ink =
+        state.ink && closing && state.ink.docId === closing ? null : state.ink;
+      return { tabs: newTabs, activeTabId: newActiveId, ink };
     }),
 
   updateTab: (id, updates) =>

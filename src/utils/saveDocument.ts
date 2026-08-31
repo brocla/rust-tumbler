@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { save, message } from "@tauri-apps/plugin-dialog";
 import { usePdfStore } from "../store/usePdfStore";
 import type { TabState } from "../store/usePdfStore";
+import { commitOpenInk } from "./inkCommit";
 
 /**
  * Save / Save As for the non-destructive editing model (issue #31). These are
@@ -14,6 +15,10 @@ import type { TabState } from "../store/usePdfStore";
 /** Overwrites the tab's file with the in-memory buffer. */
 export async function saveTab(tab: TabState): Promise<boolean> {
   try {
+    // Any ink still being drawn has to reach the buffer before the buffer
+    // reaches disk, or the saved file is missing the signature the user just
+    // drew (issue #120).
+    await commitOpenInk();
     await invoke("save_document", { docId: tab.docId });
     return true;
   } catch (err) {
@@ -36,6 +41,7 @@ export async function saveTabAs(tab: TabState, defaultPath?: string): Promise<bo
   if (!destPath) return false;
 
   try {
+    await commitOpenInk();
     const canonical = await invoke<string>("save_document_as", {
       docId: tab.docId,
       destPath,

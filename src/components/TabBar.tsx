@@ -6,6 +6,7 @@ import { usePdfStore } from "../store/usePdfStore";
 import type { TabState } from "../store/usePdfStore";
 import { evictDoc } from "../utils/renderCache";
 import { confirmCloseDirtyTab } from "../utils/saveDocument";
+import { hasPendingInk } from "../utils/inkCommit";
 
 interface TabBarProps {
   onOpenFile: () => void;
@@ -26,7 +27,8 @@ export function TabBar({ onOpenFile }: TabBarProps) {
   const closeTab = async (tab: TabState) => {
     // Unsaved buffer edits (issue #31): Save / Don't Save / Cancel. A failed
     // save also aborts the close so the edits aren't silently lost.
-    if (tab.isDirty && !(await confirmCloseDirtyTab(tab))) return;
+    if ((tab.isDirty || hasPendingInk(tab.docId)) && !(await confirmCloseDirtyTab(tab)))
+      return;
 
     if (tab.metadataDirty) {
       const proceed = await confirm(

@@ -3,6 +3,7 @@ pub mod conformance;
 pub mod document;
 pub mod encryption;
 pub mod forms;
+pub mod ink;
 pub mod linearize;
 pub mod margins;
 pub mod metadata;

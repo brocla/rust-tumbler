@@ -1,4 +1,4 @@
-import { Layers, Search, Info, PocketKnife, Minimize2, Expand, EyeOff, Type } from "lucide-react";
+import { Layers, Search, Info, PocketKnife, Minimize2, Expand, EyeOff, Type, PenTool } from "lucide-react";
 import { usePdfStore } from "../store/usePdfStore";
 
 export function IconRail() {
@@ -68,6 +68,13 @@ export function IconRail() {
         title="Typewriter"
       >
         <Type size={20} />
+      </button>
+      <button
+        className={`rail-button ${activeTool === "ink" ? "active" : ""}`}
+        onClick={() => setSidebarTool("ink")}
+        title="Ink Signature"
+      >
+        <PenTool size={20} />
       </button>
     </div>
   );
