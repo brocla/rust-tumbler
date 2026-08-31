@@ -232,3 +232,47 @@ describe("pending ink counts as unsaved work", () => {
     expect(usePdfStore.getState().ink?.strokes).toHaveLength(1);
   });
 });
+
+/**
+ * An ink group belongs to a document, not to the app. Left behind when its
+ * document closes, every later commit fires at a doc_id the backend has
+ * dropped — "Document not found" — and because a failed commit restores the
+ * group, the error repeats on whatever document is opened next.
+ */
+describe("an ink group does not outlive its document", () => {
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset();
+    vi.mocked(invoke).mockResolvedValue(undefined as never);
+    setTab();
+  });
+
+  it("is dropped when its tab closes", () => {
+    withStrokes();
+
+    usePdfStore.getState().removeTab("tab-1");
+
+    expect(usePdfStore.getState().ink).toBeNull();
+  });
+
+  it("survives the closing of a different tab", () => {
+    usePdfStore.setState({
+      tabs: [makeTab(), makeTab({ id: "tab-2", docId: "doc-2" })],
+    });
+    withStrokes();
+
+    usePdfStore.getState().removeTab("tab-2");
+
+    expect(usePdfStore.getState().ink?.strokes).toHaveLength(1);
+  });
+
+  it("is not sent to a document that is no longer open", async () => {
+    withStrokes();
+    usePdfStore.setState({ tabs: [] });
+    const { commitOpenInk } = await import("../utils/inkCommit");
+
+    await commitOpenInk();
+
+    expect(inkCalls()).toHaveLength(0);
+    expect(usePdfStore.getState().ink).toBeNull();
+  });
+});

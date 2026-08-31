@@ -17,6 +17,11 @@ import { usePdfStore } from "../store/usePdfStore";
 export async function commitOpenInk(): Promise<void> {
   const group = usePdfStore.getState().inkTake();
   if (!group) return;
+  // The document may have closed under the group — a tab close, or a reopen
+  // that minted a fresh doc_id. There is nothing to flatten the ink into, and
+  // asking the backend would only raise "Document not found".
+  const open = usePdfStore.getState().tabs.some((t) => t.docId === group.docId);
+  if (!open) return;
   try {
     await invoke("apply_ink", {
       docId: group.docId,

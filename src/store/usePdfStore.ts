@@ -522,7 +522,14 @@ export const usePdfStore = create<PdfStore>((set, get) => ({
           newActiveId = state.activeTabId;
         }
       }
-      return { tabs: newTabs, activeTabId: newActiveId };
+      // An ink group belongs to a document, not to the app. Leaving it behind
+      // when its document closes means every later commit fires at a doc_id
+      // the backend has dropped — "Document not found", forever, on whatever
+      // document the user opens next (issue #120).
+      const closing = state.tabs[idx]?.docId;
+      const ink =
+        state.ink && closing && state.ink.docId === closing ? null : state.ink;
+      return { tabs: newTabs, activeTabId: newActiveId, ink };
     }),
 
   updateTab: (id, updates) =>
