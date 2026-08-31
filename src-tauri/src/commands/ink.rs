@@ -26,15 +26,20 @@
 //! "undo" once a stroke group has been committed.
 //!
 //! Coordinate note: the frontend sends stroke points in PDF points with a
-//! **top-left** origin (the same space as search and redaction rectangles), and
-//! this module flips them into PDF user space using the page's *render* box —
-//! CropBox when present, else MediaBox — because that is the box pdfium
-//! rendered and therefore the box the user was pointing at. Rotated pages
-//! (`/Rotate`) are not handled: the frontend disables the tool on them rather
-//! than place a signature in the wrong place (issue #121).
+//! **top-left** origin (the same space as search and redaction rectangles),
+//! measured against the page as pdfium drew it. [`PageSpace`] flips them into
+//! PDF user space, accounting for both the render box — CropBox when present,
+//! else MediaBox — and the page's `/Rotate` (issue #121).
+//!
+//! Rotation needs nothing beyond mapping each point, because the strokes are
+//! the only geometry here and a quarter turn is rigid: the round caps are
+//! symmetric and the stroke width is isotropic, so a rotated polyline is just
+//! a polyline through rotated points. No `cm` wrap is required, and keeping
+//! the transform inside the point loop leaves [`ink_content_stream`] a pure
+//! function of the space it is given.
 
 use crate::commands::text_layer::{append_content_stream, contents_refs};
-use crate::commands::typewriter::page_render_box;
+use crate::commands::page_space::PageSpace;
 use crate::error::AppError;
 use crate::state::{lock_mutex, AppState};
 use lopdf::{Dictionary, Document, Object, Stream};
@@ -57,11 +62,11 @@ pub type Stroke = Vec<[f32; 2]>;
 
 /// Builds the content stream for one page's worth of ink.
 ///
-/// `x0`/`y0` are the render box's origin and `height` its height, so a point
-/// the frontend measured downward from the top of the visible page lands in
-/// user space. Returns an empty vector when there is nothing to draw, which the
-/// caller treats as "no edit" rather than an error.
-pub(crate) fn ink_content_stream(strokes: &[Stroke], x0: f32, y0: f32, height: f32) -> Vec<u8> {
+/// `space` carries the render box and the page's rotation, so a point the
+/// frontend measured against the page it could see lands where the user drew
+/// it. Returns an empty vector when there is nothing to draw, which the caller
+/// treats as "no edit" rather than an error.
+pub(crate) fn ink_content_stream(strokes: &[Stroke], space: &PageSpace) -> Vec<u8> {
     if strokes.iter().all(|s| s.is_empty()) {
         return Vec::new();
     }
@@ -73,8 +78,7 @@ pub(crate) fn ink_content_stream(strokes: &[Stroke], x0: f32, y0: f32, height: f
 
     for stroke in strokes {
         for (i, p) in stroke.iter().enumerate() {
-            let x = x0 + p[0];
-            let y = y0 + (height - p[1]);
+            let [x, y] = space.to_user(*p);
             if i == 0 {
                 s.push_str(&format!("{x:.2} {y:.2} m\n"));
                 // A single-point stroke becomes a zero-length line; with a
@@ -195,8 +199,7 @@ pub(crate) fn write_ink(
         .get(&page)
         .ok_or_else(|| AppError::Other(format!("Page {page} not found")))?;
 
-    let (x0, y0, _w, h) = page_render_box(&doc, page_id);
-    let stream_bytes = ink_content_stream(strokes, x0, y0, h);
+    let stream_bytes = ink_content_stream(strokes, &PageSpace::of(&doc, page_id));
     if stream_bytes.is_empty() {
         return Ok(None);
     }
@@ -250,9 +253,7 @@ mod tests {
     fn ink_stream_flips_top_left_points_into_user_space() {
         let s = String::from_utf8(ink_content_stream(
             &[vec![[10.0, 0.0], [50.0, 200.0]]],
-            0.0,
-            0.0,
-            200.0,
+            &PageSpace::new(0, [0.0, 0.0, 200.0, 200.0]),
         ))
         .expect("utf8");
 
@@ -266,8 +267,11 @@ mod tests {
     /// area by exactly the crop.
     #[test]
     fn ink_stream_offsets_by_the_page_box_origin() {
-        let s = String::from_utf8(ink_content_stream(&[vec![[0.0, 0.0]]], 20.0, 30.0, 100.0))
-            .expect("utf8");
+        let s = String::from_utf8(ink_content_stream(
+            &[vec![[0.0, 0.0]]],
+            &PageSpace::new(0, [20.0, 30.0, 120.0, 130.0]),
+        ))
+        .expect("utf8");
 
         // x = x0 + 0, y = y0 + (height - 0)
         assert!(s.contains("20.00 130.00 m"), "origin not applied: {s}");
@@ -277,8 +281,11 @@ mod tests {
     /// a bare `m` with no line segment draws nothing at all.
     #[test]
     fn single_point_stroke_becomes_a_dot() {
-        let s = String::from_utf8(ink_content_stream(&[vec![[10.0, 10.0]]], 0.0, 0.0, 200.0))
-            .expect("utf8");
+        let s = String::from_utf8(ink_content_stream(
+            &[vec![[10.0, 10.0]]],
+            &PageSpace::new(0, [0.0, 0.0, 200.0, 200.0]),
+        ))
+        .expect("utf8");
 
         assert!(s.contains("10.00 190.00 m"), "{s}");
         assert!(s.contains("10.00 190.00 l"), "zero-length line missing: {s}");
@@ -287,8 +294,11 @@ mod tests {
 
     #[test]
     fn ink_stream_carries_the_agreed_colour_and_width() {
-        let s = String::from_utf8(ink_content_stream(&[vec![[1.0, 1.0], [2.0, 2.0]]], 0.0, 0.0, 10.0))
-            .expect("utf8");
+        let s = String::from_utf8(ink_content_stream(
+            &[vec![[1.0, 1.0], [2.0, 2.0]]],
+            &PageSpace::new(0, [0.0, 0.0, 10.0, 10.0]),
+        ))
+        .expect("utf8");
 
         // #0B35B8
         assert!(s.contains("0.043 0.208 0.722 RG"), "ink colour: {s}");
@@ -299,8 +309,9 @@ mod tests {
 
     #[test]
     fn empty_input_produces_no_stream() {
-        assert!(ink_content_stream(&[], 0.0, 0.0, 200.0).is_empty());
-        assert!(ink_content_stream(&[vec![], vec![]], 0.0, 0.0, 200.0).is_empty());
+        let space = PageSpace::new(0, [0.0, 0.0, 200.0, 200.0]);
+        assert!(ink_content_stream(&[], &space).is_empty());
+        assert!(ink_content_stream(&[vec![], vec![]], &space).is_empty());
     }
 
     /// An empty group must leave the document alone — no edit, no dirty flag,
@@ -428,6 +439,76 @@ mod tests {
             blue_pixels > 50,
             "expected a visible blue stroke, found {blue_pixels} blue pixels"
         );
+    }
+
+    /// True for a pixel that is Tumbler's ink blue against white paper.
+    fn is_ink(px: &[u8]) -> bool {
+        px[2] > 120 && px[2] as i16 - px[0] as i16 > 60 && px[2] as i16 - px[1] as i16 > 40
+    }
+
+    /// A short horizontal stroke near the top-left of the page *as displayed*.
+    /// Off-centre in both axes and not square, so a mapping that lands it in
+    /// the wrong corner, or turns it on its side, cannot pass.
+    const STROKE: [[f32; 2]; 2] = [[20.0, 30.0], [80.0, 30.0]];
+    /// Where that stroke must come back out. The 1.5pt nib with round caps
+    /// grows the mark by about a nib radius on every side.
+    const STROKE_BOX: [f32; 4] = [20.0, 30.0, 80.0, 30.0];
+    const NIB_TOL: f32 = 2.0;
+
+    /// **The bug in issue #121.** The user draws against the page pdfium
+    /// rendered; on a `/Rotate` page that render is turned, and at 90 and 270
+    /// its width and height are swapped relative to user space. Ink written
+    /// without accounting for that lands somewhere else entirely — or off the
+    /// page, where nothing shows at all — while every content-stream assertion
+    /// above still passes.
+    ///
+    /// So: the same stroke, in the same coordinates the frontend would send,
+    /// on the same page at each of the four rotations. It must render back in
+    /// the same place every time. The page is 200×400, deliberately not
+    /// square: on a square page the 90/270 swap cancels and this test would
+    /// pass against the broken code.
+    #[test]
+    fn ink_lands_where_it_was_drawn_on_a_rotated_page() {
+        let pdfium = crate::test_pdfium();
+
+        for rotate in [0, 90, 180, 270] {
+            let page = crate::geometry_page_bytes(200.0, 400.0, rotate, None);
+            let out = write_ink(&page, 1, &[STROKE.to_vec()])
+                .expect("write")
+                .expect("bytes");
+
+            crate::assert_mark_landed(
+                crate::rendered_mark_bbox(pdfium.get(), out, false, is_ink),
+                STROKE_BOX,
+                NIB_TOL,
+                &format!("/Rotate {rotate}"),
+            );
+        }
+    }
+
+    /// Rotation and a crop together. pdfium renders the CropBox and *then*
+    /// rotates, so the origin offset has to be applied in user space before
+    /// the turn; applying it after puts the ink off by the crop in whichever
+    /// direction the rotation points.
+    #[test]
+    fn ink_lands_correctly_on_a_page_that_is_both_cropped_and_rotated() {
+        let pdfium = crate::test_pdfium();
+        // A 200×400 sheet cropped to a 160×340 window with a non-zero origin.
+        let crop = Some([15.0, 25.0, 175.0, 365.0]);
+
+        for rotate in [0, 90, 180, 270] {
+            let page = crate::geometry_page_bytes(200.0, 400.0, rotate, crop);
+            let out = write_ink(&page, 1, &[STROKE.to_vec()])
+                .expect("write")
+                .expect("bytes");
+
+            crate::assert_mark_landed(
+                crate::rendered_mark_bbox(pdfium.get(), out, false, is_ink),
+                STROKE_BOX,
+                NIB_TOL,
+                &format!("cropped, /Rotate {rotate}"),
+            );
+        }
     }
 
     #[test]

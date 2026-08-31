@@ -280,3 +280,122 @@ pub(crate) fn encrypted_fixture_path() -> std::path::PathBuf {
 /// The user password baked into [`encrypted_fixture_path`].
 #[cfg(test)]
 pub(crate) const ENCRYPTED_FIXTURE_PASSWORD: &str = "open-sesame";
+
+/// Builds a one-page PDF for the geometry tests: a page `w`×`h` in user space,
+/// with an optional `/Rotate` and an optional `/CropBox` inset from the
+/// MediaBox.
+///
+/// Deliberately **non-square** at every call site. On a square page the
+/// width/height exchange at `/Rotate` 90 and 270 cancels out, so a placement
+/// bug of exactly the kind issue #121 is about passes silently — which is how
+/// it shipped. The page is otherwise blank, so anything coloured found in a
+/// render of it was put there by the code under test.
+#[cfg(test)]
+pub(crate) fn geometry_page_bytes(w: f32, h: f32, rotate: i64, crop: Option<[f32; 4]>) -> Vec<u8> {
+    use lopdf::{dictionary, Dictionary, Document, Object, Stream};
+
+    let mut doc = Document::with_version("1.5");
+    let pages_id = doc.new_object_id();
+    let content_id = doc.add_object(Object::Stream(Stream::new(Dictionary::new(), Vec::new())));
+    let mut page_dict = dictionary! {
+        "Type" => "Page",
+        "Parent" => Object::Reference(pages_id),
+        "MediaBox" => Object::Array(vec![
+            Object::Real(0.0), Object::Real(0.0), Object::Real(w), Object::Real(h),
+        ]),
+        "Contents" => Object::Reference(content_id),
+        "Resources" => Object::Dictionary(Dictionary::new()),
+    };
+    if rotate != 0 {
+        page_dict.set("Rotate", Object::Integer(rotate));
+    }
+    if let Some([x0, y0, x1, y1]) = crop {
+        page_dict.set(
+            "CropBox",
+            Object::Array(vec![
+                Object::Real(x0), Object::Real(y0), Object::Real(x1), Object::Real(y1),
+            ]),
+        );
+    }
+    let page_id = doc.add_object(Object::Dictionary(page_dict));
+    doc.objects.insert(
+        pages_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Pages",
+            "Kids" => Object::Array(vec![Object::Reference(page_id)]),
+            "Count" => Object::Integer(1),
+        }),
+    );
+    let catalog_id = doc.add_object(dictionary! {
+        "Type" => "Catalog",
+        "Pages" => Object::Reference(pages_id),
+    });
+    doc.trailer.set("Root", Object::Reference(catalog_id));
+    let mut out = Vec::new();
+    doc.save_to(&mut out).expect("serialize geometry fixture");
+    out
+}
+
+/// Renders the first page of `bytes` at one pixel per point and returns the
+/// bounding box of the pixels `is_mark` accepts, as `[x0, y0, x1, y1]` in
+/// **render space** — top-left origin, PDF points — which is precisely the
+/// space the frontend's overlays measure in.
+///
+/// This is the only kind of assertion that catches a misplaced-content bug.
+/// Both page-authoring tools write into the file at coordinates the user never
+/// sees, so a test over the generated content stream passes happily while
+/// nothing appears on screen; that is how the rotation bug in issue #121
+/// shipped. Comparing this box against the coordinates the tool was *given*
+/// closes the loop: it asserts the content came back out where it went in.
+///
+/// Takes `&Pdfium` from the caller rather than acquiring, per the rule in
+/// [`test_pdfium`]. `with_annotations` turns on the annotation pass the
+/// viewer's own render path leaves off, which anything checking a typewriter
+/// note's appearance stream needs.
+#[cfg(test)]
+pub(crate) fn rendered_mark_bbox(
+    pdfium: &Pdfium,
+    bytes: Vec<u8>,
+    with_annotations: bool,
+    is_mark: impl Fn(&[u8]) -> bool,
+) -> Option<[f32; 4]> {
+    use pdfium_render::prelude::*;
+
+    let doc = pdfium.load_pdf_from_byte_vec(bytes, None).expect("load rendered doc");
+    let page = doc.pages().get(0).expect("page 1");
+    let config = PdfRenderConfig::new()
+        .set_target_width(page.width().value.round().max(1.0) as Pixels)
+        .render_annotations(with_annotations);
+    let bitmap = page.render_with_config(&config).expect("render");
+    let (w, h) = (bitmap.width() as usize, bitmap.height() as usize);
+    let rgba = bitmap.as_rgba_bytes();
+
+    let mut bbox: Option<[f32; 4]> = None;
+    for (i, px) in rgba.chunks_exact(4).enumerate().take(w * h) {
+        if !is_mark(px) {
+            continue;
+        }
+        let (x, y) = ((i % w) as f32, (i / w) as f32);
+        bbox = Some(match bbox {
+            None => [x, y, x, y],
+            Some([x0, y0, x1, y1]) => [x0.min(x), y0.min(y), x1.max(x), y1.max(y)],
+        });
+    }
+    bbox
+}
+
+/// Asserts a [`rendered_mark_bbox`] result matches the render-space box the
+/// tool was handed, within `tol` points. `what` names the case in the failure.
+#[cfg(test)]
+pub(crate) fn assert_mark_landed(got: Option<[f32; 4]>, want: [f32; 4], tol: f32, what: &str) {
+    let got = got.unwrap_or_else(|| {
+        panic!("{what}: nothing was drawn — the content landed off the visible page")
+    });
+    for (i, (g, w)) in got.iter().zip(want.iter()).enumerate() {
+        assert!(
+            (g - w).abs() <= tol,
+            "{what}: rendered box {got:?} != expected {want:?} (component {i} off by {}, tol {tol})",
+            (g - w).abs()
+        );
+    }
+}
