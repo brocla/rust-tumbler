@@ -154,3 +154,37 @@ describe("InkPanel", () => {
     expect(screen.getByText(/not a\s+digital signature/)).toBeInTheDocument();
   });
 });
+
+/**
+ * The group has to reach the buffer before anything else rewrites it, or the
+ * strokes are flattened onto a document that has already moved on — or lost
+ * entirely. These call sites are easy to add and easy to forget, so the
+ * contract is pinned here rather than left to review.
+ */
+describe("commitOpenInk", () => {
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset();
+    vi.mocked(invoke).mockResolvedValue(undefined as never);
+    setTab();
+  });
+
+  it("flattens the open group and clears it", async () => {
+    withStrokes(2);
+    const { commitOpenInk } = await import("../utils/inkCommit");
+
+    await commitOpenInk();
+
+    expect(inkCalls()).toHaveLength(1);
+    expect(inkCalls()[0][1]).toMatchObject({ docId: "doc-1", page: 2 });
+    expect(usePdfStore.getState().ink).toBeNull();
+  });
+
+  it("is a no-op when nothing is pending, so every call site can call it freely", async () => {
+    const { commitOpenInk } = await import("../utils/inkCommit");
+
+    await commitOpenInk();
+    await commitOpenInk();
+
+    expect(inkCalls()).toHaveLength(0);
+  });
+});

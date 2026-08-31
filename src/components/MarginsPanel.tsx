@@ -6,6 +6,7 @@ import { Expand } from "lucide-react";
 import { usePdfStore } from "../store/usePdfStore";
 import { confirmBreakingEdit } from "../utils/confirmBreakingEdit";
 import { isSigned, SIGNATURE_EDIT_WARNING } from "../utils/signature";
+import { commitOpenInk } from "../utils/inkCommit";
 
 // Mirrors the Rust `MarginsReport` types (serde camelCase). Boxes are in
 // display points, origin bottom-left, y up; `bbox` is null for a blank page.
@@ -180,6 +181,7 @@ export function MarginsPanel() {
     setApplying(true);
     setAppliedScale(null);
     try {
+      await commitOpenInk();
       const result = await invoke<ExpandResult>("expand_margins", { docId, paddingPt });
       if (!result.cancelled) setAppliedScale(result.scale);
     } catch (err) {
