@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
 import { Undo2, Redo2, Check } from "lucide-react";
 import { usePdfStore } from "../store/usePdfStore";
 import { commitOpenInk } from "../utils/inkCommit";
@@ -28,11 +27,9 @@ export function InkPanel() {
   const inkDiscard = usePdfStore((s) => s.inkDiscard);
   const setSidebarTool = usePdfStore((s) => s.setSidebarTool);
 
-  const docId = activeTab?.docId ?? "";
   const tabId = activeTab?.id ?? "";
   const currentPage = activeTab?.currentPage ?? 1;
 
-  const [rotation, setRotation] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const strokeCount = ink?.strokes.length ?? 0;
@@ -41,24 +38,6 @@ export function InkPanel() {
   const commit = useCallback(() => {
     commitOpenInk().catch((e) => setError(String(e)));
   }, []);
-
-  // A rotated page is refused rather than guessed at: ink would land in the
-  // wrong place and orientation (issue #121). Re-checked per page, since
-  // rotation is per page.
-  useEffect(() => {
-    let cancelled = false;
-    if (!docId) return;
-    invoke<number>("page_rotation", { docId, page: currentPage })
-      .then((r) => {
-        if (!cancelled) setRotation(r);
-      })
-      .catch(() => {
-        if (!cancelled) setRotation(null);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [docId, currentPage]);
 
   // Drawing rewrites the file, which invalidates any digital signature. Warn
   // once when the tool opens — before any ink is drawn — rather than after,
@@ -113,21 +92,12 @@ export function InkPanel() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [inkUndo, inkRedo, inkDiscard]);
 
-  const blocked = rotation !== null && rotation !== 0;
-
   return (
     <div className="search-panel">
       <p className="ink-panel-hint">
         Draw on page {currentPage} to sign it. One blue, one width — undo is the
         only eraser.
       </p>
-
-      {blocked && (
-        <p className="ink-panel-blocked">
-          Page {currentPage} is rotated {rotation}°, and ink would be placed
-          incorrectly on it. Rotated-page support is tracked separately.
-        </p>
-      )}
 
       {error && <p className="ink-panel-blocked">Couldn't apply ink: {error}</p>}
 

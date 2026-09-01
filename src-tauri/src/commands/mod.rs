@@ -9,6 +9,7 @@ pub mod margins;
 pub mod metadata;
 pub mod ocr;
 pub mod optimize;
+pub mod page_space;
 pub mod pages;
 pub mod print;
 pub mod redact;
