@@ -46,7 +46,12 @@ export function fitZoom(
   padding: number,
 ): number | null {
   if (zoomMode === "numeric") return null;
-  const clamp = (z: number) => Math.max(10, Math.min(400, Math.round(z)));
+  // Floored, not rounded. Rounding up overshoots by up to half a percent,
+  // which is enough to push the fitted page past the edge of the box it is
+  // supposed to fit inside — bringing in the very scrollbar the caller
+  // reserved space for, and re-arming the feedback loop (issue #126). A
+  // "fit" that does not fit is not a fit.
+  const clamp = (z: number) => Math.max(10, Math.min(400, Math.floor(z)));
   const fitW = ((clientWidth - padding) / dim.width) * 100;
   if (zoomMode === "fit-width") return clamp(fitW);
   if (zoomMode === "fit-width-90") return clamp(fitW * 0.9);
@@ -101,6 +106,11 @@ const MIN_RENDER_RADIUS = 2;
 // immediately reveal placeholders.
 const RENDER_MARGIN_PAGES = 1;
 const PAGE_GAP = 16;
+// Space held back for a scrollbar, whether or not one is showing. Matches the
+// `::-webkit-scrollbar` width in global.css — these are classic, space-taking
+// scrollbars rather than overlay ones, so they really do shrink the content
+// box. See the fit effect for why the reservation is unconditional.
+const SCROLLBAR_ALLOWANCE = 10;
 
 export function ContinuousViewer() {
   const activeTab = usePdfStore((s) =>
@@ -213,7 +223,26 @@ export function ContinuousViewer() {
       // fitReference for why that distinction is load-bearing.
       const dim = fitReference(pageDimensions);
       if (!dim) return;
-      const zoom = fitZoom(zoomMode, dim, container.clientWidth, container.clientHeight, PADDING);
+      // Measured against `offset*`, not `client*`, and with a scrollbar's
+      // width always held back.
+      //
+      // `clientHeight` shrinks when a horizontal scrollbar appears — and the
+      // zoom computed from it is what decides whether that scrollbar appears
+      // at all. Measuring it here would make this function's input depend on
+      // its own output, and the ResizeObserver below closes that loop: fit,
+      // overflow, scrollbar, smaller box, smaller fit, no overflow, no
+      // scrollbar, larger box, and round again (issue #126). `offsetWidth`
+      // and `offsetHeight` span the scrollbar gutter, so they do not move
+      // when a scrollbar toggles; reserving the gutter unconditionally then
+      // keeps the page inside the box in both states. It costs 1-2% of zoom
+      // when no scrollbar is showing, and buys a fit that cannot oscillate.
+      const zoom = fitZoom(
+        zoomMode,
+        dim,
+        container.offsetWidth - SCROLLBAR_ALLOWANCE,
+        container.offsetHeight - SCROLLBAR_ALLOWANCE,
+        PADDING,
+      );
       if (zoom === null) return;
       // "fit-width-90" is a one-shot open default: apply it once, then hand the
       // tab back to numeric so it no longer refits on resize (issue #38).

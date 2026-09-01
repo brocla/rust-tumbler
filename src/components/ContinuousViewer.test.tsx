@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, act } from "@testing-library/react";
-import { ContinuousViewer } from "./ContinuousViewer";
+import { ContinuousViewer, fitZoom } from "./ContinuousViewer";
 import { usePdfStore } from "../store/usePdfStore";
 import type { PageDimension, TabState } from "../store/usePdfStore";
 
@@ -31,6 +31,14 @@ class FakeIntersectionObserver {
 
 /** jsdom reports every element as 0x0, which makes any fit zoom degenerate. */
 const CONTAINER_WIDTH = 1562;
+const CONTAINER_HEIGHT = 900;
+/** Kept in step with SCROLLBAR_ALLOWANCE / the ::-webkit-scrollbar width. */
+const SCROLLBAR = 10;
+
+/** Fires the container's ResizeObserver, as a scrollbar toggling would. */
+let resized: (() => void) | null;
+/** What the container currently reports; a test can shrink it mid-run. */
+let clientBox: { width: number; height: number };
 
 function makeTab(o: Partial<TabState> = {}): TabState {
   return {
@@ -68,17 +76,27 @@ function expectObserving(els: Element[]) {
 
 beforeEach(() => {
   observed = new Set();
+  resized = null;
+  // Starts equal to the offset box: no scrollbar showing.
+  clientBox = { width: CONTAINER_WIDTH, height: CONTAINER_HEIGHT };
   vi.stubGlobal("IntersectionObserver", FakeIntersectionObserver);
   vi.stubGlobal(
     "ResizeObserver",
     class {
+      constructor(cb: () => void) {
+        resized = cb;
+      }
       observe() {}
       unobserve() {}
       disconnect() {}
     },
   );
-  vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(CONTAINER_WIDTH);
-  vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(900);
+  // The offset box spans the scrollbar gutter, so it does not move when a
+  // scrollbar appears; the client box does.
+  vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockReturnValue(CONTAINER_WIDTH);
+  vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockReturnValue(CONTAINER_HEIGHT);
+  vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockImplementation(() => clientBox.width);
+  vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockImplementation(() => clientBox.height);
 });
 
 afterEach(() => {
@@ -91,8 +109,9 @@ describe("fit modes on a document with mixed page sizes", () => {
   // the two zoom levels in issue #125 came from.
   const UPRIGHT: PageDimension = { width: 612, height: 792 };
   const ROTATED: PageDimension = { width: 792, height: 612 };
-  // (1562 - 32) / 792 * 100, the widest page — so both pages fit.
-  const FITTED = 193;
+  // floor((1562 - 10 - 32) / 792 * 100): the offset box, less a reserved
+  // scrollbar gutter, less padding, against the widest page.
+  const FITTED = 191;
 
   /**
    * **The bug in issue #125.** Zoom was computed from the current page's
@@ -139,8 +158,10 @@ describe("fit modes on a document with mixed page sizes", () => {
     render(<ContinuousViewer />);
 
     expect(tab().zoom).toBe(FITTED);
-    // The widest page fits exactly; the narrower one has room to spare.
-    expect((ROTATED.width * tab().zoom) / 100).toBeLessThanOrEqual(CONTAINER_WIDTH - 32);
+    // The widest page fits inside the box even with a scrollbar showing.
+    expect((ROTATED.width * tab().zoom) / 100).toBeLessThanOrEqual(
+      CONTAINER_WIDTH - SCROLLBAR - 32,
+    );
   });
 
   /**
@@ -158,8 +179,7 @@ describe("fit modes on a document with mixed page sizes", () => {
     });
     render(<ContinuousViewer />);
 
-    // (900 - 32) / 792 * 100, the tallest page — so every page fits.
-    const fitted = Math.round((900 - 32) / UPRIGHT.height * 100);
+    const fitted = Math.floor(((CONTAINER_HEIGHT - SCROLLBAR - 32) / UPRIGHT.height) * 100);
     expect(tab().zoom).toBe(fitted);
 
     act(() => usePdfStore.getState().updateTab("tab-1", { currentPage: 2 }));
@@ -174,8 +194,9 @@ describe("fit modes on a document with mixed page sizes", () => {
     setTab({ zoomMode: "fit-page", pageCount: 2, pageDimensions: [ROTATED, UPRIGHT], currentPage: 1 });
     render(<ContinuousViewer />);
 
-    const fitTallest = Math.round(((900 - 32) / UPRIGHT.height) * 100);
-    const fitCurrent = Math.round(((900 - 32) / ROTATED.height) * 100);
+    const avail = CONTAINER_HEIGHT - SCROLLBAR - 32;
+    const fitTallest = Math.floor((avail / UPRIGHT.height) * 100);
+    const fitCurrent = Math.floor((avail / ROTATED.height) * 100);
     expect(fitTallest).not.toBe(fitCurrent); // the two must be distinguishable
     expect(tab().zoom).toBe(fitTallest);
   });
@@ -188,9 +209,84 @@ describe("fit modes on a document with mixed page sizes", () => {
     });
     render(<ContinuousViewer />);
 
-    expect(tab().zoom).toBe(Math.round(FITTED * 0.9));
+    expect(tab().zoom).toBe(Math.floor(((CONTAINER_WIDTH - SCROLLBAR - 32) / 792) * 100 * 0.9));
     // One-shot: it hands the tab back to numeric so it never refits (issue #38).
     expect(tab().zoomMode).toBe("numeric");
+  });
+});
+
+describe("fit zoom against a toggling scrollbar (issue #126)", () => {
+  const ROTATED: PageDimension = { width: 792, height: 612 };
+
+  /**
+   * **The loop.** `clientHeight` shrinks when a horizontal scrollbar appears,
+   * and the zoom computed from it is what decides whether that scrollbar
+   * appears at all — so measuring it makes the fit's input depend on its own
+   * output. The ResizeObserver closes the circuit: fit, overflow, scrollbar,
+   * smaller box, smaller fit, no overflow, no scrollbar, round again.
+   *
+   * Driven here the way it really happens: shrink the client box by a
+   * scrollbar's width, leave the offset box alone, and fire the observer. The
+   * zoom must not budge. jsdom has no real scrollbars, so this pins the
+   * structure — the measurement no longer depends on the scrollbar — rather
+   * than the symptom.
+   */
+  it("does not move when a scrollbar shrinks the client box", () => {
+    setTab({ zoomMode: "fit-page", pageCount: 1, pageDimensions: [ROTATED] });
+    render(<ContinuousViewer />);
+    const settled = tab().zoom;
+
+    act(() => {
+      clientBox = { width: CONTAINER_WIDTH, height: CONTAINER_HEIGHT - SCROLLBAR };
+      resized?.();
+    });
+    expect(tab().zoom).toBe(settled);
+
+    // ...and back, as it would if the smaller zoom removed the overflow.
+    act(() => {
+      clientBox = { width: CONTAINER_WIDTH, height: CONTAINER_HEIGHT };
+      resized?.();
+    });
+    expect(tab().zoom).toBe(settled);
+  });
+
+  it("does not move when a vertical scrollbar shrinks the client box, in fit-width", () => {
+    setTab({ zoomMode: "fit-width", pageCount: 1, pageDimensions: [ROTATED] });
+    render(<ContinuousViewer />);
+    const settled = tab().zoom;
+
+    act(() => {
+      clientBox = { width: CONTAINER_WIDTH - SCROLLBAR, height: CONTAINER_HEIGHT };
+      resized?.();
+    });
+    expect(tab().zoom).toBe(settled);
+  });
+
+  /**
+   * A fit that overflows the box is not a fit — and an overflow is what
+   * summons the scrollbar the reservation exists to absorb. Rounding up by
+   * half a percent was enough to do it, so this covers the arithmetic across
+   * a spread of sizes rather than one worked example.
+   */
+  it("never fits a page larger than the box it was given", () => {
+    const PADDING = 32;
+    for (const w of [200, 612, 792, 1000]) {
+      for (const h of [200, 612, 792, 1000]) {
+        for (const box of [500, 800, 1562, 2000]) {
+          const dim = { width: w, height: h };
+          const wide = fitZoom("fit-width", dim, box, box, PADDING)!;
+          // A clamp floor of 10% can legitimately overflow a tiny box; the
+          // fit itself must never be the reason.
+          if (wide > 10 && wide < 400) {
+            expect((w * wide) / 100).toBeLessThanOrEqual(box - PADDING);
+          }
+          const tall = fitZoom("fit-page", dim, box, box, PADDING)!;
+          if (tall > 10 && tall < 400) {
+            expect((h * tall) / 100).toBeLessThanOrEqual(box - PADDING);
+          }
+        }
+      }
+    }
   });
 });
 
