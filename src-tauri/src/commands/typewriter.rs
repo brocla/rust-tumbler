@@ -31,7 +31,7 @@
 //! same turn in its text matrix, so search and selection agree with what is
 //! drawn.
 
-use crate::commands::page_space::PageSpace;
+use crate::commands::page_space::{quarter_turn_matrix, quarter_turn_of, Mat, PageSpace};
 use crate::commands::save::dirty_changed_payload;
 use crate::commands::text_layer::{
     contents_refs, encode_for_font, helvetica_width_1000, merged_resources_with_font,
@@ -88,6 +88,21 @@ pub struct TypewriterAnnot {
     pub font_size: f32,
     /// RGB, each component 0.0..=1.0.
     pub color: [f32; 3],
+    /// How the note sits on screen, in degrees clockwise from upright: 0, 90,
+    /// 180 or 270. **Relative to the page as rendered**, not to user space.
+    ///
+    /// A note the user has just typed is 0 — upright in front of them, at
+    /// whatever rotation the page happens to have. It becomes non-zero only
+    /// when the page is rotated *afterwards*, which turns the note with it the
+    /// way it turns flattened ink (issue #124).
+    ///
+    /// Screen-relative rather than absolute so the frontend needs no notion of
+    /// the page's `/Rotate` at all: it places notes upright, reads back an
+    /// angle it can hand straight to a CSS `rotate()`, and this module does
+    /// the conversion. `serde` defaults it, so a note written before this
+    /// existed re-hydrates upright.
+    #[serde(default)]
+    pub rotation: i64,
 }
 
 // ── Font metrics (pure) ──────────────────────────────────────────────────────
@@ -337,6 +352,44 @@ fn remove_tumbler_annots(doc: &mut Document) -> usize {
     removed
 }
 
+/// Where one note goes on the page: the transform from the note's own drawing
+/// frame into user space, and the `/Rect` that frame fills.
+///
+/// The note's own frame is the box the user typed into — `annot.width` by
+/// `annot.height`, text running left to right — regardless of how the page or
+/// the note is turned. Two rotations meet here:
+///
+/// - `annot.rotation` is how the note sits *on screen*.
+/// - the page's `/Rotate` is how the viewer will turn user space.
+///
+/// so the note's angle in user space is the difference. Authoring a fresh
+/// note (rotation 0) on a page turned 90° therefore stores it at 90°, which
+/// is what made it read upright before this field existed.
+///
+/// The translation is computed rather than left to the viewer's BBox-to-Rect
+/// fit (PDF 32000-1 §12.5.5): the transformed box then lands on `/Rect`
+/// exactly, and the same matrix can position the invisible text run.
+fn note_placement(space: &PageSpace, annot: &TypewriterAnnot) -> (Mat, [f32; 4]) {
+    let in_user = space.rotate() - annot.rotation;
+    let [a, b, c, d, _, _] = quarter_turn_matrix(in_user);
+
+    // Turned a quarter, the note's own box covers a footprint with its width
+    // and height exchanged — the swap the whole of issue #121 was about, now
+    // driven by the note's own angle rather than only the page's.
+    let (w, h) = (annot.width, annot.height);
+    let quarter = annot.rotation.rem_euclid(180) == 90;
+    let (bw, bh) = if quarter { (h, w) } else { (w, h) };
+    let rect = space.rect_to_user(annot.x, annot.y, bw, bh);
+
+    // Land the rotated own-frame box on that rect.
+    let corners = [[0.0, 0.0], [w, 0.0], [0.0, h], [w, h]];
+    let mapped = corners.map(|[x, y]| [a * x + c * y, b * x + d * y]);
+    let min_x = mapped.iter().fold(f32::INFINITY, |m, p| m.min(p[0]));
+    let min_y = mapped.iter().fold(f32::INFINITY, |m, p| m.min(p[1]));
+
+    ([a, b, c, d, rect[0] - min_x, rect[1] - min_y], rect)
+}
+
 /// Adds one FreeText annotation per note, appending it to its page's `/Annots`.
 /// Font objects are shared across notes with the same base font.
 fn add_tumbler_annots(doc: &mut Document, annots: &[TypewriterAnnot]) -> Result<(), AppError> {
@@ -348,11 +401,8 @@ fn add_tumbler_annots(doc: &mut Document, annots: &[TypewriterAnnot]) -> Result<
         let Some(&page_id) = pages.get(&annot.page) else {
             continue; // page out of range — drop rather than error
         };
-        // Top-left origin (frontend) → bottom-left, unrotated user space.
-        // On a quarter-turned page this is where the note's width and height
-        // exchange: the rect is as tall as the box is wide.
         let space = PageSpace::of(doc, page_id);
-        let [x1, y1, x2, y2] = space.rect_to_user(annot.x, annot.y, annot.width, annot.height);
+        let (matrix, [x1, y1, x2, y2]) = note_placement(&space, annot);
 
         let base = base_font_name(&annot.font_family, annot.bold, annot.italic);
         let font_id = *font_ids.entry(base).or_insert_with(|| {
@@ -373,14 +423,10 @@ fn add_tumbler_annots(doc: &mut Document, annots: &[TypewriterAnnot]) -> Result<
                 Object::Real(0.0), Object::Real(0.0),
                 Object::Real(annot.width), Object::Real(annot.height),
             ]),
-            // The appearance is drawn upright in its own space; this turns it
-            // to counter the page rotation, so the viewer's own turn brings
-            // the text back level. A viewer maps the transformed BBox onto
-            // /Rect (PDF 32000-1 §12.5.5), and because the same rotation is
-            // in both, the two agree in size and the note lands square.
-            "Matrix" => Object::Array(
-                space.upright_matrix().iter().map(|v| Object::Real(*v)).collect(),
-            ),
+            // The appearance is drawn upright in its own space; this places
+            // and turns it, so the viewer's own rotation leaves the note at
+            // the angle the user sees it at. See note_placement.
+            "Matrix" => Object::Array(matrix.iter().map(|v| Object::Real(*v)).collect()),
             "Resources" => dictionary! {
                 "Font" => dictionary! { FONT_RES => Object::Reference(font_id) },
             },
@@ -468,17 +514,20 @@ fn build_text_layer_content(
                 continue;
             }
             any = true;
-            let y_tl = annot.y + INSET + annot.font_size * ASCENT_RATIO + i as f32 * leading;
-            let [x, y] = space.to_user([annot.x + INSET, y_tl]);
-            // The linear part turns the run to counter the page rotation, so
-            // the extracted glyph boxes sit under the visible text rather than
-            // running off across the page at right angles to it.
-            let [a, b, c, d, _, _] = space.upright_matrix();
+            // The same own-frame → user transform the appearance uses, so the
+            // extracted glyph boxes sit under the text that is drawn however
+            // the note and the page are turned. The baseline in the note's own
+            // frame matches build_appearance_content's first Td.
+            let (m, _) = note_placement(space, annot);
+            let baseline = annot.height - INSET - annot.font_size * ASCENT_RATIO - i as f32 * leading;
+            let (ox, oy) = (INSET, baseline);
+            let x = m[0] * ox + m[2] * oy + m[4];
+            let y = m[1] * ox + m[3] * oy + m[5];
             ops.push(Operation::new(
                 "Tm",
                 vec![
-                    Object::Real(a), Object::Real(b), Object::Real(c),
-                    Object::Real(d), Object::Real(x), Object::Real(y),
+                    Object::Real(m[0]), Object::Real(m[1]), Object::Real(m[2]),
+                    Object::Real(m[3]), Object::Real(x), Object::Real(y),
                 ],
             ));
             ops.push(Operation::new(
@@ -623,8 +672,34 @@ pub fn write_typewriter_annots(
     Ok(Some(out))
 }
 
+/// The quarter turn an annotation's appearance stream is drawn at, in user
+/// space. Absent or unrecognisable reads as upright.
+fn annot_matrix_rotation(doc: &Document, id: ObjectId) -> i64 {
+    let Some(ap) = annot_ap_ref(doc, id) else {
+        return 0;
+    };
+    let Some(m) = doc
+        .get_object(ap)
+        .ok()
+        .and_then(|o| o.as_stream().ok())
+        .and_then(|st| st.dict.get(b"Matrix").ok())
+        .and_then(|o| o.as_array().ok())
+        .filter(|a| a.len() >= 6)
+    else {
+        return 0;
+    };
+    let v: Vec<f32> = m.iter().map(object_as_f32).collect();
+    quarter_turn_of(&[v[0], v[1], v[2], v[3], v[4], v[5]])
+}
+
 /// Reconstructs a note from one of our FreeText annotation dictionaries.
-fn reconstruct(dict: &Dictionary, page: u32, space: &PageSpace) -> Option<TypewriterAnnot> {
+/// `in_user` is the angle its appearance is drawn at in user space.
+fn reconstruct(
+    dict: &Dictionary,
+    page: u32,
+    space: &PageSpace,
+    in_user: i64,
+) -> Option<TypewriterAnnot> {
     let id = String::from_utf8_lossy(dict.get(TW_ID_KEY).ok()?.as_str().ok()?).into_owned();
     let rect = dict.get(b"Rect").ok()?.as_array().ok()?;
     if rect.len() < 4 {
@@ -654,12 +729,18 @@ fn reconstruct(dict: &Dictionary, page: u32, space: &PageSpace) -> Option<Typewr
     // Back through the same mapping, so a note re-hydrates at the coordinates
     // it was placed at — including the width/height exchange on a quarter-
     // turned page, which a hand-written inverse gets backwards.
-    let (x, y, width, height) = space.rect_to_render([
+    let (x, y, bw, bh) = space.rect_to_render([
         x1.min(x2),
         y1.min(y2),
         x1.max(x2),
         y1.max(y2),
     ]);
+
+    // How the note sits on screen: the page's turn, less the note's own.
+    let rotation = (space.rotate() - in_user).rem_euclid(360);
+    // `bw`/`bh` bound the note on screen; its own box is their transpose when
+    // it sits at a quarter turn to the page.
+    let (width, height) = if rotation.rem_euclid(180) == 90 { (bh, bw) } else { (bw, bh) };
 
     Some(TypewriterAnnot {
         id,
@@ -674,6 +755,7 @@ fn reconstruct(dict: &Dictionary, page: u32, space: &PageSpace) -> Option<Typewr
         italic: dict_bool(b"TWitalic"),
         font_size: dict.get(b"TWsize").ok().map(object_as_f32).unwrap_or(12.0),
         color,
+        rotation,
     })
 }
 
@@ -691,7 +773,11 @@ pub fn read_typewriter_annots(buffer: &[u8]) -> Result<Vec<TypewriterAnnot>, App
             if !dict.has(TW_ID_KEY) {
                 continue;
             }
-            if let Some(annot) = reconstruct(dict, page_num, &space) {
+            let in_user = annot_matrix_rotation(&doc, r);
+            let Some(dict) = doc.get_object(r).ok().and_then(|o| o.as_dict().ok()) else {
+                continue;
+            };
+            if let Some(annot) = reconstruct(dict, page_num, &space, in_user) {
                 out.push(annot);
             }
         }
@@ -773,6 +859,7 @@ mod tests {
             italic: false,
             font_size: 12.0,
             color: [0.0, 0.0, 1.0],
+            rotation: 0,
         }
     }
 
@@ -1205,17 +1292,144 @@ mod tests {
             "glyphs at [{x0}, {y0}, {x1}, {y1}] fall outside the turned note box {footprint:?}"
         );
 
-        // And read-back reports the note where the *rotated* page shows it —
-        // 120 tall and 20 wide, the transpose of how it was authored. This is
-        // what the overlay would need in order to follow the rotation.
+        // And read-back reports what the overlay needs to draw it: the box it
+        // now occupies on screen, the note's own dimensions unchanged from how
+        // it was typed, and the quarter turn between the two (issue #124).
         let read = read_typewriter_annots(&rotated).expect("read");
         assert_eq!(read.len(), 1);
         let got = &read[0];
         assert_eq!(
-            (got.x, got.y, got.width, got.height),
-            (350.0, 20.0, 20.0, 120.0),
-            "read-back must report the note in the new render space"
+            (got.x, got.y, got.width, got.height, got.rotation),
+            (350.0, 20.0, 120.0, 20.0, 90),
+            "read-back must report the note turned, at its own dimensions"
         );
+    }
+
+    /// A note carrying its own angle must be *drawn* at that angle, not just
+    /// record it. On an unrotated page a note at 90° has its glyphs running
+    /// down the page, in a footprint that is the transpose of its own box.
+    #[test]
+    fn a_turned_note_is_drawn_turned() {
+        let pdfium = crate::test_pdfium();
+        let page = crate::geometry_page_bytes(200.0, 400.0, 0, None);
+
+        let mut note = probe_note(20.0, 30.0);
+        note.rotation = 90;
+        let bytes = write_typewriter_annots(&page, &[note])
+            .expect("write")
+            .expect("bytes");
+
+        let [x0, y0, x1, y1] = crate::rendered_mark_bbox(pdfium.get(), bytes, true, is_glyph)
+            .expect("the note must be visible");
+        assert!(
+            y1 - y0 > 3.0 * (x1 - x0),
+            "a 90° note should run down the page, got {}x{}",
+            x1 - x0,
+            y1 - y0
+        );
+        // Its own box is 120x20, so turned it occupies 20 wide by 120 tall
+        // from the placement point.
+        assert!(
+            x0 >= 20.0 - GLYPH_TOL && x1 <= 40.0 + GLYPH_TOL
+                && y0 >= 30.0 - GLYPH_TOL && y1 <= 150.0 + GLYPH_TOL,
+            "glyphs at [{x0}, {y0}, {x1}, {y1}] are outside the turned footprint"
+        );
+    }
+
+    /// Every combination of note angle and page rotation must survive a
+    /// round trip. The two compose, so an error in either shows up as an
+    /// angle that drifts on reopen — and a drifted note is then written back
+    /// drifted, compounding each time.
+    #[test]
+    fn note_and_page_rotations_compose_and_round_trip() {
+        for page_rotate in [0, 90, 180, 270] {
+            for note_rotation in [0, 90, 180, 270] {
+                let page = crate::geometry_page_bytes(200.0, 400.0, page_rotate, None);
+                let mut note = probe_note(20.0, 30.0);
+                note.rotation = note_rotation;
+                let bytes = write_typewriter_annots(&page, &[note.clone()])
+                    .expect("write")
+                    .expect("bytes");
+
+                let read = read_typewriter_annots(&bytes).expect("read");
+                assert_eq!(read.len(), 1, "page {page_rotate}, note {note_rotation}");
+                let got = &read[0];
+                let what = format!("page /Rotate {page_rotate}, note at {note_rotation}°");
+                assert_eq!(got.rotation, note_rotation, "{what}: angle drifted");
+                for (name, g, w) in [
+                    ("x", got.x, note.x),
+                    ("y", got.y, note.y),
+                    ("width", got.width, note.width),
+                    ("height", got.height, note.height),
+                ] {
+                    assert!((g - w).abs() < 0.5, "{what}: {name} drifted, {g} vs {w}");
+                }
+            }
+        }
+    }
+
+    /// **The guarantee behind issue #124's decided behaviour.** A note keeps
+    /// the orientation it was authored at, so touching one — editing its text,
+    /// or any re-apply, which always rewrites the whole set — must not quietly
+    /// straighten it to the page's current rotation.
+    ///
+    /// Before the note carried its own angle, every write re-authored at the
+    /// page's `/Rotate`, so a single edit would have snapped every note on the
+    /// document upright.
+    #[test]
+    fn re_applying_a_turned_note_does_not_straighten_it() {
+        use crate::state::DocEntry;
+
+        let pdfium = crate::test_pdfium();
+        let page = crate::geometry_page_bytes(200.0, 400.0, 0, None);
+        let authored = write_typewriter_annots(&page, &[probe_note(20.0, 30.0)])
+            .expect("write")
+            .expect("bytes");
+
+        let path = std::env::temp_dir().join("tumbler_turned_note_reapply.pdf");
+        std::fs::write(&path, &authored).expect("write temp");
+        let state = AppState::new(pdfium.get(), None);
+        let entry = DocEntry::load(state.pdfium, &path.to_string_lossy(), None).expect("load");
+        state.insert_document("d".to_string(), entry).expect("insert");
+        crate::commands::pages::rotate_pages_impl(&state, "d".to_string(), vec![1], 1)
+            .expect("rotate");
+        let rotated = {
+            let entry = state.get_document("d").expect("get");
+            let entry = lock_mutex(&entry).expect("lock");
+            entry.buffer.clone()
+        };
+
+        // What the frontend would hold after re-reading: a note turned 90°.
+        let mut notes = read_typewriter_annots(&rotated).expect("read");
+        assert_eq!(notes[0].rotation, 90, "precondition: the note is turned");
+
+        // The user edits the text; the frontend re-applies the whole set.
+        notes[0].text = "Edited".to_string();
+        let reapplied = write_typewriter_annots(&rotated, &notes)
+            .expect("re-apply")
+            .expect("bytes");
+
+        let after = read_typewriter_annots(&reapplied).expect("read back");
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].text, "Edited");
+        assert_eq!(after[0].rotation, 90, "editing must not straighten the note");
+        assert_eq!(
+            (after[0].x, after[0].y, after[0].width, after[0].height),
+            (notes[0].x, notes[0].y, notes[0].width, notes[0].height),
+            "editing must not move or reshape the note"
+        );
+    }
+
+    /// A note written before the angle existed has no `/Matrix` rotation to
+    /// decode, and `rotation` is absent from any payload an older frontend
+    /// sends. Both must read as upright rather than as a wrong angle.
+    #[test]
+    fn a_note_without_an_angle_reads_as_upright() {
+        let json = r#"{"id":"n1","page":1,"x":1.0,"y":2.0,"width":3.0,"height":4.0,
+            "text":"hi","fontFamily":"Helvetica","bold":false,"italic":false,
+            "fontSize":12.0,"color":[0.0,0.0,0.0]}"#;
+        let annot: TypewriterAnnot = serde_json::from_str(json).expect("older payload");
+        assert_eq!(annot.rotation, 0);
     }
 
     #[test]

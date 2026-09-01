@@ -125,19 +125,18 @@ impl PageSpace {
         (self.ebox[2] - self.ebox[0], self.ebox[3] - self.ebox[1])
     }
 
-    /// The normalized rotation, and the page's size as the viewer showed it —
-    /// width and height exchanged at 90 and 270.
-    ///
-    /// Both are `cfg(test)`: production code goes through the conversions
-    /// below, which is the point of having them. These describe the same
-    /// geometry from the frontend's side, so the tests can state their
-    /// expectations in the terms the user experiences rather than
-    /// re-deriving the swap they are checking for.
-    #[cfg(test)]
-    fn rotate(&self) -> i64 {
+    /// The normalized rotation: 0, 90, 180 or 270.
+    pub(crate) fn rotate(&self) -> i64 {
         self.rotate
     }
 
+    /// The page's size as the viewer showed it — width and height exchanged
+    /// at 90 and 270.
+    ///
+    /// `cfg(test)`: production goes through the conversions above, which is
+    /// the point of having them. This states the same geometry from the
+    /// frontend's side, so a test can express what the user sees rather than
+    /// re-deriving the swap it is checking for.
     #[cfg(test)]
     fn render_size(&self) -> (f32, f32) {
         let (w, h) = self.size();
@@ -199,22 +198,37 @@ impl PageSpace {
         ((x), (y), (a[0] - b[0]).abs(), (a[1] - b[1]).abs())
     }
 
-    /// The linear part of a transform that makes upright render-space content
-    /// draw upright *on screen* once the viewer applies `/Rotate`.
-    ///
-    /// The viewer turns user space clockwise by the rotation, so content must
-    /// be authored turned counter-clockwise by the same amount to come back
-    /// level. Used both as an appearance stream's `/Matrix` and as the linear
-    /// part of a text matrix; `e`/`f` are left at zero for the caller to fill
-    /// in with the placement point.
-    pub(crate) fn upright_matrix(&self) -> Mat {
-        match self.rotate {
-            90 => [0.0, 1.0, -1.0, 0.0, 0.0, 0.0],
-            180 => [-1.0, 0.0, 0.0, -1.0, 0.0, 0.0],
-            270 => [0.0, -1.0, 1.0, 0.0, 0.0, 0.0],
-            _ => [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+}
+
+/// Counter-clockwise rotation by a quarter turn, as the linear part of a PDF
+/// matrix. `e`/`f` are zero for the caller to fill in.
+///
+/// A viewer turns user space *clockwise* by the page's `/Rotate`, so content
+/// authored turned counter-clockwise by the same amount comes back level on
+/// screen. Used as an appearance stream's `/Matrix` and as the linear part of
+/// a text matrix.
+pub(crate) fn quarter_turn_matrix(rotate: i64) -> Mat {
+    match rotate.rem_euclid(360) {
+        90 => [0.0, 1.0, -1.0, 0.0, 0.0, 0.0],
+        180 => [-1.0, 0.0, 0.0, -1.0, 0.0, 0.0],
+        270 => [0.0, -1.0, 1.0, 0.0, 0.0, 0.0],
+        _ => [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+    }
+}
+
+/// The quarter turn a matrix's linear part represents, inverting
+/// [`quarter_turn_matrix`]. Anything that is not recognisably a quarter turn
+/// reads as 0, so a foreign or skewed matrix degrades to "upright" rather
+/// than to a wrong angle.
+pub(crate) fn quarter_turn_of(m: &Mat) -> i64 {
+    let near = |v: f32, want: f32| (v - want).abs() < 1e-3;
+    for candidate in [90, 180, 270] {
+        let [a, b, c, d, _, _] = quarter_turn_matrix(candidate);
+        if near(m[0], a) && near(m[1], b) && near(m[2], c) && near(m[3], d) {
+            return candidate;
         }
     }
+    0
 }
 
 #[cfg(test)]
@@ -328,7 +342,7 @@ mod tests {
     fn upright_matrix_cancels_the_pages_rotation() {
         for rotate in [0, 90, 180, 270] {
             let space = PageSpace::new(rotate, EBOX);
-            let [a, b, c, d, _, _] = space.upright_matrix();
+            let [a, b, c, d, _, _] = quarter_turn_matrix(rotate);
             // The baseline direction (1,0) in form space, as a user-space
             // vector, then through to render space. Render space flips y, so
             // an upright baseline points along +x with no y component.
@@ -341,6 +355,23 @@ mod tests {
                 [a, b, c, d]
             );
         }
+    }
+
+    /// The decoder must invert the encoder for every quarter turn, or a note
+    /// re-hydrates at the wrong angle each time the file is reopened.
+    #[test]
+    fn quarter_turns_round_trip_through_a_matrix() {
+        for rotate in [0, 90, 180, 270] {
+            assert_eq!(quarter_turn_of(&quarter_turn_matrix(rotate)), rotate);
+        }
+    }
+
+    /// A matrix Tumbler did not author — a scaled or skewed appearance from
+    /// another editor — must read as upright rather than as a wrong angle.
+    #[test]
+    fn a_matrix_that_is_not_a_quarter_turn_reads_as_upright() {
+        assert_eq!(quarter_turn_of(&[2.0, 0.0, 0.0, 2.0, 0.0, 0.0]), 0);
+        assert_eq!(quarter_turn_of(&[1.0, 0.5, 0.0, 1.0, 0.0, 0.0]), 0);
     }
 
     #[test]
