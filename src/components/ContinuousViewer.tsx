@@ -4,10 +4,39 @@ import { PageSlot } from "./PageSlot";
 import type { PageDimension, SearchMatch, SearchResult, ZoomMode } from "../store/usePdfStore";
 
 /**
+ * The dimensions a fit mode measures against: the **widest** width and the
+ * **tallest** height across the whole document. Null for an empty document.
+ *
+ * Not a real page — it is a bound, so "fit width" means *every* page fits the
+ * window rather than whichever one happens to be on screen.
+ *
+ * Fitting the current page instead is what made the zoom oscillate (issue
+ * #125). Zoom was computed from `pageDimensions[currentPage - 1]` while the
+ * IntersectionObserver derived `currentPage` from the layout that zoom
+ * produced, so on a document with two page widths — a rotated page among
+ * upright ones, or a landscape page in a portrait document — each value drove
+ * the other to the opposite one, forever. Measuring against the document
+ * rather than the current page breaks that cycle structurally: zoom no longer
+ * depends on where the user is scrolled.
+ *
+ * The trade-off is deliberate: on a mixed-size document a narrower page now
+ * renders smaller than it would if it were fitted on its own.
+ */
+export function fitReference(dims: PageDimension[]): PageDimension | null {
+  if (dims.length === 0) return null;
+  return dims.reduce(
+    (acc, d) => ({ width: Math.max(acc.width, d.width), height: Math.max(acc.height, d.height) }),
+    { width: 0, height: 0 },
+  );
+}
+
+/**
  * Zoom percentage for a fit mode, clamped to the [10, 400] range. "fit-width"
  * fills the available width; "fit-page" fits the page height; "fit-width-90"
  * is the one-shot open default (issue #38) — 90% of fit-width. Returns null for
  * "numeric" (no fit to compute).
+ *
+ * `dim` should come from [`fitReference`], not from a single page.
  */
 export function fitZoom(
   zoomMode: ZoomMode,
@@ -97,6 +126,9 @@ export function ContinuousViewer() {
   // incrementally by the IntersectionObserver (which delivers diffs, not
   // snapshots). Cleared when the observer is recreated.
   const visiblePagesRef = useRef<Set<number>>(new Set());
+  // The live observer, reached by `setPageRef` so a slot is observed as it
+  // mounts. See that callback for why sweeping the DOM instead was a bug.
+  const observerRef = useRef<IntersectionObserver | null>(null);
 
   const docId = activeTab?.docId ?? "";
   const pageCount = activeTab?.pageCount ?? 0;
@@ -177,7 +209,9 @@ export function ContinuousViewer() {
     const PADDING = 32; // 16px each side (--page-gap)
 
     const recalc = () => {
-      const dim = pageDimensions[Math.min(currentPage - 1, pageDimensions.length - 1)];
+      // Measured against the whole document, never the current page — see
+      // fitReference for why that distinction is load-bearing.
+      const dim = fitReference(pageDimensions);
       if (!dim) return;
       const zoom = fitZoom(zoomMode, dim, container.clientWidth, container.clientHeight, PADDING);
       if (zoom === null) return;
@@ -190,7 +224,7 @@ export function ContinuousViewer() {
     const ro = new ResizeObserver(recalc);
     ro.observe(container);
     return () => ro.disconnect();
-  }, [zoomMode, pageDimensions, currentPage, tabId, updateTab]);
+  }, [zoomMode, pageDimensions, tabId, updateTab]);
 
   // IntersectionObserver to track the topmost visible page.
   // We pick the minimum page number among all currently-intersecting pages
@@ -236,14 +270,21 @@ export function ContinuousViewer() {
     );
 
     // Observe all page slots
-    const slots = container.querySelectorAll("[data-page]");
-    slots.forEach((slot) => observer.observe(slot));
+    // Slots already mounted: refs are assigned before effects run, so this
+    // map is current. Anything mounting later is picked up by `setPageRef`.
+    observerRef.current = observer;
+    for (const el of pageRefsMap.current.values()) observer.observe(el);
 
     return () => {
       observer.disconnect();
+      observerRef.current = null;
       visiblePagesRef.current.clear();
     };
-  }, [pageCount, tabId, updateTab, zoom]);
+    // `zoom` is deliberately not a dependency. The callback does not read it,
+    // and re-running on every zoom change was churn that fed the oscillation
+    // in issue #125 — it cleared the visible set and re-observed everything
+    // each time the fit effect moved the zoom.
+  }, [pageCount, tabId, updateTab]);
 
   // Jump to page when currentPage changes via toolbar/keyboard/search/thumbnails.
   // Skip changes that came from the scroll-driven IntersectionObserver above —
@@ -381,11 +422,29 @@ export function ContinuousViewer() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [activeTab, currentPage, pageCount, tabId, updateTab]);
 
-  // Register page slot refs
+  // Register page slot refs, and keep the IntersectionObserver watching
+  // exactly the elements that are mounted.
+  //
+  // Observation used to be a one-off `querySelectorAll` sweep in the effect
+  // above. A slot's key folds in `pagesVersion`, so every page operation
+  // remounts all of them as fresh nodes — and the sweep never ran again,
+  // leaving the observer watching detached elements. `currentPage` then
+  // stopped tracking the scroll, the render window stayed frozen where it
+  // was, and every page beyond it rendered as a blank placeholder (issue
+  // #125). Registering here cannot go stale: a node is observed when it
+  // mounts and released when it unmounts.
   const setPageRef = useCallback(
     (pageNum: number) => (el: HTMLDivElement | null) => {
+      const prev = pageRefsMap.current.get(pageNum);
+      if (prev && prev !== el) {
+        observerRef.current?.unobserve(prev);
+        // The detached node will never report again, so drop its entry rather
+        // than leave a stale page number to skew the topmost-page pick.
+        visiblePagesRef.current.delete(pageNum);
+      }
       if (el) {
         pageRefsMap.current.set(pageNum, el);
+        observerRef.current?.observe(el);
       } else {
         pageRefsMap.current.delete(pageNum);
       }
