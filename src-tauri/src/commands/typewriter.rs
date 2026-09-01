@@ -1142,6 +1142,82 @@ mod tests {
         }
     }
 
+    /// Rotating a page *after* a note is on it turns the note with the page,
+    /// exactly as it turns flattened ink — because a `/Rect` is in user space
+    /// and the page rotation is applied on top of it. Standard PDF behaviour,
+    /// and the behaviour Tumbler's own page-ops path produces.
+    ///
+    /// Pinned here because it is the boundary of what issue #121 fixed. The
+    /// document is right; Tumbler's *overlay* is what does not follow, since
+    /// it draws notes from coordinates read once at open and never re-mapped.
+    /// A future overlay fix must not "correct" the file to match the screen —
+    /// the file is the part that is already correct.
+    #[test]
+    fn a_note_turns_with_the_page_when_the_page_is_rotated_afterwards() {
+        use crate::state::DocEntry;
+
+        let pdfium = crate::test_pdfium();
+        let page = crate::geometry_page_bytes(200.0, 400.0, 0, None);
+        let authored = write_typewriter_annots(&page, &[probe_note(20.0, 30.0)])
+            .expect("write")
+            .expect("bytes");
+
+        let path = std::env::temp_dir().join("tumbler_note_then_rotate.pdf");
+        std::fs::write(&path, &authored).expect("write temp");
+        let state = AppState::new(pdfium.get(), None);
+        let entry = DocEntry::load(state.pdfium, &path.to_string_lossy(), None).expect("load");
+        state.insert_document("d".to_string(), entry).expect("insert");
+
+        crate::commands::pages::rotate_pages_impl(&state, "d".to_string(), vec![1], 1)
+            .expect("rotate 90° the way the toolbar does");
+        let rotated = {
+            let entry = state.get_document("d").expect("get");
+            let entry = lock_mutex(&entry).expect("lock");
+            entry.buffer.clone()
+        };
+
+        // The annotation itself is untouched: user space did not move, only
+        // the page's /Rotate did.
+        let doc = Document::load_mem(&rotated).expect("reparse");
+        let page_id = *doc.get_pages().get(&1).expect("page 1");
+        let refs = page_annot_refs(&doc, page_id);
+        assert_eq!(refs.len(), 1, "the note must survive the rotation");
+        let rect: Vec<f32> = doc
+            .get_object(refs[0])
+            .and_then(|o| o.as_dict())
+            .and_then(|d| d.get(b"Rect"))
+            .and_then(|r| r.as_array())
+            .expect("rect")
+            .iter()
+            .map(object_as_f32)
+            .collect();
+        assert_eq!(rect, vec![20.0, 350.0, 140.0, 370.0], "/Rect must not move");
+
+        // On screen it has turned: the note now occupies a tall, narrow
+        // footprint on what is now a 400x200 page, and its glyphs run down it.
+        let [x0, y0, x1, y1] = crate::rendered_mark_bbox(pdfium.get(), rotated.clone(), true, is_glyph)
+            .expect("the note must still be visible");
+        assert!(y1 - y0 > 3.0 * (x1 - x0), "glyphs should now run down the page, got {}x{}", x1 - x0, y1 - y0);
+        let footprint = [350.0, 20.0, 370.0, 140.0];
+        assert!(
+            x0 >= footprint[0] - GLYPH_TOL && x1 <= footprint[2] + GLYPH_TOL
+                && y0 >= footprint[1] - GLYPH_TOL && y1 <= footprint[3] + GLYPH_TOL,
+            "glyphs at [{x0}, {y0}, {x1}, {y1}] fall outside the turned note box {footprint:?}"
+        );
+
+        // And read-back reports the note where the *rotated* page shows it —
+        // 120 tall and 20 wide, the transpose of how it was authored. This is
+        // what the overlay would need in order to follow the rotation.
+        let read = read_typewriter_annots(&rotated).expect("read");
+        assert_eq!(read.len(), 1);
+        let got = &read[0];
+        assert_eq!(
+            (got.x, got.y, got.width, got.height),
+            (350.0, 20.0, 20.0, 120.0),
+            "read-back must report the note in the new render space"
+        );
+    }
+
     #[test]
     fn foreign_annotations_are_preserved() {
         // Add a non-Tumbler annotation, then apply/clear our notes around it.
