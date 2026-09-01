@@ -27,7 +27,7 @@
 //!   display fit is conjugated through the page's rotation to produce the
 //!   user-space wrap matrix.
 
-use crate::commands::page_space::{inherited_rect, inherited_rotate};
+use crate::commands::page_space::{inherited_rect, inherited_rotate, PageSpace};
 use crate::commands::pages::{emit_pages_edited, page_info_from_doc};
 use crate::commands::text_layer::contents_refs;
 use crate::commands::typewriter::{
@@ -446,13 +446,26 @@ fn transform_annot_rects(doc: &mut Document, page_id: ObjectId, m: Mat) {
 
 /// Transforms a typewriter note (top-left media-box coordinates) by the page's
 /// user-space fit matrix. `m` is always a pure uniform scale + translation.
-fn transform_note(note: &TypewriterAnnot, m: Mat, ox: f32, oy: f32, page_h: f32) -> TypewriterAnnot {
+fn transform_note(note: &TypewriterAnnot, m: Mat, space: &PageSpace) -> TypewriterAnnot {
     let s = m[0];
-    let (x1, _) = mat_apply(m, ox + note.x, 0.0);
-    let (_, y2) = mat_apply(m, 0.0, oy + page_h - note.y);
+    // The note's footprint on screen — width and height exchanged when it sits
+    // at a quarter turn to the page (issue #124).
+    let quarter = note.rotation.rem_euclid(180) == 90;
+    let (fw, fh) = if quarter { (note.height, note.width) } else { (note.width, note.height) };
+
+    // Render space → user space → through the fit → back. Both corners go
+    // through, because the fit can put the minimum on either one.
+    let [x1, y1, x2, y2] = space.rect_to_user(note.x, note.y, fw, fh);
+    let (ax, ay) = mat_apply(m, x1, y1);
+    let (bx, by) = mat_apply(m, x2, y2);
+    let (x, y, _, _) =
+        space.rect_to_render([ax.min(bx), ay.min(by), ax.max(bx), ay.max(by)]);
+
     TypewriterAnnot {
-        x: x1 - ox,
-        y: (oy + page_h) - y2,
+        x,
+        y,
+        // A uniform scale, so the note's own box keeps its proportions and its
+        // angle is untouched — the page's /Rotate has not changed.
         width: s * note.width,
         height: s * note.height,
         font_size: s * note.font_size,
@@ -526,17 +539,14 @@ pub(crate) fn expand_margins_bytes(
         notes
             .iter()
             .map(|n| {
-                let (m, media) = pages_map
+                let (m, space) = pages_map
                     .get(&n.page)
                     .map(|pid| {
                         let idx = page_ids.iter().position(|p| p == pid).unwrap_or(0);
-                        let media = inherited_rect(&doc, *pid, b"MediaBox")
-                            .unwrap_or([0.0, 0.0, 612.0, 792.0]);
-                        (note_fits[idx], media)
+                        (note_fits[idx], PageSpace::of(&doc, *pid))
                     })
-                    .unwrap_or((IDENTITY, [0.0, 0.0, 612.0, 792.0]));
-                let [ox, oy, _x1, y1] = media;
-                transform_note(n, m, ox, oy, y1 - oy)
+                    .unwrap_or((IDENTITY, PageSpace::new(0, [0.0, 0.0, 612.0, 792.0])));
+                transform_note(n, m, &space)
             })
             .collect()
     };
@@ -984,6 +994,88 @@ mod tests {
         let dest = format!("{path}.expanded.pdf");
         std::fs::write(&dest, out).expect("write output");
         eprintln!("wrote {dest}");
+    }
+
+    /// Adds a `/CropBox` to a one-page fixture, inset from its MediaBox.
+    fn with_crop_box(bytes: &[u8], crop: [f32; 4]) -> Vec<u8> {
+        let mut doc = Document::load_mem(bytes).expect("parse");
+        let page_id = *doc.get_pages().get(&1).expect("page 1");
+        doc.get_object_mut(page_id)
+            .and_then(|o| o.as_dict_mut())
+            .expect("page dict")
+            .set(
+                "CropBox",
+                Object::Array(crop.iter().map(|v| Object::Real(*v)).collect()),
+            );
+        let mut out = Vec::new();
+        doc.save_to(&mut out).expect("serialize");
+        out
+    }
+
+    fn plain_note(x: f32, y: f32) -> TypewriterAnnot {
+        TypewriterAnnot {
+            id: "n1".to_string(),
+            page: 1,
+            x,
+            y,
+            width: 100.0,
+            height: 20.0,
+            text: "forte".to_string(),
+            font_family: "Helvetica".to_string(),
+            bold: false,
+            italic: false,
+            font_size: 12.0,
+            color: [0.0, 0.0, 0.0],
+            rotation: 0,
+        }
+    }
+
+    /// Cropping a page must not change where its notes end up.
+    ///
+    /// A note's coordinates are **render space** — relative to the box pdfium
+    /// draws, which is the CropBox. So the same document expressed two ways —
+    /// as a bare 200x300 page, and as that same 200x300 window inset into a
+    /// larger sheet, with the ink and the note in the same place *relative to
+    /// the window* — has to expand to the same answer.
+    ///
+    /// It did not. `transform_note` measured against the MediaBox while the
+    /// reader and writer had moved to the CropBox (issue #127), so every note
+    /// on a cropped page was displaced by (s-1) times the crop origin — and
+    /// the displacement was written back to the file and persisted.
+    ///
+    /// Stated as an invariant between two documents rather than as expected
+    /// coordinates, so it checks the behaviour the user sees instead of
+    /// restating the arithmetic under test.
+    #[test]
+    fn cropping_a_page_does_not_move_its_notes() {
+        // The crop *is* the page.
+        let bare = rect_doc_bytes(200.0, 300.0, Some([10.0, 20.0, 150.0, 250.0]), 0);
+        // The same window, inset into a larger sheet: ink and crop both +50.
+        let cropped = with_crop_box(
+            &rect_doc_bytes(300.0, 400.0, Some([60.0, 70.0, 200.0, 300.0]), 0),
+            [50.0, 50.0, 250.0, 350.0],
+        );
+
+        let run = |bytes: &[u8]| {
+            let report = detect_bytes(bytes);
+            let with_note = write_typewriter_annots(bytes, &[plain_note(20.0, 30.0)])
+                .expect("write note")
+                .expect("changed");
+            let (out, scale) =
+                expand_margins_bytes(&with_note, &[report], 10.0).expect("expand");
+            let n = read_typewriter_annots(&out).expect("read").remove(0);
+            (n.x, n.y, scale)
+        };
+
+        let (bare_x, bare_y, bare_s) = run(&bare);
+        let (crop_x, crop_y, crop_s) = run(&cropped);
+
+        assert!(
+            approx(bare_s, crop_s, 0.001),
+            "same geometry must fit the same: {bare_s} vs {crop_s}"
+        );
+        assert!(approx(bare_x, crop_x, 0.1), "note x moved with the crop: {bare_x} vs {crop_x}");
+        assert!(approx(bare_y, crop_y, 0.1), "note y moved with the crop: {bare_y} vs {crop_y}");
     }
 
     /// Typewriter notes survive: position, size, and font scale with the

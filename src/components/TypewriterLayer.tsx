@@ -7,6 +7,9 @@ import { commitTypewriter, fontFamilyCss, newAnnot, rgbToHex } from "../utils/ty
 // render (a fresh reference re-renders forever).
 const NO_ANNOTS: TypewriterAnnot[] = [];
 
+/** A rotation normalized to 0, 90, 180 or 270. */
+const quarter = (rotation: number) => ((rotation % 360) + 360) % 360;
+
 /** True when a note sits at a quarter turn to the page, so its box is sideways. */
 const isQuarterTurned = (annot: TypewriterAnnot) => Math.abs(annot.rotation % 180) === 90;
 
@@ -40,9 +43,50 @@ function hitTest(annot: TypewriterAnnot, x: number, y: number) {
  * this the handle fights the pointer, growing the box along the wrong axis.
  * Moving needs no mapping — the store's x/y are the footprint's top-left in
  * screen space, and dragging translates that directly.
+ *
+ * Mapping the delta is only half of it: the box also has to grow *away* from
+ * the corner opposite the handle. See [`ownTopLeft`] — pinning the footprint's
+ * top-left instead leaves the handle stationary while the pointer moves, and
+ * at 180° it never moves at all (issue #127).
  */
+function ownTopLeft(annot: TypewriterAnnot): [number, number] {
+  const { x, y, width: w, height: h } = annot;
+  switch (quarter(annot.rotation)) {
+    case 90:
+      return [x + h, y]; // the footprint's top-right
+    case 180:
+      return [x + w, y + h]; // bottom-right
+    case 270:
+      return [x, y + w]; // bottom-left
+    default:
+      return [x, y];
+  }
+}
+
+/**
+ * The footprint origin that puts the note's own top-left back at `anchor` —
+ * the inverse of [`ownTopLeft`], used while resizing.
+ */
+function originFromAnchor(
+  rotation: number,
+  [ax, ay]: [number, number],
+  w: number,
+  h: number,
+): [number, number] {
+  switch (quarter(rotation)) {
+    case 90:
+      return [ax - h, ay];
+    case 180:
+      return [ax - w, ay - h];
+    case 270:
+      return [ax, ay - w];
+    default:
+      return [ax, ay];
+  }
+}
+
 function toOwnFrame(rotation: number, dx: number, dy: number): [number, number] {
-  switch (((rotation % 360) + 360) % 360) {
+  switch (quarter(rotation)) {
     case 90:
       return [dy, -dx];
     case 180:
@@ -219,16 +263,18 @@ export function TypewriterLayer({ docId, pageNumber, zoom }: TypewriterLayerProp
     e.preventDefault();
     e.stopPropagation();
     const start = { x: e.clientX, y: e.clientY, ow: annot.width, oh: annot.height };
+    // The corner opposite the handle stays put while the box grows.
+    const anchor = ownTopLeft(annot);
     const onMove = (ev: MouseEvent) => {
       const [dw, dh] = toOwnFrame(
         annot.rotation,
         (ev.clientX - start.x) / scale,
         (ev.clientY - start.y) / scale,
       );
-      updateTypewriterAnnot(docId, annot.id, {
-        width: Math.max(24, start.ow + dw),
-        height: Math.max(16, start.oh + dh),
-      });
+      const width = Math.max(24, start.ow + dw);
+      const height = Math.max(16, start.oh + dh);
+      const [x, y] = originFromAnchor(annot.rotation, anchor, width, height);
+      updateTypewriterAnnot(docId, annot.id, { width, height, x, y });
     };
     const onUp = () => {
       window.removeEventListener("mousemove", onMove);

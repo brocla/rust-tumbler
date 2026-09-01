@@ -223,6 +223,71 @@ describe("TypewriterLayer", () => {
      * 90°, dragging down the screen runs along the note's own width, so an
      * unmapped delta grows the wrong axis and the handle fights the pointer.
      */
+    /**
+     * The handle has to follow the pointer, which means the box grows away
+     * from the corner *opposite* it. Pinning the footprint's top-left instead
+     * left the handle stationary while the pointer moved — and at 180 degrees
+     * it never moved at all, for any drag (issue #127).
+     *
+     * A 90-degree note at (10, 20) with a 100x30 own box covers 30 wide by
+     * 100 tall, and its handle renders at the footprint's bottom-left. The
+     * corner that must stay put is the footprint's top-right, x = 40.
+     */
+    it("keeps the corner opposite the handle fixed while resizing a turned note", () => {
+      usePdfStore.setState({ typewriterMode: true, activeTypewriterId: "note-1" });
+      usePdfStore.getState().setTypewriterAnnots("doc-1", [turned()]);
+      const { container } = render(<TypewriterLayer docId="doc-1" pageNumber={1} zoom={100} />);
+
+      const handle = container.querySelector(".typewriter-resize") as HTMLElement;
+      fireEvent.mouseDown(handle, { clientX: 0, clientY: 0 });
+      // Drag 10px right: on a 90-degree note that is -10 along its height.
+      fireEvent.mouseMove(window, { clientX: 10, clientY: 0 });
+      fireEvent.mouseUp(window);
+
+      const note = usePdfStore.getState().tabs[0].typewriterAnnots![0];
+      expect(note.height).toBe(20);
+      // Footprint is now 20 wide; its right edge must still be at 40, so the
+      // origin moves right by 10 — the same 10px the pointer travelled.
+      expect(note.x).toBe(20);
+      expect(note.x + note.height).toBe(40);
+    });
+
+    /** At 180 degrees the handle sits at the footprint's top-left. */
+    it("moves the origin when resizing a note turned 180 degrees", () => {
+      usePdfStore.setState({ typewriterMode: true, activeTypewriterId: "note-1" });
+      usePdfStore
+        .getState()
+        .setTypewriterAnnots("doc-1", [makeAnnot({ x: 10, y: 20, width: 100, height: 30, rotation: 180 })]);
+      const { container } = render(<TypewriterLayer docId="doc-1" pageNumber={1} zoom={100} />);
+
+      const handle = container.querySelector(".typewriter-resize") as HTMLElement;
+      fireEvent.mouseDown(handle, { clientX: 0, clientY: 0 });
+      fireEvent.mouseMove(window, { clientX: 10, clientY: 0 });
+      fireEvent.mouseUp(window);
+
+      const note = usePdfStore.getState().tabs[0].typewriterAnnots![0];
+      expect(note.width).toBe(90);
+      // The bottom-right corner is anchored at x = 110, so the origin follows.
+      expect(note.x).toBe(20);
+      expect(note.x + note.width).toBe(110);
+    });
+
+    /** An upright note must resize exactly as it always has. */
+    it("leaves an upright note's origin alone while resizing", () => {
+      usePdfStore.setState({ typewriterMode: true, activeTypewriterId: "note-1" });
+      usePdfStore.getState().setTypewriterAnnots("doc-1", [makeAnnot({ x: 10, y: 20 })]);
+      const { container } = render(<TypewriterLayer docId="doc-1" pageNumber={1} zoom={100} />);
+
+      const handle = container.querySelector(".typewriter-resize") as HTMLElement;
+      fireEvent.mouseDown(handle, { clientX: 0, clientY: 0 });
+      fireEvent.mouseMove(window, { clientX: 40, clientY: 10 });
+      fireEvent.mouseUp(window);
+
+      const note = usePdfStore.getState().tabs[0].typewriterAnnots![0];
+      expect([note.x, note.y]).toEqual([10, 20]);
+      expect([note.width, note.height]).toEqual([140, 40]);
+    });
+
     it("resizes along the note's own axes, not the screen's", () => {
       usePdfStore.setState({ typewriterMode: true, activeTypewriterId: "note-1" });
       usePdfStore.getState().setTypewriterAnnots("doc-1", [turned()]);
