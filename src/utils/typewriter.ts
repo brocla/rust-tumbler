@@ -63,6 +63,8 @@ export function newAnnot(
     italic: style.italic,
     fontSize: style.fontSize,
     color: style.color,
+    // Upright in front of the user, whatever the page's rotation (#124).
+    rotation: 0,
   };
 }
 

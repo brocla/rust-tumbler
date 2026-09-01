@@ -42,6 +42,7 @@ function makeAnnot(overrides: Partial<TypewriterAnnot> = {}): TypewriterAnnot {
     y: 20,
     width: 100,
     height: 30,
+    rotation: 0,
     text: "Hello",
     fontFamily: "Helvetica",
     bold: false,
@@ -154,6 +155,89 @@ describe("TypewriterLayer", () => {
     expect(usePdfStore.getState().tabs[0].typewriterAnnots).toEqual([]);
     expect(usePdfStore.getState().activeTypewriterId).toBeNull();
     expect(invoke).toHaveBeenCalledWith("apply_typewriter", expect.objectContaining({ docId: "doc-1" }));
+  });
+
+  describe("a note turned by a page rotation (issue #124)", () => {
+    // 100x30 note at (10, 20), turned a quarter: it covers 30 wide by 100
+    // tall from that point, with its own box centred inside that footprint.
+    // left = 10 + (30 - 100)/2 = -25, top = 20 + (100 - 30)/2 = 55.
+    const turned = () => makeAnnot({ x: 10, y: 20, width: 100, height: 30, rotation: 90 });
+
+    /**
+     * Notes are drawn entirely by this overlay — the page render leaves
+     * annotations off — so a note the file has turned still appeared upright
+     * until the overlay learned to turn it. That is what "text does not rotate
+     * with the page, but ink does" was: ink is in the bitmap, notes are over
+     * it.
+     */
+    it("draws the note rotated, at its own dimensions", () => {
+      usePdfStore.getState().setTypewriterAnnots("doc-1", [turned()]);
+      const { container } = render(<TypewriterLayer docId="doc-1" pageNumber={1} zoom={100} />);
+
+      const note = container.querySelector(".typewriter-note") as HTMLElement;
+      expect(note.style.transform).toBe("rotate(90deg)");
+      // Its own box, so the text still wraps the way it was typed.
+      expect(note.style.width).toBe("100px");
+      expect(note.style.height).toBe("30px");
+      // Centred in the footprint it covers, so it sits where the note is.
+      expect(note.style.left).toBe("-25px");
+      expect(note.style.top).toBe("55px");
+    });
+
+    it("leaves an upright note untransformed", () => {
+      usePdfStore.getState().setTypewriterAnnots("doc-1", [makeAnnot({ x: 10, y: 20 })]);
+      const { container } = render(<TypewriterLayer docId="doc-1" pageNumber={1} zoom={100} />);
+
+      const note = container.querySelector(".typewriter-note") as HTMLElement;
+      expect(note.style.transform).toBe("");
+      expect(note.style.left).toBe("10px");
+      expect(note.style.top).toBe("20px");
+    });
+
+    /** Re-editing hit-tests the area the note covers, not its own box. */
+    it("hit-tests the turned footprint, not the unturned box", () => {
+      usePdfStore.setState({ typewriterMode: false, activeTypewriterId: null });
+      usePdfStore.getState().setTypewriterAnnots("doc-1", [turned()]);
+      const { getByTestId } = render(<TypewriterLayer docId="doc-1" pageNumber={1} zoom={100} />);
+      stubRect(getByTestId("typewriter-layer-1"), 200);
+
+      // (20, 90) is inside the turned footprint (x 10–40, y 20–120) and
+      // outside the unturned box (x 10–110, y 20–50).
+      fireEvent.dblClick(window, { clientX: 20, clientY: 90 });
+      expect(usePdfStore.getState().activeTypewriterId).toBe("note-1");
+    });
+
+    it("does not hit-test where only the unturned box would reach", () => {
+      usePdfStore.setState({ typewriterMode: false, activeTypewriterId: null });
+      usePdfStore.getState().setTypewriterAnnots("doc-1", [turned()]);
+      const { getByTestId } = render(<TypewriterLayer docId="doc-1" pageNumber={1} zoom={100} />);
+      stubRect(getByTestId("typewriter-layer-1"), 200);
+
+      // (90, 30) is inside the unturned box but outside the turned footprint.
+      fireEvent.dblClick(window, { clientX: 90, clientY: 30 });
+      expect(usePdfStore.getState().activeTypewriterId).toBeNull();
+    });
+
+    /**
+     * The resize handle drags the note's corner *as drawn*. On a note turned
+     * 90°, dragging down the screen runs along the note's own width, so an
+     * unmapped delta grows the wrong axis and the handle fights the pointer.
+     */
+    it("resizes along the note's own axes, not the screen's", () => {
+      usePdfStore.setState({ typewriterMode: true, activeTypewriterId: "note-1" });
+      usePdfStore.getState().setTypewriterAnnots("doc-1", [turned()]);
+      const { container } = render(<TypewriterLayer docId="doc-1" pageNumber={1} zoom={100} />);
+
+      const handle = container.querySelector(".typewriter-resize") as HTMLElement;
+      fireEvent.mouseDown(handle, { clientX: 0, clientY: 0 });
+      // Drag 40px down the screen: on a 90° note that is +40 along its width.
+      fireEvent.mouseMove(window, { clientX: 0, clientY: 40 });
+      fireEvent.mouseUp(window);
+
+      const note = usePdfStore.getState().tabs[0].typewriterAnnots![0];
+      expect(note.width).toBe(140);
+      expect(note.height).toBe(30);
+    });
   });
 
   it("clicking away commits and drops an empty note", () => {

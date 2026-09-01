@@ -7,6 +7,53 @@ import { commitTypewriter, fontFamilyCss, newAnnot, rgbToHex } from "../utils/ty
 // render (a fresh reference re-renders forever).
 const NO_ANNOTS: TypewriterAnnot[] = [];
 
+/** True when a note sits at a quarter turn to the page, so its box is sideways. */
+const isQuarterTurned = (annot: TypewriterAnnot) => Math.abs(annot.rotation % 180) === 90;
+
+/**
+ * The note's footprint on screen, in page points with a top-left origin:
+ * `(x, y)` is where the store puts it, and the size is the note's own box —
+ * transposed when it is quarter-turned.
+ *
+ * `width`/`height` stay the box the user typed into whatever the angle, so
+ * text wraps as authored; only the area it covers changes (issue #124).
+ */
+function footprint(annot: TypewriterAnnot) {
+  const turned = isQuarterTurned(annot);
+  return {
+    width: turned ? annot.height : annot.width,
+    height: turned ? annot.width : annot.height,
+  };
+}
+
+/** Whether a point in page space falls inside a note, accounting for its turn. */
+function hitTest(annot: TypewriterAnnot, x: number, y: number) {
+  const { width, height } = footprint(annot);
+  return x >= annot.x && x <= annot.x + width && y >= annot.y && y <= annot.y + height;
+}
+
+/**
+ * Maps a screen-space drag delta into the note's own frame.
+ *
+ * Resizing drags the note's bottom-right corner *as drawn*, so on a turned
+ * note "further right on screen" is not "wider": at 90° it is taller. Without
+ * this the handle fights the pointer, growing the box along the wrong axis.
+ * Moving needs no mapping — the store's x/y are the footprint's top-left in
+ * screen space, and dragging translates that directly.
+ */
+function toOwnFrame(rotation: number, dx: number, dy: number): [number, number] {
+  switch (((rotation % 360) + 360) % 360) {
+    case 90:
+      return [dy, -dx];
+    case 180:
+      return [-dx, -dy];
+    case 270:
+      return [-dy, dx];
+    default:
+      return [dx, dy];
+  }
+}
+
 interface TypewriterLayerProps {
   docId: string;
   pageNumber: number;
@@ -74,9 +121,7 @@ export function TypewriterLayer({ docId, pageNumber, zoom }: TypewriterLayerProp
       }
       const x = (e.clientX - rect.left) / scale;
       const y = (e.clientY - rect.top) / scale;
-      const hit = pageAnnots.find(
-        (a) => x >= a.x && x <= a.x + a.width && y >= a.y && y <= a.y + a.height,
-      );
+      const hit = pageAnnots.find((a) => hitTest(a, x, y));
       if (hit) setActiveTypewriter(hit.id);
     };
     window.addEventListener("dblclick", onDblClick);
@@ -175,9 +220,14 @@ export function TypewriterLayer({ docId, pageNumber, zoom }: TypewriterLayerProp
     e.stopPropagation();
     const start = { x: e.clientX, y: e.clientY, ow: annot.width, oh: annot.height };
     const onMove = (ev: MouseEvent) => {
+      const [dw, dh] = toOwnFrame(
+        annot.rotation,
+        (ev.clientX - start.x) / scale,
+        (ev.clientY - start.y) / scale,
+      );
       updateTypewriterAnnot(docId, annot.id, {
-        width: Math.max(24, start.ow + (ev.clientX - start.x) / scale),
-        height: Math.max(16, start.oh + (ev.clientY - start.y) / scale),
+        width: Math.max(24, start.ow + dw),
+        height: Math.max(16, start.oh + dh),
       });
     };
     const onUp = () => {
@@ -208,12 +258,17 @@ export function TypewriterLayer({ docId, pageNumber, zoom }: TypewriterLayerProp
     >
       {pageAnnots.map((annot) => {
         const active = annot.id === activeId;
+        // The element is the note's own box, rotated about its centre. A
+        // quarter turn then covers the transposed footprint, so centring it
+        // inside that footprint puts the element exactly where the note is.
+        const area = footprint(annot);
         const box: React.CSSProperties = {
           position: "absolute",
-          left: annot.x * scale,
-          top: annot.y * scale,
+          left: (annot.x + (area.width - annot.width) / 2) * scale,
+          top: (annot.y + (area.height - annot.height) / 2) * scale,
           width: annot.width * scale,
           height: annot.height * scale,
+          transform: annot.rotation ? `rotate(${annot.rotation}deg)` : undefined,
           fontFamily: fontFamilyCss(annot.fontFamily),
           fontSize: annot.fontSize * scale,
           fontWeight: annot.bold ? "bold" : "normal",
