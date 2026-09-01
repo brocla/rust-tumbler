@@ -143,6 +143,43 @@ describe("fit modes on a document with mixed page sizes", () => {
     expect((ROTATED.width * tab().zoom) / 100).toBeLessThanOrEqual(CONTAINER_WIDTH - 32);
   });
 
+  /**
+   * "Fit to height" had the identical loop, computed from the current page's
+   * *height* instead of its width — and it was left untested when the width
+   * case was fixed. Rotating a page changes its height just as it changes its
+   * width, so this oscillated between 110% and 142% on the same document.
+   */
+  it("does not change zoom when the current page changes, in fit-page", () => {
+    setTab({
+      zoomMode: "fit-page",
+      pageCount: 2,
+      pageDimensions: [UPRIGHT, ROTATED],
+      currentPage: 1,
+    });
+    render(<ContinuousViewer />);
+
+    // (900 - 32) / 792 * 100, the tallest page — so every page fits.
+    const fitted = Math.round((900 - 32) / UPRIGHT.height * 100);
+    expect(tab().zoom).toBe(fitted);
+
+    act(() => usePdfStore.getState().updateTab("tab-1", { currentPage: 2 }));
+    expect(tab().zoom).toBe(fitted);
+
+    act(() => usePdfStore.getState().updateTab("tab-1", { currentPage: 1 }));
+    expect(tab().zoom).toBe(fitted);
+  });
+
+  it("fits the tallest page even when it is not the current page", () => {
+    // Current page is the *shorter* one, so fitting it would zoom in further.
+    setTab({ zoomMode: "fit-page", pageCount: 2, pageDimensions: [ROTATED, UPRIGHT], currentPage: 1 });
+    render(<ContinuousViewer />);
+
+    const fitTallest = Math.round(((900 - 32) / UPRIGHT.height) * 100);
+    const fitCurrent = Math.round(((900 - 32) / ROTATED.height) * 100);
+    expect(fitTallest).not.toBe(fitCurrent); // the two must be distinguishable
+    expect(tab().zoom).toBe(fitTallest);
+  });
+
   it("still resolves the one-shot open zoom to 90% of the document fit", () => {
     setTab({
       zoomMode: "fit-width-90",
