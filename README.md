@@ -77,6 +77,10 @@ These are self-contained (the required `pdfium.dll` and `qpdf.dll` are bundled),
 so nothing else needs to be installed. The rest of this section is only for
 building from source.
 
+These installers are not yet digitally signed — an application to the SignPath
+Foundation is pending. See the [Code Signing Policy](CODE-SIGNING-POLICY.md) for
+the intended arrangement and how signatures will be verified.
+
 ### Prerequisites
 
 - Node.js 20+
