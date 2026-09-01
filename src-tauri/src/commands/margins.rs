@@ -1004,6 +1004,7 @@ mod tests {
             italic: false,
             font_size: 12.0,
             color: [0.0, 0.0, 0.0],
+            rotation: 0,
         };
         let with_note = write_typewriter_annots(&bytes, std::slice::from_ref(&note))
             .expect("write note")

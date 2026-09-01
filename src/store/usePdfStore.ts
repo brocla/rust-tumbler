@@ -138,6 +138,19 @@ export interface TypewriterAnnot {
   italic: boolean;
   fontSize: number;
   color: [number, number, number];
+  /**
+   * How the note sits on screen, in degrees clockwise from upright: 0, 90,
+   * 180 or 270. Relative to the page **as rendered**, so it can be handed
+   * straight to a CSS `rotate()`.
+   *
+   * A note the user just typed is 0 — upright in front of them, whatever the
+   * page's rotation. It becomes non-zero only when the page is rotated
+   * afterwards, which turns the note with it the way it turns ink (#124).
+   *
+   * `width`/`height` stay the note's **own** box, so its text wraps as typed;
+   * at 90 or 270 the footprint it covers is their transpose.
+   */
+  rotation: number;
 }
 
 /** The style applied to the next new typewriter note (issue #99). */

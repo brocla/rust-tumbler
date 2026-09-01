@@ -319,6 +319,14 @@ function App() {
         if (tab.redactRegions?.length) {
           usePdfStore.getState().clearRedactRegions(tab.docId);
         }
+        // Re-hydrate typewriter notes: a page op can move them (a rotate turns
+        // them with the page, a reorder renumbers them) and the backend's
+        // read-back is authoritative for where they now sit and which way they
+        // face. Without this the overlay keeps drawing the pre-edit geometry
+        // until the file is reopened (issue #124).
+        invoke<TypewriterAnnot[]>("read_typewriter", { docId: tab.docId })
+          .then((notes) => usePdfStore.getState().setTypewriterAnnots(tab.docId, notes))
+          .catch(() => {});
       }
     });
     return () => { unlisten.then((f) => f()); };
