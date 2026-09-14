@@ -26,7 +26,7 @@
 //! are still *detected and skipped* rather than mis-positioned.
 
 use crate::commands::ocr::{
-    cache_get, ocr_page_into_cache, ocr_words_to_lines, OcrCache, OcrEngine, OcrLine, OcrProgress,
+    cache_get, ocr_page_into_cache, ocr_words_to_line_groups, OcrCache, OcrEngine, OcrProgress,
     OcrWord,
 };
 use crate::commands::page_space::PageSpace;
@@ -205,76 +205,123 @@ pub fn build_invisible_text_stream(words: &[OcrWord], font_name: &str) -> Result
 
 /// Builds the invisible-text content stream for one page's worth of OCR words.
 ///
-/// Words are grouped into visual **lines** with the same [`ocr_words_to_lines`]
-/// pass the ephemeral "Make Searchable" overlay uses, and each line is written
-/// as **one continuous run** — a single `BT … ET` block in render mode 3, with
-/// one font size and one horizontal-scale (`Tz`) stretching the whole line to
-/// its box width. Emitting per line (not per word) is what keeps a reader's
-/// selection and search highlight smooth across the line, with uniform spacing,
-/// instead of jumping between independently-scaled per-word runs. Each `BT…ET`
-/// block isolates *text* state; isolation from the page's *graphics* state
-/// (a leftover CTM or clip) is handled where this stream is appended — see
-/// [`append_content_stream`], which wraps the existing content in `q`/`Q`.
+/// Words are grouped into visual **lines** with the same
+/// [`ocr_words_to_line_groups`] pass the ephemeral "Make Searchable" overlay
+/// uses, and each line becomes one `BT … ET` text object in render mode 3 —
+/// but every word inside it is positioned at **its own box**, with its own
+/// horizontal scale (`Tz`) and an absolute `Tm`.
 ///
-/// Font size and baseline are derived from the line box and Helvetica's loose
-/// metrics so the run's text-extraction box coincides with the OCR box: with
-/// `fs = height / (ascent + descent)` the box height matches, and placing the
-/// baseline at `box_bottom + descent·fs` makes the box bottom sit on the OCR
-/// box bottom (the descent hangs down to exactly the box bottom, not below it).
+/// Placing words individually is not a refinement, it is the difference
+/// between a layer that lands on the ink and one that doesn't. A line-wide
+/// run positions only its two ends: the text between them is laid out by
+/// stretching a single-space-joined string uniformly, so on justified text —
+/// where the real word gaps vary — a mid-line word's glyphs drift from the
+/// ink they belong to (measured at ~47pt on a 200pt page by
+/// `mid_line_words_land_on_their_own_boxes`). The error is purely horizontal,
+/// because the vertical metrics below come from the line box and are right
+/// either way, which makes it easy to mistake for a page-offset problem.
+///
+/// Keeping the whole line in one `BT … ET` is what preserves the smooth
+/// selection and search highlighting of "Make Searchable": readers group
+/// selection by text object, so a line stays one flowing span even though its
+/// words are individually placed.
+///
+/// Font size and baseline are derived from the **line's** union box and
+/// Helvetica's loose metrics so the run's text-extraction box coincides with
+/// the OCR box: with `fs = height / (ascent + descent)` the box height
+/// matches, and placing the baseline at `box_bottom + descent·fs` makes the
+/// box bottom sit on the OCR box bottom (the descent hangs down to exactly the
+/// box bottom, not below it). Taking them per line rather than per word keeps
+/// one baseline across the line where the engine reported slightly different
+/// word heights.
+///
+/// Each `BT…ET` block isolates *text* state; isolation from the page's
+/// *graphics* state (a leftover CTM or clip) is handled where this stream is
+/// appended — see [`append_content_stream`], which wraps the existing content
+/// in `q`/`Q`.
 ///
 /// Returns `Ok(vec![])` when no line has representable text (e.g. a pure-CJK
 /// page) — a legitimate "nothing to write". An encoding failure is returned as
 /// `Err` rather than collapsed into an empty stream, so the caller can't mistake
 /// a real error for an empty page and silently drop the layer.
 ///
-/// With `per_word` set, every OCR word becomes its own run at its own (tight) box
-/// instead of being grouped into lines. Redaction (issue #1) needs this for
-/// its re-OCR of flattened pages: a line-unioned run would be Tz-stretched
-/// across the burned gap where a mid-line word was redacted, positioning
-/// invisible glyphs *inside* the redaction region — verification would then
-/// (rightly) refuse to certify the output. Per-word runs cannot span a gap,
-/// so the redacted areas stay text-free. The cost — selection highlights that
-/// step per word instead of flowing per line — is confined to redacted pages.
+/// With `per_word` set, every word additionally becomes its own text object
+/// rather than sharing the line's. Redaction (issue #1) uses this for its
+/// re-OCR of flattened pages: per-word *placement* already keeps glyphs out of
+/// a burned mid-line gap, and isolating the text objects too means nothing
+/// about that guarantee depends on how a reader groups a shared object. The
+/// cost — selection that steps per word instead of flowing per line — stays
+/// confined to redacted pages.
 pub(crate) fn build_invisible_text_stream_runs(
     words: &[OcrWord],
     font_name: &str,
     per_word: bool,
 ) -> Result<Vec<u8>, AppError> {
-    let runs: Vec<OcrLine> = if per_word {
-        words
-            .iter()
-            .map(|w| OcrLine { text: w.text.clone(), rect: w.rect.clone() })
-            .collect()
+    // Group into visual lines but keep each word's own box: the line supplies
+    // the shared vertical metrics, each word supplies its own horizontal
+    // placement. `per_word` makes every word its own group, so it also gets
+    // its own text object.
+    let groups: Vec<Vec<&OcrWord>> = if per_word {
+        words.iter().map(|w| vec![w]).collect()
     } else {
-        ocr_words_to_lines(words)
+        ocr_words_to_line_groups(words)
     };
-    let mut ops: Vec<Operation> = Vec::new();
-    for line in runs {
-        let encoded = encode_for_font(&line.text);
-        if encoded.is_empty() {
-            continue; // nothing representable (e.g. a pure-CJK line)
-        }
-        let box_height = line.rect.height.max(1.0);
-        let font_size = box_height / (HELVETICA_ASCENT_RATIO + HELVETICA_DESCENT_RATIO);
-        let baseline_y = line.rect.y + HELVETICA_DESCENT_RATIO * font_size;
-        let h_scale = horizontal_scale_percent(&encoded, font_size, line.rect.width);
 
-        ops.push(Operation::new("BT", vec![]));
-        ops.push(Operation::new(
-            "Tf",
-            vec![Object::Name(font_name.as_bytes().to_vec()), Object::Real(font_size)],
-        ));
-        ops.push(Operation::new("Tr", vec![Object::Integer(3)])); // invisible
-        ops.push(Operation::new("Tz", vec![Object::Real(h_scale)]));
-        ops.push(Operation::new(
-            "Td",
-            vec![Object::Real(line.rect.x), Object::Real(baseline_y)],
-        ));
-        ops.push(Operation::new(
-            "Tj",
-            vec![Object::String(encoded, StringFormat::Literal)],
-        ));
-        ops.push(Operation::new("ET", vec![]));
+    let mut ops: Vec<Operation> = Vec::new();
+    for group in groups {
+        // Vertical metrics from the line's union box, so every word on the
+        // line shares one baseline and one size even where the OCR engine
+        // reported slightly different heights per word.
+        let bottom = group.iter().map(|w| w.rect.y).fold(f32::INFINITY, f32::min);
+        let top = group
+            .iter()
+            .map(|w| w.rect.y + w.rect.height)
+            .fold(f32::NEG_INFINITY, f32::max);
+        let box_height = (top - bottom).max(1.0);
+        let font_size = box_height / (HELVETICA_ASCENT_RATIO + HELVETICA_DESCENT_RATIO);
+        let baseline_y = bottom + HELVETICA_DESCENT_RATIO * font_size;
+
+        // Opened lazily: a group whose every word is unrepresentable (a
+        // pure-CJK line) must emit no text object at all, not an empty one.
+        let mut opened = false;
+        for word in group {
+            let encoded = encode_for_font(&word.text);
+            if encoded.is_empty() {
+                continue;
+            }
+            if !opened {
+                ops.push(Operation::new("BT", vec![]));
+                ops.push(Operation::new(
+                    "Tf",
+                    vec![Object::Name(font_name.as_bytes().to_vec()), Object::Real(font_size)],
+                ));
+                ops.push(Operation::new("Tr", vec![Object::Integer(3)])); // invisible
+                opened = true;
+            }
+            // Each word is stretched to its *own* box and positioned at its
+            // own origin with an absolute `Tm` (not a relative `Td`, which
+            // would accumulate across the line).
+            let h_scale = horizontal_scale_percent(&encoded, font_size, word.rect.width);
+            ops.push(Operation::new("Tz", vec![Object::Real(h_scale)]));
+            ops.push(Operation::new(
+                "Tm",
+                vec![
+                    Object::Real(1.0),
+                    Object::Real(0.0),
+                    Object::Real(0.0),
+                    Object::Real(1.0),
+                    Object::Real(word.rect.x),
+                    Object::Real(baseline_y),
+                ],
+            ));
+            ops.push(Operation::new(
+                "Tj",
+                vec![Object::String(encoded, StringFormat::Literal)],
+            ));
+        }
+        if opened {
+            ops.push(Operation::new("ET", vec![]));
+        }
     }
     Content { operations: ops }
         .encode()
@@ -879,25 +926,91 @@ mod tests {
         assert!(build_invisible_text_stream(&[], FONT_NAME).expect("encode").is_empty());
     }
 
-    /// Words sharing a baseline become a single continuous line run (one BT…ET,
-    /// text joined with spaces), not one run per word — this is what preserves
-    /// the smooth, uniform highlighting of "Make Searchable".
+    /// Words sharing a baseline go into a single `BT…ET` text object — that is
+    /// what preserves the smooth, uniform selection highlighting of "Make
+    /// Searchable" — while each word is shown separately so it can be placed
+    /// at its own box.
     #[test]
-    fn words_on_one_line_form_a_single_run() {
+    fn words_on_one_line_share_one_text_object_but_are_shown_separately() {
         let words = vec![
             pt_word("Hello", 10.0, 100.0, 30.0, 12.0),
             pt_word("World", 50.0, 100.0, 30.0, 12.0),
         ];
         let bytes = build_invisible_text_stream(&words, FONT_NAME).expect("encode");
         let content = Content::decode(&bytes).expect("decode content");
-        let runs = content
-            .operations
-            .iter()
-            .filter(|op| op.operator == "BT")
-            .count();
-        assert_eq!(runs, 1, "two words on one line should be one run, got {runs}");
+        let count = |op_name: &str| {
+            content.operations.iter().filter(|op| op.operator == op_name).count()
+        };
+        assert_eq!(count("BT"), 1, "two words on one line should be one text object");
+        assert_eq!(count("ET"), 1);
+        // One show + one absolute placement per word.
+        assert_eq!(count("Tj"), 2, "each word is shown separately");
+        assert_eq!(count("Tm"), 2, "each word gets its own absolute placement");
+
         let s = String::from_utf8_lossy(&bytes);
-        assert!(s.contains("Hello World"), "line text should be joined: {s}");
+        assert!(s.contains("Hello") && s.contains("World"), "missing words: {s}");
+    }
+
+    /// Showing words separately must not cost the reader its word breaks: the
+    /// joined string is no longer written into the file, so extraction has to
+    /// recover the space from the gap between the two placements. pdfium does,
+    /// and this pins it — a layer that copies out as "HelloWorld" would be a
+    /// quiet regression in every paste.
+    #[test]
+    fn separately_placed_words_still_extract_with_a_space() {
+        let pdfium = crate::test_pdfium();
+        let bytes = boxed_page_bytes([0.0, 0.0, 200.0, 400.0], None, 0, b"");
+        let words = vec![
+            OcrWord {
+                text: "Hello".to_string(),
+                rect: TextRect { x: 10.0, y: 300.0, width: 30.0, height: 12.0 },
+            },
+            OcrWord {
+                text: "World".to_string(),
+                rect: TextRect { x: 150.0, y: 300.0, width: 30.0, height: 12.0 },
+            },
+        ];
+        let engine: Arc<dyn OcrEngine> = Arc::new(FakeOcrEngine { words: words.clone() });
+        let state = AppState::new(pdfium.get(), None).with_ocr_engine(engine.clone());
+        state.set_ocr_words("doc1", 1, words);
+        let document = pdfium
+            .get()
+            .load_pdf_from_byte_vec(bytes.clone(), None)
+            .expect("load");
+        state
+            .insert_document(
+                "doc1".to_string(),
+                DocEntry {
+                    page_cache: Vec::new(),
+                    document,
+                    file_path: String::new(),
+                    buffer: bytes,
+                    dirty: false,
+                    protection: crate::state::Protection::Plaintext,
+                    linearized: false,
+                },
+            )
+            .expect("insert");
+        let (_, out) = add_text_layer_impl(
+            |_, _| {},
+            state.get_document("doc1").expect("get"),
+            "doc1".to_string(),
+            engine,
+            state.ocr_cache_handle(),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .expect("add layer");
+
+        let doc = pdfium
+            .get()
+            .load_pdf_from_byte_vec(out.expect("edited bytes"), None)
+            .expect("reopen");
+        let page = doc.pages().get(0).expect("page");
+        let text = page.text().expect("text");
+        assert_eq!(
+            crate::commands::text::page_text_in_document_order(&text),
+            "Hello World"
+        );
     }
 
     #[test]
@@ -1563,6 +1676,95 @@ mod tests {
         assert!((right - want_r).abs() < 4.0, "right {right}, want {want_r}");
         assert!((bottom - want_b).abs() < 1.5, "bottom {bottom}, want {want_b}");
         assert!((top - want_t).abs() < 1.5, "top {top}, want {want_t}");
+    }
+
+    /// Bounds of just the characters equal to `ch` in the authored layer,
+    /// as `[left, right]` in user space.
+    fn char_span(
+        pdfium: &'static pdfium_render::prelude::Pdfium,
+        page_bytes: Vec<u8>,
+        words: Vec<OcrWord>,
+        ch: char,
+    ) -> [f32; 2] {
+        let engine: Arc<dyn OcrEngine> = Arc::new(FakeOcrEngine { words: words.clone() });
+        let state = AppState::new(pdfium, None).with_ocr_engine(engine.clone());
+        state.set_ocr_words("doc1", 1, words);
+        let document = pdfium
+            .load_pdf_from_byte_vec(page_bytes.clone(), None)
+            .expect("load");
+        state
+            .insert_document(
+                "doc1".to_string(),
+                DocEntry {
+                    page_cache: Vec::new(),
+                    document,
+                    file_path: String::new(),
+                    buffer: page_bytes,
+                    dirty: false,
+                    protection: crate::state::Protection::Plaintext,
+                    linearized: false,
+                },
+            )
+            .expect("insert");
+        let (_, bytes) = add_text_layer_impl(
+            |_, _| {},
+            state.get_document("doc1").expect("get"),
+            "doc1".to_string(),
+            engine,
+            state.ocr_cache_handle(),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .expect("add layer");
+
+        let doc = pdfium
+            .load_pdf_from_byte_vec(bytes.expect("edited bytes"), None)
+            .expect("reopen");
+        let page = doc.pages().get(0).expect("page");
+        let text = page.text().expect("text");
+        let (mut left, mut right) = (f32::INFINITY, f32::NEG_INFINITY);
+        for c in text.chars().iter() {
+            if c.unicode_char() != Some(ch) {
+                continue;
+            }
+            if let Ok(b) = c.loose_bounds() {
+                left = left.min(b.left().value);
+                right = right.max(b.right().value);
+            }
+        }
+        [left, right]
+    }
+
+    /// A line run positions only its two ends. Words *between* them are placed
+    /// by uniform `Tz` stretching of a single-space-joined string, which has
+    /// nothing to do with where they actually sit on the page -- so on a
+    /// justified scan, whose word gaps vary, a mid-line word's invisible glyphs
+    /// drift away from the ink they belong to. Vertically nothing moves, which
+    /// is why this reads as a purely horizontal error.
+    ///
+    /// Two words on one line, 100pt apart: "ZZZZ" occupies x 150..180 and its
+    /// layer must land there.
+    #[test]
+    fn mid_line_words_land_on_their_own_boxes() {
+        let pdfium = crate::test_pdfium();
+        let bytes = boxed_page_bytes([0.0, 0.0, 200.0, 400.0], None, 0, b"");
+        let words = vec![
+            OcrWord {
+                text: "AAAA".to_string(),
+                rect: TextRect { x: 10.0, y: 300.0, width: 30.0, height: 12.0 },
+            },
+            OcrWord {
+                text: "ZZZZ".to_string(),
+                rect: TextRect { x: 150.0, y: 300.0, width: 30.0, height: 12.0 },
+            },
+        ];
+
+        let [left, right] = char_span(pdfium.get(), bytes, words, 'Z');
+
+        assert!(
+            (left - 150.0).abs() < 4.0 && (right - 180.0).abs() < 4.0,
+            "second word at x {left}..{right}, want 150..180 -- a line run stretched \
+             it away from its own box"
+        );
     }
 
     /// The regression test for issue #129. A deskewed scan's MediaBox sits at
