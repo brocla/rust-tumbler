@@ -1349,6 +1349,86 @@ mod tests {
         std::fs::remove_file(&src).ok();
     }
 
+    /// Times Add Text Layer over a real large scan, with recognition taken out
+    /// of the picture: the OCR cache is pre-seeded for every page, so the run
+    /// measures the text-extraction scan plus the lopdf parse / author /
+    /// reserialize that issue #129 made reachable on such a file for the first
+    /// time. Recognition itself is unchanged by that fix and dominates the
+    /// wall clock (seconds per page), so it would only hide what is being
+    /// measured here.
+    ///
+    /// Ignored by default -- it needs a file this repo can't carry. Run with:
+    ///
+    /// ```text
+    /// TUMBLER_BENCH_PDF=C:\path\to\scan.pdf cargo test --lib \
+    ///     bench_add_text_layer_on_a_large_scan -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "needs a large scanned PDF via TUMBLER_BENCH_PDF"]
+    fn bench_add_text_layer_on_a_large_scan() {
+        let Ok(path) = std::env::var("TUMBLER_BENCH_PDF") else {
+            panic!("set TUMBLER_BENCH_PDF to a scanned PDF path");
+        };
+        let pdfium = crate::test_pdfium();
+        let bytes = std::fs::read(&path).expect("read bench pdf");
+        let engine: Arc<dyn OcrEngine> = Arc::new(FakeOcrEngine { words: Vec::new() });
+        let state = AppState::new(pdfium.get(), None).with_ocr_engine(engine.clone());
+
+        let document = pdfium.get()
+            .load_pdf_from_byte_vec(bytes.clone(), None)
+            .expect("load bench pdf");
+        let page_count = document.pages().len() as u32;
+        state
+            .insert_document(
+                "bench".to_string(),
+                DocEntry {
+                    page_cache: Vec::new(),
+                    document,
+                    file_path: path.clone(),
+                    buffer: bytes.clone(),
+                    dirty: false,
+                    protection: crate::state::Protection::Plaintext,
+                    linearized: false,
+                },
+            )
+            .expect("insert");
+
+        // Seed every page so Phase A returns from cache instead of rendering
+        // and recognizing.
+        for page in 1..=page_count {
+            state.set_ocr_words(
+                "bench",
+                page,
+                vec![OcrWord {
+                    text: "Scanned line of text".to_string(),
+                    rect: TextRect { x: 40.0, y: 300.0, width: 300.0, height: 14.0 },
+                }],
+            );
+        }
+
+        let start = std::time::Instant::now();
+        let (result, edited) = add_text_layer_impl(
+            |_, _| {},
+            state.get_document("bench").expect("get"),
+            "bench".to_string(),
+            engine,
+            state.ocr_cache_handle(),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .expect("add layer");
+        let elapsed = start.elapsed();
+
+        println!(
+            "{page_count} pages, {:.1} MB in -> written {}, skipped(rotated) {}, \
+             {:.1} MB out, {:.2}s (excludes OCR recognition)",
+            bytes.len() as f64 / 1_048_576.0,
+            result.pages_written,
+            result.pages_skipped_unsupported_geometry,
+            edited.as_ref().map_or(0.0, |b| b.len() as f64 / 1_048_576.0),
+            elapsed.as_secs_f64(),
+        );
+    }
+
     /// Serializes a one-page PDF with an explicit `/MediaBox`, optional
     /// `/CropBox` and `/Rotate`, the given content stream, and a Helvetica
     /// `/F1` the content may use. Returned as bytes so a test can build a
