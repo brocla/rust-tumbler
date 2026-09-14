@@ -668,6 +668,7 @@ pub(crate) fn add_text_layer_impl_filtered(
 mod tests {
     use super::*;
     use crate::commands::text::TextRect;
+    use pdfium_render::prelude::{PdfSearchDirection, PdfSearchOptions};
     use crate::state::DocEntry;
     use std::sync::atomic::AtomicBool;
 
@@ -1540,6 +1541,139 @@ mod tests {
             edited.as_ref().map_or(0.0, |b| b.len() as f64 / 1_048_576.0),
             elapsed.as_secs_f64(),
         );
+    }
+
+    /// Diagnostic for the "search highlight sits beside the word" report:
+    /// authors a layer over one page of a real scan with the real Windows OCR
+    /// engine, then prints, for every hit of a query, the OCR word box the ink
+    /// actually occupies next to the rectangle pdfium reports for the match.
+    ///
+    /// Ignored -- needs a language pack and a file the repo cannot carry:
+    ///
+    /// ```text
+    /// TUMBLER_BENCH_PDF=...\\scan.pdf TUMBLER_DIAG_PAGE=182 \
+    ///   TUMBLER_DIAG_QUERY=Heade cargo test --lib diag_search_highlight_vs_ocr_box \
+    ///   -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "needs a large scanned PDF and a Windows OCR language pack"]
+    fn diag_search_highlight_vs_ocr_box() {
+        let path = std::env::var("TUMBLER_BENCH_PDF").expect("TUMBLER_BENCH_PDF");
+        let page_1based: u32 = std::env::var("TUMBLER_DIAG_PAGE")
+            .expect("TUMBLER_DIAG_PAGE")
+            .parse()
+            .expect("page number");
+        let query = std::env::var("TUMBLER_DIAG_QUERY").unwrap_or_else(|_| "Heade".to_string());
+
+        let pdfium = crate::test_pdfium();
+        let bytes = std::fs::read(&path).expect("read pdf");
+        // The real engine, not a fake: the whole question is what the engine
+        // reports versus where the layer puts it.
+        let engine: Arc<dyn OcrEngine> = Arc::new(crate::commands::ocr::WindowsOcrEngine::new());
+        let state = AppState::new(pdfium.get(), None).with_ocr_engine(engine.clone());
+        let document = pdfium.get()
+            .load_pdf_from_byte_vec(bytes.clone(), None)
+            .expect("load pdf");
+        state
+            .insert_document(
+                "diag".to_string(),
+                DocEntry {
+                    page_cache: Vec::new(),
+                    document,
+                    file_path: path.clone(),
+                    buffer: bytes,
+                    dirty: false,
+                    protection: crate::state::Protection::Plaintext,
+                    linearized: false,
+                },
+            )
+            .expect("insert");
+
+        let only: std::collections::HashSet<u32> = [page_1based].into_iter().collect();
+        let (result, edited) = add_text_layer_impl_filtered(
+            |_, _| {},
+            state.get_document("diag").expect("get"),
+            "diag".to_string(),
+            engine,
+            state.ocr_cache_handle(),
+            Arc::new(AtomicBool::new(false)),
+            Some(&only),
+            false,
+        )
+        .expect("add layer");
+        println!("pages_written = {}", result.pages_written);
+
+        let words = state.get_ocr_words("diag", page_1based).unwrap_or_default();
+        println!("OCR words on page: {}", words.len());
+        for w in words.iter().filter(|w| w.text.contains(&query)) {
+            println!(
+                "  OCR word {:?}: x {:.1}..{:.1}  (w {:.1})  y {:.1}",
+                w.text,
+                w.rect.x,
+                w.rect.x + w.rect.width,
+                w.rect.width,
+                w.rect.y,
+            );
+        }
+
+        let doc = pdfium.get()
+            .load_pdf_from_byte_vec(edited.expect("edited bytes"), None)
+            .expect("reopen");
+        let page = doc.pages().get(page_1based as i32 - 1).expect("page");
+        let (ox, oy) = crate::commands::text::page_origin(&page);
+        println!("page origin = ({ox:.2}, {oy:.2})");
+        let text = page.text().expect("text");
+        let options = PdfSearchOptions::new();
+        let search = text.search(&query, &options).expect("search");
+
+        // Each hit is paired with the OCR word it should be sitting on: same
+        // line (y within half a line) and overlapping horizontally. The delta
+        // that matters is the *left* edge -- a hit covering only part of a word
+        // ("Heade" inside "Heade's") legitimately stops short on the right.
+        let mut worst: f32 = 0.0;
+        for (i, seg) in search.iter(PdfSearchDirection::SearchForward).enumerate() {
+            let (mut left, mut right, mut bottom) =
+                (f32::INFINITY, f32::NEG_INFINITY, f32::INFINITY);
+            let mut chars = String::new();
+            for s in seg.iter() {
+                let b = s.bounds();
+                left = left.min(b.left().value);
+                right = right.max(b.right().value);
+                bottom = bottom.min(b.bottom().value);
+                chars.push_str(&s.text());
+            }
+            // Into the render space the OCR cache speaks.
+            let (rl, rr, rb) = (left - ox, right - ox, bottom - oy);
+
+            // Pick the candidate with the largest horizontal overlap, not the
+            // first one found: neighbouring words on an adjacent line overlap
+            // the y test and would otherwise be paired, reporting a placement
+            // error that is really a pairing error.
+            let paired = words
+                .iter()
+                .filter(|w| (w.rect.y - rb).abs() < w.rect.height * 0.5)
+                .map(|w| {
+                    let overlap =
+                        (rr.min(w.rect.x + w.rect.width) - rl.max(w.rect.x)).max(0.0);
+                    (w, overlap)
+                })
+                .filter(|(_, overlap)| *overlap > 0.0)
+                .max_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|(w, _)| w);
+            match paired {
+                Some(w) => {
+                    let d = rl - w.rect.x;
+                    worst = worst.max(d.abs());
+                    println!(
+                        "  hit {i:2} {:?} render x {:.1}..{:.1}  <-  OCR {:?} x {:.1}..{:.1}  \
+                         delta_left {:+.2}",
+                        chars, rl, rr, w.text, w.rect.x, w.rect.x + w.rect.width, d,
+                    );
+                }
+                None => println!("  hit {i:2} {chars:?} render x {rl:.1}..{rr:.1}  <-  (no OCR word paired)"),
+            }
+        }
+        println!("worst left-edge delta: {worst:.2} pt");
     }
 
     /// Serializes a one-page PDF with an explicit `/MediaBox`, optional
