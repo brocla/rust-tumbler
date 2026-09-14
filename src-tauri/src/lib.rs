@@ -50,7 +50,7 @@ pub fn run() {
             commands::text::extract_page_text,
             commands::text::search_document,
             commands::text::export_text,
-            commands::text::count_pages_without_text,
+            commands::text::page_text_coverage,
             commands::text_layer::add_text_layer,
             commands::typewriter::apply_typewriter,
             commands::ink::apply_ink,
