@@ -130,6 +130,17 @@ impl PageSpace {
         self.rotate
     }
 
+    /// The render box's lower-left corner in user space.
+    ///
+    /// This is the offset between user space and anything measured from the
+    /// rendered page's corner — most of all an OCR word's rect, which
+    /// `bitmap_rect_to_pdf_points` produces relative to the box pdfium drew
+    /// (issue #129). Prefer [`Self::to_user`] where the y axis has to flip too;
+    /// this is for callers already in a bottom-left space.
+    pub(crate) fn origin(&self) -> [f32; 2] {
+        [self.ebox[0], self.ebox[1]]
+    }
+
     /// The page's size as the viewer showed it — width and height exchanged
     /// at 90 and 270.
     ///

@@ -16,16 +16,20 @@
 //! buffer and the document is marked dirty; the user commits it to disk with
 //! an ordinary Save / Save As. Nothing here touches the file.
 //!
-//! Coordinate note: `OcrWord.rect` is already in PDF user space (points, origin
-//! bottom-left) for the common case of a MediaBox at `[0 0 w h]` with no
-//! `/Rotate`. Pages with a shifted origin or a rotation are *detected and
-//! skipped* in this first cut rather than mis-positioned (see
-//! [`geometry_is_simple`]); the happy path is authored correctly.
+//! Coordinate note: `OcrWord.rect` is in points with a bottom-left origin, but
+//! measured from the corner of the box pdfium *rendered* (the CropBox), because
+//! that is the bitmap the OCR engine read. A content stream is authored in user
+//! space. The two coincide only when the render box sits at `[0 0 w h]`; on a
+//! deskewed scan every page carries a small non-zero origin, so authoring adds
+//! the render box's origin to each word (issue #129). `/Rotate` needs more than
+//! a translation — the glyphs must turn, not just their boxes — so rotated pages
+//! are still *detected and skipped* rather than mis-positioned.
 
 use crate::commands::ocr::{
     cache_get, ocr_page_into_cache, ocr_words_to_lines, OcrCache, OcrEngine, OcrLine, OcrProgress,
     OcrWord,
 };
+use crate::commands::page_space::PageSpace;
 use crate::commands::text::page_text_in_document_order;
 use crate::error::AppError;
 use crate::state::{lock_mutex, AppState, DocEntry};
@@ -55,11 +59,11 @@ const HELVETICA_DESCENT_RATIO: f32 = 0.211;
 pub struct AddTextLayerResult {
     /// Pages that received an invisible OCR text layer.
     pub pages_written: u32,
-    /// Text-less pages that were OCR'd but left un-searchable because their
-    /// geometry (a `/Rotate` or a shifted MediaBox origin) isn't yet supported
-    /// by the layer author. Surfaced so the user is told, rather than silently
-    /// seeing a lower count. (Distinct from a scanned page on which OCR simply
-    /// recognized no encodable text — a rare case not separately counted here.)
+    /// Text-less pages that were OCR'd but left un-searchable because the
+    /// layer author can't yet place text on a rotated page. Surfaced so the
+    /// user is told, rather than silently seeing a lower count. (Distinct from
+    /// a scanned page on which OCR simply recognized no encodable text — a rare
+    /// case not separately counted here.)
     pub pages_skipped_unsupported_geometry: u32,
     pub cancelled: bool,
 }
@@ -279,13 +283,6 @@ pub(crate) fn build_invisible_text_stream_runs(
 
 // ── Page geometry ───────────────────────────────────────────────────────────
 
-/// Whether a page's coordinate space matches the one `OcrWord.rect` assumes:
-/// MediaBox origin at (0,0) and no rotation. Rotated/offset pages are skipped
-/// in this cut so their layer is never mis-placed.
-fn geometry_is_simple(origin_x: f32, origin_y: f32, rotate: i64) -> bool {
-    origin_x.abs() < 0.5 && origin_y.abs() < 0.5 && rotate.rem_euclid(360) == 0
-}
-
 /// Resolves a possibly-inherited page attribute, following `/Parent` up the page
 /// tree and dereferencing an indirect value. Returns an owned clone.
 fn inherited_value(doc: &Document, page_id: ObjectId, key: &[u8]) -> Option<Object> {
@@ -301,28 +298,6 @@ fn inherited_value(doc: &Document, page_id: ObjectId, key: &[u8]) -> Option<Obje
         current = dict.get(b"Parent").ok()?.as_reference().ok()?;
     }
     None
-}
-
-fn object_as_f32(obj: &Object) -> f32 {
-    match obj {
-        Object::Integer(i) => *i as f32,
-        Object::Real(r) => *r,
-        _ => 0.0,
-    }
-}
-
-/// Reads a page's effective (MediaBox origin, /Rotate) for the simple-geometry
-/// check. Missing values default to origin (0,0) and rotation 0.
-fn page_geometry(doc: &Document, page_id: ObjectId) -> (f32, f32, i64) {
-    let (origin_x, origin_y) = match inherited_value(doc, page_id, b"MediaBox") {
-        Some(Object::Array(a)) if a.len() >= 2 => (object_as_f32(&a[0]), object_as_f32(&a[1])),
-        _ => (0.0, 0.0),
-    };
-    let rotate = match inherited_value(doc, page_id, b"Rotate") {
-        Some(Object::Integer(i)) => i,
-        _ => 0,
-    };
-    (origin_x, origin_y, rotate)
 }
 
 /// Builds the page's Resources dictionary with our OCR font added, preserving
@@ -541,20 +516,37 @@ pub(crate) fn add_text_layer_impl_filtered(
         let mut font_id: Option<ObjectId> = None;
 
         for page_num in textless_pages {
-            let Some(words) = cache_get(&cache, &doc_id, page_num) else {
+            let Some(mut words) = cache_get(&cache, &doc_id, page_num) else {
                 continue;
             };
             let Some(&page_id) = pages.get(&page_num) else {
                 continue;
             };
 
-            // Skip pages whose coordinate space doesn't match what OcrWord.rect
-            // assumes; better no layer than a mis-placed one. Count them so the
-            // user is told these pages were left un-searchable.
-            let (ox, oy, rotate) = page_geometry(&d, page_id);
-            if !geometry_is_simple(ox, oy, rotate) {
+            // Rotation still can't be authored: unlike a flattened polyline,
+            // rotated text isn't handled by mapping its corners — the glyphs
+            // have to turn too, which needs a text matrix rather than the bare
+            // `Td` below. Better no layer than a mis-placed one; count it so
+            // the user is told the page was left un-searchable.
+            let space = PageSpace::of(&d, page_id);
+            if space.rotate() != 0 {
                 pages_skipped_unsupported_geometry += 1;
                 continue;
+            }
+
+            // `OcrWord.rect` is measured from the corner of the box pdfium
+            // *rendered* (the CropBox), while a content stream is authored in
+            // user space. On a page whose box origin isn't (0,0) — every page
+            // of a deskewed scan — the two differ by exactly that origin, so
+            // shift the words onto it (issue #129). Both halves of this claim
+            // are pinned by
+            // `pdfium_reports_text_in_user_space_but_renders_the_cropbox`.
+            let [ox, oy] = space.origin();
+            if ox != 0.0 || oy != 0.0 {
+                for w in &mut words {
+                    w.rect.x += ox;
+                    w.rect.y += oy;
+                }
             }
 
             let stream_bytes = build_invisible_text_stream_runs(&words, FONT_NAME, per_word_runs)?;
@@ -914,15 +906,6 @@ mod tests {
         let bytes = build_invisible_text_stream(&[pt_word("日本語", 0.0, 0.0, 30.0, 10.0)], FONT_NAME)
             .expect("encode");
         assert!(bytes.is_empty(), "CJK-only word should be dropped under WinAnsi");
-    }
-
-    #[test]
-    fn geometry_simple_only_for_unrotated_origin_zero() {
-        assert!(geometry_is_simple(0.0, 0.0, 0));
-        assert!(geometry_is_simple(0.0, 0.0, 360));
-        assert!(!geometry_is_simple(10.0, 0.0, 0), "offset origin is not simple");
-        assert!(!geometry_is_simple(0.0, 0.0, 90), "rotation is not simple");
-        assert!(!geometry_is_simple(0.0, 0.0, 270));
     }
 
     // ── B9: Helvetica width table / horizontal scaling ──────────────────────
@@ -1366,67 +1349,103 @@ mod tests {
         std::fs::remove_file(&src).ok();
     }
 
-    /// A document with one plain page and one offset-origin page: both are
-    /// text-less and OCR'd in Phase A, but the offset page fails the geometry
-    /// guard in Phase B. The result must report it (pages_skipped) rather than
-    /// silently drop it, so the UI can tell the user. Offset origin is used
-    /// instead of /Rotate because it trips the same guard without needing
-    /// pdfium to render a rotated page.
-    #[test]
-    fn offset_page_is_counted_as_skipped() {
-        let pdfium = crate::test_pdfium();
-
-        let src = temp_path("src.pdf");
-        {
-            let mut doc = Document::with_version("1.5");
-            let pages_id = doc.new_object_id();
-            let empty = || Stream::new(Dictionary::new(), Vec::new());
-            let c0 = doc.add_object(empty());
-            let c1 = doc.add_object(empty());
-            // Page 1: normal origin (0,0) → gets a layer.
-            let p0 = doc.add_object(dictionary! {
-                "Type" => "Page",
-                "Parent" => pages_id,
-                "Contents" => c0,
-                "MediaBox" => vec![
-                    Object::Integer(0), Object::Integer(0),
-                    Object::Integer(200), Object::Integer(200),
-                ],
-            });
-            // Page 2: shifted origin (50,50) → skipped by the geometry guard.
-            let p1 = doc.add_object(dictionary! {
-                "Type" => "Page",
-                "Parent" => pages_id,
-                "Contents" => c1,
-                "MediaBox" => vec![
-                    Object::Integer(50), Object::Integer(50),
-                    Object::Integer(250), Object::Integer(250),
-                ],
-            });
-            doc.objects.insert(
-                pages_id,
-                Object::Dictionary(dictionary! {
-                    "Type" => "Pages",
-                    "Kids" => vec![Object::Reference(p0), Object::Reference(p1)],
-                    "Count" => Object::Integer(2),
-                }),
-            );
-            let catalog_id = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
-            doc.trailer.set("Root", catalog_id);
-            doc.save(&src).expect("write two-page pdf");
+    /// Serializes a one-page PDF with an explicit `/MediaBox`, optional
+    /// `/CropBox` and `/Rotate`, the given content stream, and a Helvetica
+    /// `/F1` the content may use. Returned as bytes so a test can build a
+    /// `DocEntry` without a temp file.
+    ///
+    /// `crate::geometry_page_bytes` covers rotation and cropping but always
+    /// puts the MediaBox at `[0 0 w h]`; the offset-origin pages this module
+    /// has to place text on (issue #129) need the origin itself moved.
+    fn boxed_page_bytes(
+        media: [f32; 4],
+        crop: Option<[f32; 4]>,
+        rotate: i64,
+        content: &[u8],
+    ) -> Vec<u8> {
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        let font = doc.add_object(dictionary! {
+            "Type" => "Font", "Subtype" => "Type1",
+            "BaseFont" => "Helvetica", "Encoding" => "WinAnsiEncoding",
+        });
+        let content_id = doc.add_object(Stream::new(Dictionary::new(), content.to_vec()));
+        let rect = |[x0, y0, x1, y1]: [f32; 4]| {
+            vec![Object::Real(x0), Object::Real(y0), Object::Real(x1), Object::Real(y1)]
+        };
+        let mut page_dict = dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "Contents" => content_id,
+            "Resources" => dictionary! {
+                "Font" => dictionary! { "F1" => Object::Reference(font) },
+            },
+            "MediaBox" => rect(media),
+        };
+        if let Some(c) = crop {
+            page_dict.set("CropBox", rect(c));
         }
+        if rotate != 0 {
+            page_dict.set("Rotate", Object::Integer(rotate));
+        }
+        let page_id = doc.add_object(Object::Dictionary(page_dict));
+        doc.objects.insert(pages_id, Object::Dictionary(dictionary! {
+            "Type" => "Pages",
+            "Kids" => vec![Object::Reference(page_id)],
+            "Count" => Object::Integer(1),
+        }));
+        let catalog_id = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        doc.trailer.set("Root", catalog_id);
+        let mut out = Vec::new();
+        doc.save_to(&mut out).expect("serialize page bytes");
+        out
+    }
 
-        let engine: Arc<dyn OcrEngine> = Arc::new(FakeOcrEngine { words: vec![px_word("Scanned")] });
-        let state = AppState::new(pdfium.get(), None).with_ocr_engine(engine.clone());
-        let document = pdfium.get().load_pdf_from_file(&src, None).expect("load src");
+    /// Runs Add Text Layer over a one-page document built from `page_bytes`,
+    /// with the OCR cache seeded to exactly `word` (so no pixel-to-point
+    /// mapping sits in the way), and returns the result plus the unioned
+    /// `[left, bottom, right, top]` pdfium reports for the authored layer --
+    /// `None` when no layer was written.
+    ///
+    /// The seeded `word.rect` is in the space the cache holds: bottom-left
+    /// origin, measured from the **rendered** box's corner. The returned
+    /// bounds are **user space**. On an offset page those differ by the box
+    /// origin -- see
+    /// `pdfium_reports_text_in_user_space_but_renders_the_cropbox`, which pins
+    /// both halves of that claim. Closing the gap is what these tests check.
+    ///
+    /// Takes the instance from the caller rather than acquiring: a second
+    /// `test_pdfium()` while the caller holds one deadlocks.
+    fn layer_over_page(
+        pdfium: &'static pdfium_render::prelude::Pdfium,
+        page_bytes: Vec<u8>,
+        word: OcrWord,
+    ) -> (AddTextLayerResult, Option<[f32; 4]>) {
+        let engine: Arc<dyn OcrEngine> = Arc::new(FakeOcrEngine { words: vec![word.clone()] });
+        let state = AppState::new(pdfium, None).with_ocr_engine(engine.clone());
+        state.set_ocr_words("doc1", 1, vec![word]);
+
+        let document = pdfium
+            .load_pdf_from_byte_vec(page_bytes.clone(), None)
+            .expect("load page bytes");
         state
-            .insert_document("doc1".to_string(), DocEntry { page_cache: Vec::new(), document, file_path: src.clone(), buffer: std::fs::read(&src).expect("read src"), dirty: false, protection: crate::state::Protection::Plaintext, linearized: false })
+            .insert_document(
+                "doc1".to_string(),
+                DocEntry {
+                    page_cache: Vec::new(),
+                    document,
+                    file_path: String::new(),
+                    buffer: page_bytes,
+                    dirty: false,
+                    protection: crate::state::Protection::Plaintext,
+                    linearized: false,
+                },
+            )
             .expect("insert");
 
-        let entry = state.get_document("doc1").expect("get");
         let (result, bytes) = add_text_layer_impl(
             |_, _| {},
-            entry,
+            state.get_document("doc1").expect("get"),
             "doc1".to_string(),
             engine,
             state.ocr_cache_handle(),
@@ -1434,14 +1453,110 @@ mod tests {
         )
         .expect("add layer");
 
-        assert_eq!(result.pages_written, 1, "the plain page should get a layer");
+        let bounds = bytes.map(|b| {
+            let doc = pdfium.load_pdf_from_byte_vec(b, None).expect("reopen edited bytes");
+            let page = doc.pages().get(0).expect("page");
+            let text = page.text().expect("text");
+            let (mut left, mut bottom, mut right, mut top) =
+                (f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
+            for ch in text.chars().iter() {
+                if let Ok(bb) = ch.loose_bounds() {
+                    left = left.min(bb.left().value);
+                    bottom = bottom.min(bb.bottom().value);
+                    right = right.max(bb.right().value);
+                    top = top.max(bb.top().value);
+                }
+            }
+            [left, bottom, right, top]
+        });
+        (result, bounds)
+    }
+
+    /// Asserts a layer's user-space bounds match the OCR box shifted by the
+    /// rendered box's origin. Tolerances match the module's other placement
+    /// tests: the run is stretched to the box by `Tz`, so the horizontal fit
+    /// is looser than the vertical one.
+    fn assert_layer_at(bounds: Option<[f32; 4]>, want: [f32; 4]) {
+        let [left, bottom, right, top] = bounds.expect("a layer should have been written");
+        let [want_l, want_b, want_r, want_t] = want;
+        assert!((left - want_l).abs() < 4.0, "left {left}, want {want_l}");
+        assert!((right - want_r).abs() < 4.0, "right {right}, want {want_r}");
+        assert!((bottom - want_b).abs() < 1.5, "bottom {bottom}, want {want_b}");
+        assert!((top - want_t).abs() < 1.5, "top {top}, want {want_t}");
+    }
+
+    /// The regression test for issue #129. A deskewed scan's MediaBox sits at
+    /// a small non-zero origin on every page; the layer must be placed
+    /// **relative to that origin**, not at the raw cache coordinates.
+    ///
+    /// Non-square (200x400) on purpose: on a square page a width/height mix-up
+    /// cancels and a broken mapping passes.
+    #[test]
+    fn offset_mediabox_page_gets_a_layer_at_its_origin() {
+        let pdfium = crate::test_pdfium();
+        // MediaBox [50 60 250 460] -> 200x400 rendered, origin (50, 60).
+        let bytes = boxed_page_bytes([50.0, 60.0, 250.0, 460.0], None, 0, b"");
+        let word = OcrWord {
+            text: "Scanned".to_string(),
+            rect: TextRect { x: 30.0, y: 100.0, width: 120.0, height: 20.0 },
+        };
+
+        let (result, bounds) = layer_over_page(pdfium.get(), bytes, word);
+
+        assert_eq!(result.pages_written, 1, "an offset page must still get a layer");
+        assert_eq!(result.pages_skipped_unsupported_geometry, 0);
+        // OCR box (30..150, 100..120) shifted by the origin (50, 60).
+        assert_layer_at(bounds, [80.0, 160.0, 200.0, 180.0]);
+    }
+
+    /// pdfium renders the **CropBox**, so that -- not the MediaBox -- is the
+    /// box an OCR word's rect is measured from. A page whose CropBox sits
+    /// inside a larger MediaBox must have its layer placed against the CropBox
+    /// corner; reading the MediaBox here would put the text ~90pt off.
+    #[test]
+    fn layer_is_placed_against_the_cropbox_not_the_mediabox() {
+        let pdfium = crate::test_pdfium();
+        // MediaBox at the origin, CropBox [70 90 270 490] -> 200x400 rendered.
+        let bytes = boxed_page_bytes(
+            [0.0, 0.0, 300.0, 500.0],
+            Some([70.0, 90.0, 270.0, 490.0]),
+            0,
+            b"",
+        );
+        let word = OcrWord {
+            text: "Scanned".to_string(),
+            rect: TextRect { x: 30.0, y: 100.0, width: 120.0, height: 20.0 },
+        };
+
+        let (result, bounds) = layer_over_page(pdfium.get(), bytes, word);
+
+        assert_eq!(result.pages_written, 1);
+        assert_eq!(result.pages_skipped_unsupported_geometry, 0);
+        // OCR box (30..150, 100..120) shifted by the CropBox origin (70, 90).
+        assert_layer_at(bounds, [100.0, 190.0, 220.0, 210.0]);
+    }
+
+    /// Rotation remains unsupported and must still be reported rather than
+    /// mis-placed. Unlike a flattened polyline, rotated text cannot be handled
+    /// by mapping its corners -- the glyphs have to turn too, which needs a
+    /// `Tm` rather than a bare `Td`. Until that exists, skip and say so.
+    #[test]
+    fn rotated_page_is_counted_as_skipped() {
+        let pdfium = crate::test_pdfium();
+        let bytes = crate::geometry_page_bytes(200.0, 400.0, 90, None);
+        let word = OcrWord {
+            text: "Scanned".to_string(),
+            rect: TextRect { x: 30.0, y: 100.0, width: 120.0, height: 20.0 },
+        };
+
+        let (result, bounds) = layer_over_page(pdfium.get(), bytes, word);
+
+        assert_eq!(result.pages_written, 0, "a rotated page must not be written");
         assert_eq!(
             result.pages_skipped_unsupported_geometry, 1,
-            "the offset page should be counted as skipped"
+            "the rotated page should be counted as skipped"
         );
-        assert!(bytes.is_some(), "one page got a layer, so bytes must be returned");
-
-        std::fs::remove_file(&src).ok();
+        assert!(bounds.is_none(), "nothing written -> no edited bytes");
     }
 
     /// A page with a native text layer must not receive a duplicate OCR layer.
