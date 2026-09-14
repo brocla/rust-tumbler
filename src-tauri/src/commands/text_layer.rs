@@ -757,6 +757,118 @@ mod tests {
         (left, bottom, right, top)
     }
 
+    /// Pins the coordinate space pdfium's text extraction reports on a page
+    /// whose box origin is *not* `(0,0)` — the assumption the offset fix rests
+    /// on (issue #129).
+    ///
+    /// Every other placement test here uses a `[0 0 w h]` MediaBox, where user
+    /// space and render space coincide, so nothing else can tell them apart.
+    /// Measured here:
+    ///
+    /// - `loose_bounds()` reports **user space**, unshifted by the MediaBox or
+    ///   CropBox origin — a run authored at user-space `(100, 200)` reads back
+    ///   at `x = 100` on both pages below.
+    /// - `page.width()/height()` — what `bitmap_rect_to_pdf_points` divides by
+    ///   to place OCR words — tracks the **CropBox** (200x400 vs 180x370).
+    ///
+    /// So an OCR word's rect is relative to the **CropBox** corner while the
+    /// content stream it is written into is user space, and the correction
+    /// between them is the CropBox origin. That is why authoring goes through
+    /// `PageSpace` (which prefers CropBox) rather than reading the MediaBox.
+    ///
+    /// Non-square on purpose (200x400): a square page hides width/height
+    /// mix-ups.
+    #[test]
+    fn pdfium_reports_text_in_user_space_but_renders_the_cropbox() {
+        let pdfium = crate::test_pdfium();
+
+        // MediaBox [50 60 250 460] -> 200x400, origin (50, 60); the optional
+        // CropBox gives a *different* origin so the two can't be confused.
+        let build = |crop: Option<[f32; 4]>| {
+            let mut doc = Document::with_version("1.5");
+            let pages_id = doc.new_object_id();
+            let font = doc.add_object(dictionary! {
+                "Type" => "Font", "Subtype" => "Type1",
+                "BaseFont" => "Helvetica", "Encoding" => "WinAnsiEncoding",
+            });
+            // A *visible* run (no `3 Tr`) at user-space (100, 200), size 24.
+            let content = doc.add_object(Stream::new(
+                Dictionary::new(),
+                b"BT /F1 24 Tf 100 200 Td (Probe) Tj ET\n".to_vec(),
+            ));
+            let mut page_dict = dictionary! {
+                "Type" => "Page",
+                "Parent" => pages_id,
+                "Contents" => content,
+                "Resources" => dictionary! {
+                    "Font" => dictionary! { "F1" => Object::Reference(font) },
+                },
+                "MediaBox" => vec![
+                    Object::Real(50.0), Object::Real(60.0),
+                    Object::Real(250.0), Object::Real(460.0),
+                ],
+            };
+            if let Some([x0, y0, x1, y1]) = crop {
+                page_dict.set("CropBox", vec![
+                    Object::Real(x0), Object::Real(y0),
+                    Object::Real(x1), Object::Real(y1),
+                ]);
+            }
+            let page_id = doc.add_object(Object::Dictionary(page_dict));
+            doc.objects.insert(pages_id, Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![Object::Reference(page_id)],
+                "Count" => Object::Integer(1),
+            }));
+            let catalog_id = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+            doc.trailer.set("Root", catalog_id);
+            let mut out = Vec::new();
+            doc.save_to(&mut out).expect("serialize probe pdf");
+            out
+        };
+
+        // Returns (page_width, page_height, text_left, text_bottom).
+        let measure = |bytes: Vec<u8>| {
+            let doc = pdfium.get()
+                .load_pdf_from_byte_vec(bytes, None)
+                .expect("load probe");
+            let page = doc.pages().get(0).expect("page");
+            let (pw, ph) = (page.width().value, page.height().value);
+            let text = page.text().expect("text");
+            let (mut left, mut bottom) = (f32::INFINITY, f32::INFINITY);
+            for ch in text.chars().iter() {
+                if let Ok(b) = ch.loose_bounds() {
+                    left = left.min(b.left().value);
+                    bottom = bottom.min(b.bottom().value);
+                }
+            }
+            (pw, ph, left, bottom)
+        };
+
+        let (pw, ph, left, bottom) = measure(build(None));
+        assert!((pw - 200.0).abs() < 0.5 && (ph - 400.0).abs() < 0.5, "page size {pw}x{ph}");
+        assert!(
+            (left - 100.0).abs() < 0.5,
+            "text left {left}: extraction is not user space (MediaBox origin leaked in)"
+        );
+        // Baseline 200 less Helvetica's descent at size 24 (24 * 0.211).
+        assert!((bottom - 194.936).abs() < 0.5, "text bottom {bottom}");
+
+        // With a CropBox, the *rendered* page shrinks to it — so OCR word rects
+        // are measured against 180x370 from the CropBox corner — while the
+        // extracted text stays at the same user-space x.
+        let (pw, ph, left, bottom) = measure(build(Some([70.0, 90.0, 250.0, 460.0])));
+        assert!(
+            (pw - 180.0).abs() < 0.5 && (ph - 370.0).abs() < 0.5,
+            "page size {pw}x{ph}: pdfium should render the CropBox"
+        );
+        assert!(
+            (left - 100.0).abs() < 0.5,
+            "text left {left}: extraction is not user space (CropBox origin leaked in)"
+        );
+        assert!((bottom - 194.936).abs() < 0.5, "text bottom {bottom}");
+    }
+
     // ── Pure builder / helpers ──────────────────────────────────────────────
 
     #[test]
