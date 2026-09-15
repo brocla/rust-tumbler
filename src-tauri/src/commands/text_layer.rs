@@ -16,16 +16,20 @@
 //! buffer and the document is marked dirty; the user commits it to disk with
 //! an ordinary Save / Save As. Nothing here touches the file.
 //!
-//! Coordinate note: `OcrWord.rect` is already in PDF user space (points, origin
-//! bottom-left) for the common case of a MediaBox at `[0 0 w h]` with no
-//! `/Rotate`. Pages with a shifted origin or a rotation are *detected and
-//! skipped* in this first cut rather than mis-positioned (see
-//! [`geometry_is_simple`]); the happy path is authored correctly.
+//! Coordinate note: `OcrWord.rect` is in points with a bottom-left origin, but
+//! measured from the corner of the box pdfium *rendered* (the CropBox), because
+//! that is the bitmap the OCR engine read. A content stream is authored in user
+//! space. The two coincide only when the render box sits at `[0 0 w h]`; on a
+//! deskewed scan every page carries a small non-zero origin, so authoring adds
+//! the render box's origin to each word (issue #129). `/Rotate` needs more than
+//! a translation — the glyphs must turn, not just their boxes — so rotated pages
+//! are still *detected and skipped* rather than mis-positioned.
 
 use crate::commands::ocr::{
-    cache_get, ocr_page_into_cache, ocr_words_to_lines, OcrCache, OcrEngine, OcrLine, OcrProgress,
+    cache_get, ocr_page_into_cache, ocr_words_to_line_groups, OcrCache, OcrEngine, OcrProgress,
     OcrWord,
 };
+use crate::commands::page_space::PageSpace;
 use crate::commands::text::page_text_in_document_order;
 use crate::error::AppError;
 use crate::state::{lock_mutex, AppState, DocEntry};
@@ -55,11 +59,11 @@ const HELVETICA_DESCENT_RATIO: f32 = 0.211;
 pub struct AddTextLayerResult {
     /// Pages that received an invisible OCR text layer.
     pub pages_written: u32,
-    /// Text-less pages that were OCR'd but left un-searchable because their
-    /// geometry (a `/Rotate` or a shifted MediaBox origin) isn't yet supported
-    /// by the layer author. Surfaced so the user is told, rather than silently
-    /// seeing a lower count. (Distinct from a scanned page on which OCR simply
-    /// recognized no encodable text — a rare case not separately counted here.)
+    /// Text-less pages that were OCR'd but left un-searchable because the
+    /// layer author can't yet place text on a rotated page. Surfaced so the
+    /// user is told, rather than silently seeing a lower count. (Distinct from
+    /// a scanned page on which OCR simply recognized no encodable text — a rare
+    /// case not separately counted here.)
     pub pages_skipped_unsupported_geometry: u32,
     pub cancelled: bool,
 }
@@ -201,76 +205,123 @@ pub fn build_invisible_text_stream(words: &[OcrWord], font_name: &str) -> Result
 
 /// Builds the invisible-text content stream for one page's worth of OCR words.
 ///
-/// Words are grouped into visual **lines** with the same [`ocr_words_to_lines`]
-/// pass the ephemeral "Make Searchable" overlay uses, and each line is written
-/// as **one continuous run** — a single `BT … ET` block in render mode 3, with
-/// one font size and one horizontal-scale (`Tz`) stretching the whole line to
-/// its box width. Emitting per line (not per word) is what keeps a reader's
-/// selection and search highlight smooth across the line, with uniform spacing,
-/// instead of jumping between independently-scaled per-word runs. Each `BT…ET`
-/// block isolates *text* state; isolation from the page's *graphics* state
-/// (a leftover CTM or clip) is handled where this stream is appended — see
-/// [`append_content_stream`], which wraps the existing content in `q`/`Q`.
+/// Words are grouped into visual **lines** with the same
+/// [`ocr_words_to_line_groups`] pass the ephemeral "Make Searchable" overlay
+/// uses, and each line becomes one `BT … ET` text object in render mode 3 —
+/// but every word inside it is positioned at **its own box**, with its own
+/// horizontal scale (`Tz`) and an absolute `Tm`.
 ///
-/// Font size and baseline are derived from the line box and Helvetica's loose
-/// metrics so the run's text-extraction box coincides with the OCR box: with
-/// `fs = height / (ascent + descent)` the box height matches, and placing the
-/// baseline at `box_bottom + descent·fs` makes the box bottom sit on the OCR
-/// box bottom (the descent hangs down to exactly the box bottom, not below it).
+/// Placing words individually is not a refinement, it is the difference
+/// between a layer that lands on the ink and one that doesn't. A line-wide
+/// run positions only its two ends: the text between them is laid out by
+/// stretching a single-space-joined string uniformly, so on justified text —
+/// where the real word gaps vary — a mid-line word's glyphs drift from the
+/// ink they belong to (measured at ~47pt on a 200pt page by
+/// `mid_line_words_land_on_their_own_boxes`). The error is purely horizontal,
+/// because the vertical metrics below come from the line box and are right
+/// either way, which makes it easy to mistake for a page-offset problem.
+///
+/// Keeping the whole line in one `BT … ET` is what preserves the smooth
+/// selection and search highlighting of "Make Searchable": readers group
+/// selection by text object, so a line stays one flowing span even though its
+/// words are individually placed.
+///
+/// Font size and baseline are derived from the **line's** union box and
+/// Helvetica's loose metrics so the run's text-extraction box coincides with
+/// the OCR box: with `fs = height / (ascent + descent)` the box height
+/// matches, and placing the baseline at `box_bottom + descent·fs` makes the
+/// box bottom sit on the OCR box bottom (the descent hangs down to exactly the
+/// box bottom, not below it). Taking them per line rather than per word keeps
+/// one baseline across the line where the engine reported slightly different
+/// word heights.
+///
+/// Each `BT…ET` block isolates *text* state; isolation from the page's
+/// *graphics* state (a leftover CTM or clip) is handled where this stream is
+/// appended — see [`append_content_stream`], which wraps the existing content
+/// in `q`/`Q`.
 ///
 /// Returns `Ok(vec![])` when no line has representable text (e.g. a pure-CJK
 /// page) — a legitimate "nothing to write". An encoding failure is returned as
 /// `Err` rather than collapsed into an empty stream, so the caller can't mistake
 /// a real error for an empty page and silently drop the layer.
 ///
-/// With `per_word` set, every OCR word becomes its own run at its own (tight) box
-/// instead of being grouped into lines. Redaction (issue #1) needs this for
-/// its re-OCR of flattened pages: a line-unioned run would be Tz-stretched
-/// across the burned gap where a mid-line word was redacted, positioning
-/// invisible glyphs *inside* the redaction region — verification would then
-/// (rightly) refuse to certify the output. Per-word runs cannot span a gap,
-/// so the redacted areas stay text-free. The cost — selection highlights that
-/// step per word instead of flowing per line — is confined to redacted pages.
+/// With `per_word` set, every word additionally becomes its own text object
+/// rather than sharing the line's. Redaction (issue #1) uses this for its
+/// re-OCR of flattened pages: per-word *placement* already keeps glyphs out of
+/// a burned mid-line gap, and isolating the text objects too means nothing
+/// about that guarantee depends on how a reader groups a shared object. The
+/// cost — selection that steps per word instead of flowing per line — stays
+/// confined to redacted pages.
 pub(crate) fn build_invisible_text_stream_runs(
     words: &[OcrWord],
     font_name: &str,
     per_word: bool,
 ) -> Result<Vec<u8>, AppError> {
-    let runs: Vec<OcrLine> = if per_word {
-        words
-            .iter()
-            .map(|w| OcrLine { text: w.text.clone(), rect: w.rect.clone() })
-            .collect()
+    // Group into visual lines but keep each word's own box: the line supplies
+    // the shared vertical metrics, each word supplies its own horizontal
+    // placement. `per_word` makes every word its own group, so it also gets
+    // its own text object.
+    let groups: Vec<Vec<&OcrWord>> = if per_word {
+        words.iter().map(|w| vec![w]).collect()
     } else {
-        ocr_words_to_lines(words)
+        ocr_words_to_line_groups(words)
     };
-    let mut ops: Vec<Operation> = Vec::new();
-    for line in runs {
-        let encoded = encode_for_font(&line.text);
-        if encoded.is_empty() {
-            continue; // nothing representable (e.g. a pure-CJK line)
-        }
-        let box_height = line.rect.height.max(1.0);
-        let font_size = box_height / (HELVETICA_ASCENT_RATIO + HELVETICA_DESCENT_RATIO);
-        let baseline_y = line.rect.y + HELVETICA_DESCENT_RATIO * font_size;
-        let h_scale = horizontal_scale_percent(&encoded, font_size, line.rect.width);
 
-        ops.push(Operation::new("BT", vec![]));
-        ops.push(Operation::new(
-            "Tf",
-            vec![Object::Name(font_name.as_bytes().to_vec()), Object::Real(font_size)],
-        ));
-        ops.push(Operation::new("Tr", vec![Object::Integer(3)])); // invisible
-        ops.push(Operation::new("Tz", vec![Object::Real(h_scale)]));
-        ops.push(Operation::new(
-            "Td",
-            vec![Object::Real(line.rect.x), Object::Real(baseline_y)],
-        ));
-        ops.push(Operation::new(
-            "Tj",
-            vec![Object::String(encoded, StringFormat::Literal)],
-        ));
-        ops.push(Operation::new("ET", vec![]));
+    let mut ops: Vec<Operation> = Vec::new();
+    for group in groups {
+        // Vertical metrics from the line's union box, so every word on the
+        // line shares one baseline and one size even where the OCR engine
+        // reported slightly different heights per word.
+        let bottom = group.iter().map(|w| w.rect.y).fold(f32::INFINITY, f32::min);
+        let top = group
+            .iter()
+            .map(|w| w.rect.y + w.rect.height)
+            .fold(f32::NEG_INFINITY, f32::max);
+        let box_height = (top - bottom).max(1.0);
+        let font_size = box_height / (HELVETICA_ASCENT_RATIO + HELVETICA_DESCENT_RATIO);
+        let baseline_y = bottom + HELVETICA_DESCENT_RATIO * font_size;
+
+        // Opened lazily: a group whose every word is unrepresentable (a
+        // pure-CJK line) must emit no text object at all, not an empty one.
+        let mut opened = false;
+        for word in group {
+            let encoded = encode_for_font(&word.text);
+            if encoded.is_empty() {
+                continue;
+            }
+            if !opened {
+                ops.push(Operation::new("BT", vec![]));
+                ops.push(Operation::new(
+                    "Tf",
+                    vec![Object::Name(font_name.as_bytes().to_vec()), Object::Real(font_size)],
+                ));
+                ops.push(Operation::new("Tr", vec![Object::Integer(3)])); // invisible
+                opened = true;
+            }
+            // Each word is stretched to its *own* box and positioned at its
+            // own origin with an absolute `Tm` (not a relative `Td`, which
+            // would accumulate across the line).
+            let h_scale = horizontal_scale_percent(&encoded, font_size, word.rect.width);
+            ops.push(Operation::new("Tz", vec![Object::Real(h_scale)]));
+            ops.push(Operation::new(
+                "Tm",
+                vec![
+                    Object::Real(1.0),
+                    Object::Real(0.0),
+                    Object::Real(0.0),
+                    Object::Real(1.0),
+                    Object::Real(word.rect.x),
+                    Object::Real(baseline_y),
+                ],
+            ));
+            ops.push(Operation::new(
+                "Tj",
+                vec![Object::String(encoded, StringFormat::Literal)],
+            ));
+        }
+        if opened {
+            ops.push(Operation::new("ET", vec![]));
+        }
     }
     Content { operations: ops }
         .encode()
@@ -278,13 +329,6 @@ pub(crate) fn build_invisible_text_stream_runs(
 }
 
 // ── Page geometry ───────────────────────────────────────────────────────────
-
-/// Whether a page's coordinate space matches the one `OcrWord.rect` assumes:
-/// MediaBox origin at (0,0) and no rotation. Rotated/offset pages are skipped
-/// in this cut so their layer is never mis-placed.
-fn geometry_is_simple(origin_x: f32, origin_y: f32, rotate: i64) -> bool {
-    origin_x.abs() < 0.5 && origin_y.abs() < 0.5 && rotate.rem_euclid(360) == 0
-}
 
 /// Resolves a possibly-inherited page attribute, following `/Parent` up the page
 /// tree and dereferencing an indirect value. Returns an owned clone.
@@ -301,28 +345,6 @@ fn inherited_value(doc: &Document, page_id: ObjectId, key: &[u8]) -> Option<Obje
         current = dict.get(b"Parent").ok()?.as_reference().ok()?;
     }
     None
-}
-
-fn object_as_f32(obj: &Object) -> f32 {
-    match obj {
-        Object::Integer(i) => *i as f32,
-        Object::Real(r) => *r,
-        _ => 0.0,
-    }
-}
-
-/// Reads a page's effective (MediaBox origin, /Rotate) for the simple-geometry
-/// check. Missing values default to origin (0,0) and rotation 0.
-fn page_geometry(doc: &Document, page_id: ObjectId) -> (f32, f32, i64) {
-    let (origin_x, origin_y) = match inherited_value(doc, page_id, b"MediaBox") {
-        Some(Object::Array(a)) if a.len() >= 2 => (object_as_f32(&a[0]), object_as_f32(&a[1])),
-        _ => (0.0, 0.0),
-    };
-    let rotate = match inherited_value(doc, page_id, b"Rotate") {
-        Some(Object::Integer(i)) => i,
-        _ => 0,
-    };
-    (origin_x, origin_y, rotate)
 }
 
 /// Builds the page's Resources dictionary with our OCR font added, preserving
@@ -541,20 +563,37 @@ pub(crate) fn add_text_layer_impl_filtered(
         let mut font_id: Option<ObjectId> = None;
 
         for page_num in textless_pages {
-            let Some(words) = cache_get(&cache, &doc_id, page_num) else {
+            let Some(mut words) = cache_get(&cache, &doc_id, page_num) else {
                 continue;
             };
             let Some(&page_id) = pages.get(&page_num) else {
                 continue;
             };
 
-            // Skip pages whose coordinate space doesn't match what OcrWord.rect
-            // assumes; better no layer than a mis-placed one. Count them so the
-            // user is told these pages were left un-searchable.
-            let (ox, oy, rotate) = page_geometry(&d, page_id);
-            if !geometry_is_simple(ox, oy, rotate) {
+            // Rotation still can't be authored: unlike a flattened polyline,
+            // rotated text isn't handled by mapping its corners — the glyphs
+            // have to turn too, which needs a text matrix rather than the bare
+            // `Td` below. Better no layer than a mis-placed one; count it so
+            // the user is told the page was left un-searchable.
+            let space = PageSpace::of(&d, page_id);
+            if space.rotate() != 0 {
                 pages_skipped_unsupported_geometry += 1;
                 continue;
+            }
+
+            // `OcrWord.rect` is measured from the corner of the box pdfium
+            // *rendered* (the CropBox), while a content stream is authored in
+            // user space. On a page whose box origin isn't (0,0) — every page
+            // of a deskewed scan — the two differ by exactly that origin, so
+            // shift the words onto it (issue #129). Both halves of this claim
+            // are pinned by
+            // `pdfium_reports_text_in_user_space_but_renders_the_cropbox`.
+            let [ox, oy] = space.origin();
+            if ox != 0.0 || oy != 0.0 {
+                for w in &mut words {
+                    w.rect.x += ox;
+                    w.rect.y += oy;
+                }
             }
 
             let stream_bytes = build_invisible_text_stream_runs(&words, FONT_NAME, per_word_runs)?;
@@ -629,6 +668,7 @@ pub(crate) fn add_text_layer_impl_filtered(
 mod tests {
     use super::*;
     use crate::commands::text::TextRect;
+    use pdfium_render::prelude::{PdfSearchDirection, PdfSearchOptions};
     use crate::state::DocEntry;
     use std::sync::atomic::AtomicBool;
 
@@ -757,6 +797,118 @@ mod tests {
         (left, bottom, right, top)
     }
 
+    /// Pins the coordinate space pdfium's text extraction reports on a page
+    /// whose box origin is *not* `(0,0)` — the assumption the offset fix rests
+    /// on (issue #129).
+    ///
+    /// Every other placement test here uses a `[0 0 w h]` MediaBox, where user
+    /// space and render space coincide, so nothing else can tell them apart.
+    /// Measured here:
+    ///
+    /// - `loose_bounds()` reports **user space**, unshifted by the MediaBox or
+    ///   CropBox origin — a run authored at user-space `(100, 200)` reads back
+    ///   at `x = 100` on both pages below.
+    /// - `page.width()/height()` — what `bitmap_rect_to_pdf_points` divides by
+    ///   to place OCR words — tracks the **CropBox** (200x400 vs 180x370).
+    ///
+    /// So an OCR word's rect is relative to the **CropBox** corner while the
+    /// content stream it is written into is user space, and the correction
+    /// between them is the CropBox origin. That is why authoring goes through
+    /// `PageSpace` (which prefers CropBox) rather than reading the MediaBox.
+    ///
+    /// Non-square on purpose (200x400): a square page hides width/height
+    /// mix-ups.
+    #[test]
+    fn pdfium_reports_text_in_user_space_but_renders_the_cropbox() {
+        let pdfium = crate::test_pdfium();
+
+        // MediaBox [50 60 250 460] -> 200x400, origin (50, 60); the optional
+        // CropBox gives a *different* origin so the two can't be confused.
+        let build = |crop: Option<[f32; 4]>| {
+            let mut doc = Document::with_version("1.5");
+            let pages_id = doc.new_object_id();
+            let font = doc.add_object(dictionary! {
+                "Type" => "Font", "Subtype" => "Type1",
+                "BaseFont" => "Helvetica", "Encoding" => "WinAnsiEncoding",
+            });
+            // A *visible* run (no `3 Tr`) at user-space (100, 200), size 24.
+            let content = doc.add_object(Stream::new(
+                Dictionary::new(),
+                b"BT /F1 24 Tf 100 200 Td (Probe) Tj ET\n".to_vec(),
+            ));
+            let mut page_dict = dictionary! {
+                "Type" => "Page",
+                "Parent" => pages_id,
+                "Contents" => content,
+                "Resources" => dictionary! {
+                    "Font" => dictionary! { "F1" => Object::Reference(font) },
+                },
+                "MediaBox" => vec![
+                    Object::Real(50.0), Object::Real(60.0),
+                    Object::Real(250.0), Object::Real(460.0),
+                ],
+            };
+            if let Some([x0, y0, x1, y1]) = crop {
+                page_dict.set("CropBox", vec![
+                    Object::Real(x0), Object::Real(y0),
+                    Object::Real(x1), Object::Real(y1),
+                ]);
+            }
+            let page_id = doc.add_object(Object::Dictionary(page_dict));
+            doc.objects.insert(pages_id, Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![Object::Reference(page_id)],
+                "Count" => Object::Integer(1),
+            }));
+            let catalog_id = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+            doc.trailer.set("Root", catalog_id);
+            let mut out = Vec::new();
+            doc.save_to(&mut out).expect("serialize probe pdf");
+            out
+        };
+
+        // Returns (page_width, page_height, text_left, text_bottom).
+        let measure = |bytes: Vec<u8>| {
+            let doc = pdfium.get()
+                .load_pdf_from_byte_vec(bytes, None)
+                .expect("load probe");
+            let page = doc.pages().get(0).expect("page");
+            let (pw, ph) = (page.width().value, page.height().value);
+            let text = page.text().expect("text");
+            let (mut left, mut bottom) = (f32::INFINITY, f32::INFINITY);
+            for ch in text.chars().iter() {
+                if let Ok(b) = ch.loose_bounds() {
+                    left = left.min(b.left().value);
+                    bottom = bottom.min(b.bottom().value);
+                }
+            }
+            (pw, ph, left, bottom)
+        };
+
+        let (pw, ph, left, bottom) = measure(build(None));
+        assert!((pw - 200.0).abs() < 0.5 && (ph - 400.0).abs() < 0.5, "page size {pw}x{ph}");
+        assert!(
+            (left - 100.0).abs() < 0.5,
+            "text left {left}: extraction is not user space (MediaBox origin leaked in)"
+        );
+        // Baseline 200 less Helvetica's descent at size 24 (24 * 0.211).
+        assert!((bottom - 194.936).abs() < 0.5, "text bottom {bottom}");
+
+        // With a CropBox, the *rendered* page shrinks to it — so OCR word rects
+        // are measured against 180x370 from the CropBox corner — while the
+        // extracted text stays at the same user-space x.
+        let (pw, ph, left, bottom) = measure(build(Some([70.0, 90.0, 250.0, 460.0])));
+        assert!(
+            (pw - 180.0).abs() < 0.5 && (ph - 370.0).abs() < 0.5,
+            "page size {pw}x{ph}: pdfium should render the CropBox"
+        );
+        assert!(
+            (left - 100.0).abs() < 0.5,
+            "text left {left}: extraction is not user space (CropBox origin leaked in)"
+        );
+        assert!((bottom - 194.936).abs() < 0.5, "text bottom {bottom}");
+    }
+
     // ── Pure builder / helpers ──────────────────────────────────────────────
 
     #[test]
@@ -775,25 +927,91 @@ mod tests {
         assert!(build_invisible_text_stream(&[], FONT_NAME).expect("encode").is_empty());
     }
 
-    /// Words sharing a baseline become a single continuous line run (one BT…ET,
-    /// text joined with spaces), not one run per word — this is what preserves
-    /// the smooth, uniform highlighting of "Make Searchable".
+    /// Words sharing a baseline go into a single `BT…ET` text object — that is
+    /// what preserves the smooth, uniform selection highlighting of "Make
+    /// Searchable" — while each word is shown separately so it can be placed
+    /// at its own box.
     #[test]
-    fn words_on_one_line_form_a_single_run() {
+    fn words_on_one_line_share_one_text_object_but_are_shown_separately() {
         let words = vec![
             pt_word("Hello", 10.0, 100.0, 30.0, 12.0),
             pt_word("World", 50.0, 100.0, 30.0, 12.0),
         ];
         let bytes = build_invisible_text_stream(&words, FONT_NAME).expect("encode");
         let content = Content::decode(&bytes).expect("decode content");
-        let runs = content
-            .operations
-            .iter()
-            .filter(|op| op.operator == "BT")
-            .count();
-        assert_eq!(runs, 1, "two words on one line should be one run, got {runs}");
+        let count = |op_name: &str| {
+            content.operations.iter().filter(|op| op.operator == op_name).count()
+        };
+        assert_eq!(count("BT"), 1, "two words on one line should be one text object");
+        assert_eq!(count("ET"), 1);
+        // One show + one absolute placement per word.
+        assert_eq!(count("Tj"), 2, "each word is shown separately");
+        assert_eq!(count("Tm"), 2, "each word gets its own absolute placement");
+
         let s = String::from_utf8_lossy(&bytes);
-        assert!(s.contains("Hello World"), "line text should be joined: {s}");
+        assert!(s.contains("Hello") && s.contains("World"), "missing words: {s}");
+    }
+
+    /// Showing words separately must not cost the reader its word breaks: the
+    /// joined string is no longer written into the file, so extraction has to
+    /// recover the space from the gap between the two placements. pdfium does,
+    /// and this pins it — a layer that copies out as "HelloWorld" would be a
+    /// quiet regression in every paste.
+    #[test]
+    fn separately_placed_words_still_extract_with_a_space() {
+        let pdfium = crate::test_pdfium();
+        let bytes = boxed_page_bytes([0.0, 0.0, 200.0, 400.0], None, 0, b"");
+        let words = vec![
+            OcrWord {
+                text: "Hello".to_string(),
+                rect: TextRect { x: 10.0, y: 300.0, width: 30.0, height: 12.0 },
+            },
+            OcrWord {
+                text: "World".to_string(),
+                rect: TextRect { x: 150.0, y: 300.0, width: 30.0, height: 12.0 },
+            },
+        ];
+        let engine: Arc<dyn OcrEngine> = Arc::new(FakeOcrEngine { words: words.clone() });
+        let state = AppState::new(pdfium.get(), None).with_ocr_engine(engine.clone());
+        state.set_ocr_words("doc1", 1, words);
+        let document = pdfium
+            .get()
+            .load_pdf_from_byte_vec(bytes.clone(), None)
+            .expect("load");
+        state
+            .insert_document(
+                "doc1".to_string(),
+                DocEntry {
+                    page_cache: Vec::new(),
+                    document,
+                    file_path: String::new(),
+                    buffer: bytes,
+                    dirty: false,
+                    protection: crate::state::Protection::Plaintext,
+                    linearized: false,
+                },
+            )
+            .expect("insert");
+        let (_, out) = add_text_layer_impl(
+            |_, _| {},
+            state.get_document("doc1").expect("get"),
+            "doc1".to_string(),
+            engine,
+            state.ocr_cache_handle(),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .expect("add layer");
+
+        let doc = pdfium
+            .get()
+            .load_pdf_from_byte_vec(out.expect("edited bytes"), None)
+            .expect("reopen");
+        let page = doc.pages().get(0).expect("page");
+        let text = page.text().expect("text");
+        assert_eq!(
+            crate::commands::text::page_text_in_document_order(&text),
+            "Hello World"
+        );
     }
 
     #[test]
@@ -802,15 +1020,6 @@ mod tests {
         let bytes = build_invisible_text_stream(&[pt_word("日本語", 0.0, 0.0, 30.0, 10.0)], FONT_NAME)
             .expect("encode");
         assert!(bytes.is_empty(), "CJK-only word should be dropped under WinAnsi");
-    }
-
-    #[test]
-    fn geometry_simple_only_for_unrotated_origin_zero() {
-        assert!(geometry_is_simple(0.0, 0.0, 0));
-        assert!(geometry_is_simple(0.0, 0.0, 360));
-        assert!(!geometry_is_simple(10.0, 0.0, 0), "offset origin is not simple");
-        assert!(!geometry_is_simple(0.0, 0.0, 90), "rotation is not simple");
-        assert!(!geometry_is_simple(0.0, 0.0, 270));
     }
 
     // ── B9: Helvetica width table / horizontal scaling ──────────────────────
@@ -1254,67 +1463,316 @@ mod tests {
         std::fs::remove_file(&src).ok();
     }
 
-    /// A document with one plain page and one offset-origin page: both are
-    /// text-less and OCR'd in Phase A, but the offset page fails the geometry
-    /// guard in Phase B. The result must report it (pages_skipped) rather than
-    /// silently drop it, so the UI can tell the user. Offset origin is used
-    /// instead of /Rotate because it trips the same guard without needing
-    /// pdfium to render a rotated page.
+    /// Times Add Text Layer over a real large scan, with recognition taken out
+    /// of the picture: the OCR cache is pre-seeded for every page, so the run
+    /// measures the text-extraction scan plus the lopdf parse / author /
+    /// reserialize that issue #129 made reachable on such a file for the first
+    /// time. Recognition itself is unchanged by that fix and dominates the
+    /// wall clock (seconds per page), so it would only hide what is being
+    /// measured here.
+    ///
+    /// Ignored by default -- it needs a file this repo can't carry. Run with:
+    ///
+    /// ```text
+    /// TUMBLER_BENCH_PDF=C:\path\to\scan.pdf cargo test --lib \
+    ///     bench_add_text_layer_on_a_large_scan -- --ignored --nocapture
+    /// ```
     #[test]
-    fn offset_page_is_counted_as_skipped() {
+    #[ignore = "needs a large scanned PDF via TUMBLER_BENCH_PDF"]
+    fn bench_add_text_layer_on_a_large_scan() {
+        let Ok(path) = std::env::var("TUMBLER_BENCH_PDF") else {
+            panic!("set TUMBLER_BENCH_PDF to a scanned PDF path");
+        };
         let pdfium = crate::test_pdfium();
-
-        let src = temp_path("src.pdf");
-        {
-            let mut doc = Document::with_version("1.5");
-            let pages_id = doc.new_object_id();
-            let empty = || Stream::new(Dictionary::new(), Vec::new());
-            let c0 = doc.add_object(empty());
-            let c1 = doc.add_object(empty());
-            // Page 1: normal origin (0,0) → gets a layer.
-            let p0 = doc.add_object(dictionary! {
-                "Type" => "Page",
-                "Parent" => pages_id,
-                "Contents" => c0,
-                "MediaBox" => vec![
-                    Object::Integer(0), Object::Integer(0),
-                    Object::Integer(200), Object::Integer(200),
-                ],
-            });
-            // Page 2: shifted origin (50,50) → skipped by the geometry guard.
-            let p1 = doc.add_object(dictionary! {
-                "Type" => "Page",
-                "Parent" => pages_id,
-                "Contents" => c1,
-                "MediaBox" => vec![
-                    Object::Integer(50), Object::Integer(50),
-                    Object::Integer(250), Object::Integer(250),
-                ],
-            });
-            doc.objects.insert(
-                pages_id,
-                Object::Dictionary(dictionary! {
-                    "Type" => "Pages",
-                    "Kids" => vec![Object::Reference(p0), Object::Reference(p1)],
-                    "Count" => Object::Integer(2),
-                }),
-            );
-            let catalog_id = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
-            doc.trailer.set("Root", catalog_id);
-            doc.save(&src).expect("write two-page pdf");
-        }
-
-        let engine: Arc<dyn OcrEngine> = Arc::new(FakeOcrEngine { words: vec![px_word("Scanned")] });
+        let bytes = std::fs::read(&path).expect("read bench pdf");
+        let engine: Arc<dyn OcrEngine> = Arc::new(FakeOcrEngine { words: Vec::new() });
         let state = AppState::new(pdfium.get(), None).with_ocr_engine(engine.clone());
-        let document = pdfium.get().load_pdf_from_file(&src, None).expect("load src");
+
+        let document = pdfium.get()
+            .load_pdf_from_byte_vec(bytes.clone(), None)
+            .expect("load bench pdf");
+        let page_count = document.pages().len() as u32;
         state
-            .insert_document("doc1".to_string(), DocEntry { page_cache: Vec::new(), document, file_path: src.clone(), buffer: std::fs::read(&src).expect("read src"), dirty: false, protection: crate::state::Protection::Plaintext, linearized: false })
+            .insert_document(
+                "bench".to_string(),
+                DocEntry {
+                    page_cache: Vec::new(),
+                    document,
+                    file_path: path.clone(),
+                    buffer: bytes.clone(),
+                    dirty: false,
+                    protection: crate::state::Protection::Plaintext,
+                    linearized: false,
+                },
+            )
             .expect("insert");
 
-        let entry = state.get_document("doc1").expect("get");
+        // Seed every page so Phase A returns from cache instead of rendering
+        // and recognizing.
+        for page in 1..=page_count {
+            state.set_ocr_words(
+                "bench",
+                page,
+                vec![OcrWord {
+                    text: "Scanned line of text".to_string(),
+                    rect: TextRect { x: 40.0, y: 300.0, width: 300.0, height: 14.0 },
+                }],
+            );
+        }
+
+        let start = std::time::Instant::now();
+        let (result, edited) = add_text_layer_impl(
+            |_, _| {},
+            state.get_document("bench").expect("get"),
+            "bench".to_string(),
+            engine,
+            state.ocr_cache_handle(),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .expect("add layer");
+        let elapsed = start.elapsed();
+
+        println!(
+            "{page_count} pages, {:.1} MB in -> written {}, skipped(rotated) {}, \
+             {:.1} MB out, {:.2}s (excludes OCR recognition)",
+            bytes.len() as f64 / 1_048_576.0,
+            result.pages_written,
+            result.pages_skipped_unsupported_geometry,
+            edited.as_ref().map_or(0.0, |b| b.len() as f64 / 1_048_576.0),
+            elapsed.as_secs_f64(),
+        );
+    }
+
+    /// Diagnostic for the "search highlight sits beside the word" report:
+    /// authors a layer over one page of a real scan with the real Windows OCR
+    /// engine, then prints, for every hit of a query, the OCR word box the ink
+    /// actually occupies next to the rectangle pdfium reports for the match.
+    ///
+    /// Ignored -- needs a language pack and a file the repo cannot carry:
+    ///
+    /// ```text
+    /// TUMBLER_BENCH_PDF=...\\scan.pdf TUMBLER_DIAG_PAGE=182 \
+    ///   TUMBLER_DIAG_QUERY=Heade cargo test --lib diag_search_highlight_vs_ocr_box \
+    ///   -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "needs a large scanned PDF and a Windows OCR language pack"]
+    fn diag_search_highlight_vs_ocr_box() {
+        let path = std::env::var("TUMBLER_BENCH_PDF").expect("TUMBLER_BENCH_PDF");
+        let page_1based: u32 = std::env::var("TUMBLER_DIAG_PAGE")
+            .expect("TUMBLER_DIAG_PAGE")
+            .parse()
+            .expect("page number");
+        let query = std::env::var("TUMBLER_DIAG_QUERY").unwrap_or_else(|_| "Heade".to_string());
+
+        let pdfium = crate::test_pdfium();
+        let bytes = std::fs::read(&path).expect("read pdf");
+        // The real engine, not a fake: the whole question is what the engine
+        // reports versus where the layer puts it.
+        let engine: Arc<dyn OcrEngine> = Arc::new(crate::commands::ocr::WindowsOcrEngine::new());
+        let state = AppState::new(pdfium.get(), None).with_ocr_engine(engine.clone());
+        let document = pdfium.get()
+            .load_pdf_from_byte_vec(bytes.clone(), None)
+            .expect("load pdf");
+        state
+            .insert_document(
+                "diag".to_string(),
+                DocEntry {
+                    page_cache: Vec::new(),
+                    document,
+                    file_path: path.clone(),
+                    buffer: bytes,
+                    dirty: false,
+                    protection: crate::state::Protection::Plaintext,
+                    linearized: false,
+                },
+            )
+            .expect("insert");
+
+        let only: std::collections::HashSet<u32> = [page_1based].into_iter().collect();
+        let (result, edited) = add_text_layer_impl_filtered(
+            |_, _| {},
+            state.get_document("diag").expect("get"),
+            "diag".to_string(),
+            engine,
+            state.ocr_cache_handle(),
+            Arc::new(AtomicBool::new(false)),
+            Some(&only),
+            false,
+        )
+        .expect("add layer");
+        println!("pages_written = {}", result.pages_written);
+
+        let words = state.get_ocr_words("diag", page_1based).unwrap_or_default();
+        println!("OCR words on page: {}", words.len());
+        for w in words.iter().filter(|w| w.text.contains(&query)) {
+            println!(
+                "  OCR word {:?}: x {:.1}..{:.1}  (w {:.1})  y {:.1}",
+                w.text,
+                w.rect.x,
+                w.rect.x + w.rect.width,
+                w.rect.width,
+                w.rect.y,
+            );
+        }
+
+        let doc = pdfium.get()
+            .load_pdf_from_byte_vec(edited.expect("edited bytes"), None)
+            .expect("reopen");
+        let page = doc.pages().get(page_1based as i32 - 1).expect("page");
+        let (ox, oy) = crate::commands::text::page_origin(&page);
+        println!("page origin = ({ox:.2}, {oy:.2})");
+        let text = page.text().expect("text");
+        let options = PdfSearchOptions::new();
+        let search = text.search(&query, &options).expect("search");
+
+        // Each hit is paired with the OCR word it should be sitting on: same
+        // line (y within half a line) and overlapping horizontally. The delta
+        // that matters is the *left* edge -- a hit covering only part of a word
+        // ("Heade" inside "Heade's") legitimately stops short on the right.
+        let mut worst: f32 = 0.0;
+        for (i, seg) in search.iter(PdfSearchDirection::SearchForward).enumerate() {
+            let (mut left, mut right, mut bottom) =
+                (f32::INFINITY, f32::NEG_INFINITY, f32::INFINITY);
+            let mut chars = String::new();
+            for s in seg.iter() {
+                let b = s.bounds();
+                left = left.min(b.left().value);
+                right = right.max(b.right().value);
+                bottom = bottom.min(b.bottom().value);
+                chars.push_str(&s.text());
+            }
+            // Into the render space the OCR cache speaks.
+            let (rl, rr, rb) = (left - ox, right - ox, bottom - oy);
+
+            // Pick the candidate with the largest horizontal overlap, not the
+            // first one found: neighbouring words on an adjacent line overlap
+            // the y test and would otherwise be paired, reporting a placement
+            // error that is really a pairing error.
+            let paired = words
+                .iter()
+                .filter(|w| (w.rect.y - rb).abs() < w.rect.height * 0.5)
+                .map(|w| {
+                    let overlap =
+                        (rr.min(w.rect.x + w.rect.width) - rl.max(w.rect.x)).max(0.0);
+                    (w, overlap)
+                })
+                .filter(|(_, overlap)| *overlap > 0.0)
+                .max_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|(w, _)| w);
+            match paired {
+                Some(w) => {
+                    let d = rl - w.rect.x;
+                    worst = worst.max(d.abs());
+                    println!(
+                        "  hit {i:2} {:?} render x {:.1}..{:.1}  <-  OCR {:?} x {:.1}..{:.1}  \
+                         delta_left {:+.2}",
+                        chars, rl, rr, w.text, w.rect.x, w.rect.x + w.rect.width, d,
+                    );
+                }
+                None => println!("  hit {i:2} {chars:?} render x {rl:.1}..{rr:.1}  <-  (no OCR word paired)"),
+            }
+        }
+        println!("worst left-edge delta: {worst:.2} pt");
+    }
+
+    /// Serializes a one-page PDF with an explicit `/MediaBox`, optional
+    /// `/CropBox` and `/Rotate`, the given content stream, and a Helvetica
+    /// `/F1` the content may use. Returned as bytes so a test can build a
+    /// `DocEntry` without a temp file.
+    ///
+    /// `crate::geometry_page_bytes` covers rotation and cropping but always
+    /// puts the MediaBox at `[0 0 w h]`; the offset-origin pages this module
+    /// has to place text on (issue #129) need the origin itself moved.
+    fn boxed_page_bytes(
+        media: [f32; 4],
+        crop: Option<[f32; 4]>,
+        rotate: i64,
+        content: &[u8],
+    ) -> Vec<u8> {
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        let font = doc.add_object(dictionary! {
+            "Type" => "Font", "Subtype" => "Type1",
+            "BaseFont" => "Helvetica", "Encoding" => "WinAnsiEncoding",
+        });
+        let content_id = doc.add_object(Stream::new(Dictionary::new(), content.to_vec()));
+        let rect = |[x0, y0, x1, y1]: [f32; 4]| {
+            vec![Object::Real(x0), Object::Real(y0), Object::Real(x1), Object::Real(y1)]
+        };
+        let mut page_dict = dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "Contents" => content_id,
+            "Resources" => dictionary! {
+                "Font" => dictionary! { "F1" => Object::Reference(font) },
+            },
+            "MediaBox" => rect(media),
+        };
+        if let Some(c) = crop {
+            page_dict.set("CropBox", rect(c));
+        }
+        if rotate != 0 {
+            page_dict.set("Rotate", Object::Integer(rotate));
+        }
+        let page_id = doc.add_object(Object::Dictionary(page_dict));
+        doc.objects.insert(pages_id, Object::Dictionary(dictionary! {
+            "Type" => "Pages",
+            "Kids" => vec![Object::Reference(page_id)],
+            "Count" => Object::Integer(1),
+        }));
+        let catalog_id = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        doc.trailer.set("Root", catalog_id);
+        let mut out = Vec::new();
+        doc.save_to(&mut out).expect("serialize page bytes");
+        out
+    }
+
+    /// Runs Add Text Layer over a one-page document built from `page_bytes`,
+    /// with the OCR cache seeded to exactly `word` (so no pixel-to-point
+    /// mapping sits in the way), and returns the result plus the unioned
+    /// `[left, bottom, right, top]` pdfium reports for the authored layer --
+    /// `None` when no layer was written.
+    ///
+    /// The seeded `word.rect` is in the space the cache holds: bottom-left
+    /// origin, measured from the **rendered** box's corner. The returned
+    /// bounds are **user space**. On an offset page those differ by the box
+    /// origin -- see
+    /// `pdfium_reports_text_in_user_space_but_renders_the_cropbox`, which pins
+    /// both halves of that claim. Closing the gap is what these tests check.
+    ///
+    /// Takes the instance from the caller rather than acquiring: a second
+    /// `test_pdfium()` while the caller holds one deadlocks.
+    fn layer_over_page(
+        pdfium: &'static pdfium_render::prelude::Pdfium,
+        page_bytes: Vec<u8>,
+        word: OcrWord,
+    ) -> (AddTextLayerResult, Option<[f32; 4]>) {
+        let engine: Arc<dyn OcrEngine> = Arc::new(FakeOcrEngine { words: vec![word.clone()] });
+        let state = AppState::new(pdfium, None).with_ocr_engine(engine.clone());
+        state.set_ocr_words("doc1", 1, vec![word]);
+
+        let document = pdfium
+            .load_pdf_from_byte_vec(page_bytes.clone(), None)
+            .expect("load page bytes");
+        state
+            .insert_document(
+                "doc1".to_string(),
+                DocEntry {
+                    page_cache: Vec::new(),
+                    document,
+                    file_path: String::new(),
+                    buffer: page_bytes,
+                    dirty: false,
+                    protection: crate::state::Protection::Plaintext,
+                    linearized: false,
+                },
+            )
+            .expect("insert");
+
         let (result, bytes) = add_text_layer_impl(
             |_, _| {},
-            entry,
+            state.get_document("doc1").expect("get"),
             "doc1".to_string(),
             engine,
             state.ocr_cache_handle(),
@@ -1322,14 +1780,199 @@ mod tests {
         )
         .expect("add layer");
 
-        assert_eq!(result.pages_written, 1, "the plain page should get a layer");
+        let bounds = bytes.map(|b| {
+            let doc = pdfium.load_pdf_from_byte_vec(b, None).expect("reopen edited bytes");
+            let page = doc.pages().get(0).expect("page");
+            let text = page.text().expect("text");
+            let (mut left, mut bottom, mut right, mut top) =
+                (f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
+            for ch in text.chars().iter() {
+                if let Ok(bb) = ch.loose_bounds() {
+                    left = left.min(bb.left().value);
+                    bottom = bottom.min(bb.bottom().value);
+                    right = right.max(bb.right().value);
+                    top = top.max(bb.top().value);
+                }
+            }
+            [left, bottom, right, top]
+        });
+        (result, bounds)
+    }
+
+    /// Asserts a layer's user-space bounds match the OCR box shifted by the
+    /// rendered box's origin. Tolerances match the module's other placement
+    /// tests: the run is stretched to the box by `Tz`, so the horizontal fit
+    /// is looser than the vertical one.
+    fn assert_layer_at(bounds: Option<[f32; 4]>, want: [f32; 4]) {
+        let [left, bottom, right, top] = bounds.expect("a layer should have been written");
+        let [want_l, want_b, want_r, want_t] = want;
+        assert!((left - want_l).abs() < 4.0, "left {left}, want {want_l}");
+        assert!((right - want_r).abs() < 4.0, "right {right}, want {want_r}");
+        assert!((bottom - want_b).abs() < 1.5, "bottom {bottom}, want {want_b}");
+        assert!((top - want_t).abs() < 1.5, "top {top}, want {want_t}");
+    }
+
+    /// Bounds of just the characters equal to `ch` in the authored layer,
+    /// as `[left, right]` in user space.
+    fn char_span(
+        pdfium: &'static pdfium_render::prelude::Pdfium,
+        page_bytes: Vec<u8>,
+        words: Vec<OcrWord>,
+        ch: char,
+    ) -> [f32; 2] {
+        let engine: Arc<dyn OcrEngine> = Arc::new(FakeOcrEngine { words: words.clone() });
+        let state = AppState::new(pdfium, None).with_ocr_engine(engine.clone());
+        state.set_ocr_words("doc1", 1, words);
+        let document = pdfium
+            .load_pdf_from_byte_vec(page_bytes.clone(), None)
+            .expect("load");
+        state
+            .insert_document(
+                "doc1".to_string(),
+                DocEntry {
+                    page_cache: Vec::new(),
+                    document,
+                    file_path: String::new(),
+                    buffer: page_bytes,
+                    dirty: false,
+                    protection: crate::state::Protection::Plaintext,
+                    linearized: false,
+                },
+            )
+            .expect("insert");
+        let (_, bytes) = add_text_layer_impl(
+            |_, _| {},
+            state.get_document("doc1").expect("get"),
+            "doc1".to_string(),
+            engine,
+            state.ocr_cache_handle(),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .expect("add layer");
+
+        let doc = pdfium
+            .load_pdf_from_byte_vec(bytes.expect("edited bytes"), None)
+            .expect("reopen");
+        let page = doc.pages().get(0).expect("page");
+        let text = page.text().expect("text");
+        let (mut left, mut right) = (f32::INFINITY, f32::NEG_INFINITY);
+        for c in text.chars().iter() {
+            if c.unicode_char() != Some(ch) {
+                continue;
+            }
+            if let Ok(b) = c.loose_bounds() {
+                left = left.min(b.left().value);
+                right = right.max(b.right().value);
+            }
+        }
+        [left, right]
+    }
+
+    /// A line run positions only its two ends. Words *between* them are placed
+    /// by uniform `Tz` stretching of a single-space-joined string, which has
+    /// nothing to do with where they actually sit on the page -- so on a
+    /// justified scan, whose word gaps vary, a mid-line word's invisible glyphs
+    /// drift away from the ink they belong to. Vertically nothing moves, which
+    /// is why this reads as a purely horizontal error.
+    ///
+    /// Two words on one line, 100pt apart: "ZZZZ" occupies x 150..180 and its
+    /// layer must land there.
+    #[test]
+    fn mid_line_words_land_on_their_own_boxes() {
+        let pdfium = crate::test_pdfium();
+        let bytes = boxed_page_bytes([0.0, 0.0, 200.0, 400.0], None, 0, b"");
+        let words = vec![
+            OcrWord {
+                text: "AAAA".to_string(),
+                rect: TextRect { x: 10.0, y: 300.0, width: 30.0, height: 12.0 },
+            },
+            OcrWord {
+                text: "ZZZZ".to_string(),
+                rect: TextRect { x: 150.0, y: 300.0, width: 30.0, height: 12.0 },
+            },
+        ];
+
+        let [left, right] = char_span(pdfium.get(), bytes, words, 'Z');
+
+        assert!(
+            (left - 150.0).abs() < 4.0 && (right - 180.0).abs() < 4.0,
+            "second word at x {left}..{right}, want 150..180 -- a line run stretched \
+             it away from its own box"
+        );
+    }
+
+    /// The regression test for issue #129. A deskewed scan's MediaBox sits at
+    /// a small non-zero origin on every page; the layer must be placed
+    /// **relative to that origin**, not at the raw cache coordinates.
+    ///
+    /// Non-square (200x400) on purpose: on a square page a width/height mix-up
+    /// cancels and a broken mapping passes.
+    #[test]
+    fn offset_mediabox_page_gets_a_layer_at_its_origin() {
+        let pdfium = crate::test_pdfium();
+        // MediaBox [50 60 250 460] -> 200x400 rendered, origin (50, 60).
+        let bytes = boxed_page_bytes([50.0, 60.0, 250.0, 460.0], None, 0, b"");
+        let word = OcrWord {
+            text: "Scanned".to_string(),
+            rect: TextRect { x: 30.0, y: 100.0, width: 120.0, height: 20.0 },
+        };
+
+        let (result, bounds) = layer_over_page(pdfium.get(), bytes, word);
+
+        assert_eq!(result.pages_written, 1, "an offset page must still get a layer");
+        assert_eq!(result.pages_skipped_unsupported_geometry, 0);
+        // OCR box (30..150, 100..120) shifted by the origin (50, 60).
+        assert_layer_at(bounds, [80.0, 160.0, 200.0, 180.0]);
+    }
+
+    /// pdfium renders the **CropBox**, so that -- not the MediaBox -- is the
+    /// box an OCR word's rect is measured from. A page whose CropBox sits
+    /// inside a larger MediaBox must have its layer placed against the CropBox
+    /// corner; reading the MediaBox here would put the text ~90pt off.
+    #[test]
+    fn layer_is_placed_against_the_cropbox_not_the_mediabox() {
+        let pdfium = crate::test_pdfium();
+        // MediaBox at the origin, CropBox [70 90 270 490] -> 200x400 rendered.
+        let bytes = boxed_page_bytes(
+            [0.0, 0.0, 300.0, 500.0],
+            Some([70.0, 90.0, 270.0, 490.0]),
+            0,
+            b"",
+        );
+        let word = OcrWord {
+            text: "Scanned".to_string(),
+            rect: TextRect { x: 30.0, y: 100.0, width: 120.0, height: 20.0 },
+        };
+
+        let (result, bounds) = layer_over_page(pdfium.get(), bytes, word);
+
+        assert_eq!(result.pages_written, 1);
+        assert_eq!(result.pages_skipped_unsupported_geometry, 0);
+        // OCR box (30..150, 100..120) shifted by the CropBox origin (70, 90).
+        assert_layer_at(bounds, [100.0, 190.0, 220.0, 210.0]);
+    }
+
+    /// Rotation remains unsupported and must still be reported rather than
+    /// mis-placed. Unlike a flattened polyline, rotated text cannot be handled
+    /// by mapping its corners -- the glyphs have to turn too, which needs a
+    /// `Tm` rather than a bare `Td`. Until that exists, skip and say so.
+    #[test]
+    fn rotated_page_is_counted_as_skipped() {
+        let pdfium = crate::test_pdfium();
+        let bytes = crate::geometry_page_bytes(200.0, 400.0, 90, None);
+        let word = OcrWord {
+            text: "Scanned".to_string(),
+            rect: TextRect { x: 30.0, y: 100.0, width: 120.0, height: 20.0 },
+        };
+
+        let (result, bounds) = layer_over_page(pdfium.get(), bytes, word);
+
+        assert_eq!(result.pages_written, 0, "a rotated page must not be written");
         assert_eq!(
             result.pages_skipped_unsupported_geometry, 1,
-            "the offset page should be counted as skipped"
+            "the rotated page should be counted as skipped"
         );
-        assert!(bytes.is_some(), "one page got a layer, so bytes must be returned");
-
-        std::fs::remove_file(&src).ok();
+        assert!(bounds.is_none(), "nothing written -> no edited bytes");
     }
 
     /// A page with a native text layer must not receive a duplicate OCR layer.

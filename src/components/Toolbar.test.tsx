@@ -178,7 +178,8 @@ describe("Toolbar export text", () => {
 
   it("exports without OCR and without prompting when every page has text", async () => {
     vi.mocked(invoke).mockImplementation((cmd: string) => {
-      if (cmd === "count_pages_without_text") return Promise.resolve(0);
+      if (cmd === "page_text_coverage")
+        return Promise.resolve({ needingOcr: 0, ocrOnly: 0 });
       if (cmd === "export_text")
         return Promise.resolve({ pages: 3, ocrPages: 0, cancelled: false });
       return Promise.resolve(undefined);
@@ -202,7 +203,8 @@ describe("Toolbar export text", () => {
   it("offers OCR when pages lack text and exports with OCR on accept", async () => {
     vi.mocked(ask).mockResolvedValue(true);
     vi.mocked(invoke).mockImplementation((cmd: string) => {
-      if (cmd === "count_pages_without_text") return Promise.resolve(2);
+      if (cmd === "page_text_coverage")
+        return Promise.resolve({ needingOcr: 2, ocrOnly: 0 });
       if (cmd === "export_text")
         return Promise.resolve({ pages: 3, ocrPages: 2, cancelled: false });
       return Promise.resolve(undefined);
@@ -226,7 +228,8 @@ describe("Toolbar export text", () => {
   it("exports without OCR when the user declines the OCR prompt", async () => {
     vi.mocked(ask).mockResolvedValue(false);
     vi.mocked(invoke).mockImplementation((cmd: string) => {
-      if (cmd === "count_pages_without_text") return Promise.resolve(2);
+      if (cmd === "page_text_coverage")
+        return Promise.resolve({ needingOcr: 2, ocrOnly: 0 });
       if (cmd === "export_text")
         return Promise.resolve({ pages: 3, ocrPages: 0, cancelled: false });
       return Promise.resolve(undefined);
@@ -254,7 +257,8 @@ describe("Toolbar make searchable", () => {
 
   it("OCRs the document and bumps ocrEpoch when pages lack text", async () => {
     vi.mocked(invoke).mockImplementation((cmd: string) => {
-      if (cmd === "count_pages_without_text") return Promise.resolve(2);
+      if (cmd === "page_text_coverage")
+        return Promise.resolve({ needingOcr: 2, ocrOnly: 0 });
       if (cmd === "ocr_document")
         return Promise.resolve({ pagesOcred: 2, cancelled: false });
       return Promise.resolve(undefined);
@@ -283,7 +287,8 @@ describe("Toolbar make searchable", () => {
   it("offers a forced re-OCR when every page already has text", async () => {
     vi.mocked(ask).mockResolvedValue(true as never);
     vi.mocked(invoke).mockImplementation((cmd: string) => {
-      if (cmd === "count_pages_without_text") return Promise.resolve(0);
+      if (cmd === "page_text_coverage")
+        return Promise.resolve({ needingOcr: 0, ocrOnly: 0 });
       if (cmd === "ocr_document")
         return Promise.resolve({ pagesOcred: 3, cancelled: false });
       return Promise.resolve(undefined);
@@ -310,7 +315,8 @@ describe("Toolbar make searchable", () => {
   it("does not OCR when the forced re-OCR offer is declined", async () => {
     vi.mocked(ask).mockResolvedValue(false as never);
     vi.mocked(invoke).mockImplementation((cmd: string) => {
-      if (cmd === "count_pages_without_text") return Promise.resolve(0);
+      if (cmd === "page_text_coverage")
+        return Promise.resolve({ needingOcr: 0, ocrOnly: 0 });
       return Promise.resolve(undefined);
     });
 
@@ -322,11 +328,38 @@ describe("Toolbar make searchable", () => {
     expect(usePdfStore.getState().tabs[0].ocrEpoch).toBe(0);
   });
 
+  // Issue #129: after a Make Searchable (or a run of Add Text Layer that wrote
+  // nothing), every page is covered by the session cache and none needs OCR --
+  // but the file still has no text layer. Saying "every page already has a text
+  // layer" there is the opposite of the truth, and it sent the user hunting for
+  // a problem instead of to the one action that would persist their OCR.
+  it("points at Add Text Layer when pages are covered only by session OCR", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === "page_text_coverage")
+        return Promise.resolve({ needingOcr: 0, ocrOnly: 3 });
+      return Promise.resolve(undefined);
+    });
+
+    renderToolbar();
+    await clickMakeSearchable();
+
+    // No forced-re-OCR offer: re-running recognition would be pure waste.
+    expect(ask).not.toHaveBeenCalled();
+    expect(invoke).not.toHaveBeenCalledWith("ocr_document", expect.anything());
+
+    const [text] = vi.mocked(message).mock.calls[0];
+    expect(text).toContain("already been OCR'd this session");
+    expect(text).toContain("Add Text Layer");
+    // And it must not repeat the old claim.
+    expect(text).not.toContain("already has a text layer");
+  });
+
   // A forced run that recognizes nothing must not claim success.
   it("reports honestly when a forced re-OCR finds no text", async () => {
     vi.mocked(ask).mockResolvedValue(true as never);
     vi.mocked(invoke).mockImplementation((cmd: string) => {
-      if (cmd === "count_pages_without_text") return Promise.resolve(0);
+      if (cmd === "page_text_coverage")
+        return Promise.resolve({ needingOcr: 0, ocrOnly: 0 });
       if (cmd === "ocr_document")
         return Promise.resolve({ pagesOcred: 0, cancelled: false });
       return Promise.resolve(undefined);
@@ -374,7 +407,7 @@ describe("Toolbar add text layer", () => {
     expect(invoke).toHaveBeenCalledWith("get_signature_info", { docId: "doc-1" });
   });
 
-  it("reports rotated/offset pages that were left un-searchable", async () => {
+  it("reports rotated pages that were left un-searchable", async () => {
     vi.mocked(invoke).mockResolvedValue({
       pagesWritten: 2,
       pagesSkippedUnsupportedGeometry: 1,
@@ -386,10 +419,10 @@ describe("Toolbar add text layer", () => {
 
     const [[text]] = vi.mocked(message).mock.calls;
     expect(text).toContain("Added a text layer to 2 pages");
-    expect(text).toContain("1 rotated or offset page couldn't be made searchable");
+    expect(text).toContain("1 rotated page couldn't be made searchable");
   });
 
-  it("explains when every scanned page was skipped for geometry", async () => {
+  it("explains when every scanned page was skipped for rotation", async () => {
     vi.mocked(invoke).mockResolvedValue({
       pagesWritten: 0,
       pagesSkippedUnsupportedGeometry: 3,
@@ -401,7 +434,7 @@ describe("Toolbar add text layer", () => {
 
     expect(message).toHaveBeenCalledWith(
       expect.stringContaining(
-        "3 rotated or offset pages couldn't be made searchable",
+        "3 rotated pages couldn't be made searchable",
       ),
       expect.objectContaining({ title: "Add Text Layer" }),
     );

@@ -608,31 +608,49 @@ fn ocr_word_rect(word: &crate::commands::ocr::OcrWord, page_height: f32) -> Text
     }
 }
 
-/// Counts pages that would still need OCR: no native text layer **and** no
-/// recognized words already in the OCR cache. Drives the frontend's "run OCR on
-/// export?" confirmation — so once a page has been made searchable, it no
-/// longer triggers the prompt.
+/// How a document's pages are covered for text, from one pass over them.
+///
+/// The distinction matters because "has text" and "is searchable in Tumbler"
+/// are not the same thing: a page OCR'd this session is searchable here while
+/// the *file* still has no text layer at all. Reporting only a single
+/// "needs OCR" number let the UI tell the user a scanned document "already has
+/// a text layer" (issue #129) — the opposite of the truth, and the opposite of
+/// the advice they needed.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PageTextCoverage {
+    /// Pages with no native text layer **and** no cached OCR words — the ones
+    /// a fresh OCR run would actually process.
+    pub needing_ocr: u32,
+    /// Pages with no native text layer that are covered *only* by session OCR
+    /// words. Searchable in Tumbler now, but nothing in the file: they need Add
+    /// Text Layer before a Save preserves anything.
+    pub ocr_only: u32,
+}
+
+/// Reports a document's text coverage. Drives the frontend's "run OCR on
+/// export?" confirmation and the Make Searchable prompt.
 #[tauri::command]
-pub async fn count_pages_without_text(
+pub async fn page_text_coverage(
     state: State<'_, AppState>,
     doc_id: String,
-) -> Result<u32, String> {
+) -> Result<PageTextCoverage, String> {
     let entry = state.get_document(&doc_id).map_err(String::from)?;
     let cache = state.ocr_cache_handle();
-    tauri::async_runtime::spawn_blocking(move || count_pages_without_text_impl(entry, doc_id, cache))
+    tauri::async_runtime::spawn_blocking(move || page_text_coverage_impl(entry, doc_id, cache))
         .await
         .map_err(|e| e.to_string())?
         .map_err(String::from)
 }
 
-fn count_pages_without_text_impl(
+fn page_text_coverage_impl(
     entry: Arc<Mutex<DocEntry>>,
     doc_id: String,
     cache: OcrCache,
-) -> Result<u32, AppError> {
+) -> Result<PageTextCoverage, AppError> {
     let entry = lock_mutex(&entry)?;
     let page_count = entry.document.pages().len();
-    let mut count = 0;
+    let (mut needing_ocr, mut ocr_only) = (0, 0);
     for i in 0..page_count {
         let page_num = (i + 1) as u32;
         let page = entry
@@ -644,13 +662,18 @@ fn count_pages_without_text_impl(
             .text()
             .map(|t| page_text_in_document_order(&t))
             .unwrap_or_default();
-        // A page already OCR'd (cached) is "covered" even though its native
-        // text layer is still empty.
-        if content.trim().is_empty() && cache_get(&cache, &doc_id, page_num).is_none() {
-            count += 1;
+        if !content.trim().is_empty() {
+            continue; // a real text layer in the file
+        }
+        // No native text: either OCR has covered it this session, or it still
+        // needs a run.
+        if cache_get(&cache, &doc_id, page_num).is_some() {
+            ocr_only += 1;
+        } else {
+            needing_ocr += 1;
         }
     }
-    Ok(count)
+    Ok(PageTextCoverage { needing_ocr, ocr_only })
 }
 
 #[tauri::command]
@@ -1985,8 +2008,13 @@ mod tests {
         assert_eq!(match_count(&regex_matches(&state, "scan", r"5\s+Subtotal")), 1);
     }
 
+    /// The three coverage states a page can be in, and the transition that
+    /// used to be invisible: once a blank page is cached it stops *needing*
+    /// OCR, but it must be reported as `ocr_only` rather than vanishing into
+    /// "covered" — the file still has no text layer, and that is exactly what
+    /// the user has to be told (issue #129).
     #[test]
-    fn count_pages_without_text_counts_only_uncovered_pages() {
+    fn page_text_coverage_separates_native_text_from_session_ocr() {
         let pdfium = crate::test_pdfium();
         let state = AppState::new(pdfium.get(), None);
         open_fixture(&state, "text");
@@ -1995,28 +2023,25 @@ mod tests {
         let text_doc = state.get_document("text").expect("get text doc");
         let blank_doc = state.get_document("blank").expect("get blank doc");
 
-        // Native text → 0; blank, uncached → 1.
-        assert_eq!(
-            count_pages_without_text_impl(text_doc, "text".to_string(), state.ocr_cache_handle())
-                .expect("count"),
-            0
-        );
-        assert_eq!(
-            count_pages_without_text_impl(
-                blank_doc.clone(),
-                "blank".to_string(),
-                state.ocr_cache_handle()
-            )
-            .expect("count"),
-            1
-        );
+        // A real text layer counts as neither.
+        let c = page_text_coverage_impl(text_doc, "text".to_string(), state.ocr_cache_handle())
+            .expect("count");
+        assert_eq!((c.needing_ocr, c.ocr_only), (0, 0));
 
-        // Once the blank page is cached (Make Searchable), it's no longer counted.
+        // Blank and uncached: needs a run.
+        let c = page_text_coverage_impl(
+            blank_doc.clone(),
+            "blank".to_string(),
+            state.ocr_cache_handle(),
+        )
+        .expect("count");
+        assert_eq!((c.needing_ocr, c.ocr_only), (1, 0));
+
+        // Cached by Make Searchable: no longer needs a run, but the file still
+        // has no text layer — so it moves to ocr_only, not to nothing.
         state.set_ocr_words("blank", 1, vec![ocr_word("Scanned")]);
-        assert_eq!(
-            count_pages_without_text_impl(blank_doc, "blank".to_string(), state.ocr_cache_handle())
-                .expect("count"),
-            0
-        );
+        let c = page_text_coverage_impl(blank_doc, "blank".to_string(), state.ocr_cache_handle())
+            .expect("count");
+        assert_eq!((c.needing_ocr, c.ocr_only), (0, 1));
     }
 }

@@ -20,8 +20,21 @@ interface TextExportResult {
 
 interface AddTextLayerResult {
   pagesWritten: number;
+  /** Pages left un-searchable because they are rotated — the one page
+   *  geometry the layer author still can't place text on. */
   pagesSkippedUnsupportedGeometry: number;
   cancelled: boolean;
+}
+
+/** How a document's pages are covered for text (`page_text_coverage`).
+ *
+ *  `needingOcr` and `ocrOnly` are both counts of pages with **no text layer in
+ *  the file**; they differ only in whether this session has already recognized
+ *  them. Collapsing the two is what let Make Searchable claim a scanned
+ *  document "already has a text layer" (issue #129). */
+interface PageTextCoverage {
+  needingOcr: number;
+  ocrOnly: number;
 }
 
 interface ToolbarProps {
@@ -173,9 +186,10 @@ export function Toolbar({ onOpenFile, onPrint }: ToolbarProps) {
     // Offer OCR only when there are pages with no text layer (likely scans).
     let useOcr = false;
     try {
-      const missing = await invoke<number>("count_pages_without_text", {
-        docId: activeTab.docId,
-      });
+      const { needingOcr: missing } = await invoke<PageTextCoverage>(
+        "page_text_coverage",
+        { docId: activeTab.docId },
+      );
       if (missing > 0) {
         useOcr = await ask(
           `${missing} page${missing === 1 ? " has" : "s have"} no text layer ` +
@@ -232,10 +246,13 @@ export function Toolbar({ onOpenFile, onPrint }: ToolbarProps) {
     if (!activeTab) return;
 
     let missing = 0;
+    let ocrOnly = 0;
     try {
-      missing = await invoke<number>("count_pages_without_text", {
+      const coverage = await invoke<PageTextCoverage>("page_text_coverage", {
         docId: activeTab.docId,
       });
+      missing = coverage.needingOcr;
+      ocrOnly = coverage.ocrOnly;
     } catch (err) {
       await message(String(err), { title: "Make Searchable", kind: "error" });
       return;
@@ -243,6 +260,22 @@ export function Toolbar({ onOpenFile, onPrint }: ToolbarProps) {
 
     let force = false;
     if (missing === 0) {
+      // Nothing needs a run — but for two very different reasons, and the
+      // advice differs. Pages covered only by this session's OCR have no text
+      // layer in the *file* at all; telling the user they "already have a text
+      // layer" (as this once did) is the opposite of the truth, and sends them
+      // looking for a problem that isn't there instead of to Add Text Layer.
+      if (ocrOnly > 0) {
+        await message(
+          `${ocrOnly} page${ocrOnly === 1 ? " has" : "s have"} already been ` +
+            `OCR'd this session, so ${ocrOnly === 1 ? "it is" : "they are"} ` +
+            "searchable here — but nothing has been written to the document " +
+            "yet, and closing it will lose the recognized text.\n\n" +
+            "Use Add Text Layer to embed it, then Save.",
+          { title: "Make Searchable", kind: "info" },
+        );
+        return;
+      }
       force = await ask(
         "Every page already has a text layer, so there's nothing to OCR.\n\n" +
           "If that text is wrong — scanned files often carry a bad OCR layer " +
@@ -403,12 +436,12 @@ export function Toolbar({ onOpenFile, onPrint }: ToolbarProps) {
       const plural = (n: number) => (n === 1 ? "" : "s");
       const written = result.pagesWritten;
       const skipped = result.pagesSkippedUnsupportedGeometry;
-      // A "rotated or offset" clause describing the skipped pages, or "" when
-      // there were none. These pages were OCR'd but their geometry isn't yet
-      // supported, so they got no searchable layer — say so rather than hide it.
+      // A clause describing the skipped pages, or "" when there were none.
+      // Rotated pages are the only geometry the layer author still can't place
+      // text on — say so rather than hide it.
       const skippedNote =
         skipped > 0
-          ? `${skipped} rotated or offset page${plural(skipped)} couldn't be made searchable`
+          ? `${skipped} rotated page${plural(skipped)} couldn't be made searchable`
           : "";
 
       let text: string;
@@ -419,7 +452,7 @@ export function Toolbar({ onOpenFile, onPrint }: ToolbarProps) {
       } else if (written > 0) {
         text = `Added a text layer to ${written} page${plural(written)}. Use Save or Save As to keep it.`;
       } else if (skipped > 0) {
-        text = `No text layer added — ${skippedNote} (unsupported page geometry).`;
+        text = `No text layer added — ${skippedNote} (rotated pages aren't supported yet).`;
       } else {
         text = "Every page already has a text layer — nothing to add.";
       }

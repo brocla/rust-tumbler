@@ -1325,6 +1325,18 @@ mod tests {
     /// Builds a PDF with one 200×200 page per entry, each drawing its text at
     /// 24pt Helvetica from (20, 150) — extractable by pdfium.get().
     fn text_pdf_bytes(page_texts: &[&str]) -> Vec<u8> {
+        text_pdf_bytes_with_origin(page_texts, 0.0, 0.0)
+    }
+
+    /// [`text_pdf_bytes`] with the MediaBox moved to `(ox, oy)` and the text
+    /// moved with it, so the page renders identically and only its *user
+    /// space* differs — the shape of a deskewed scan (issue #129).
+    ///
+    /// `ox` and `oy` should differ from each other: the mapping under test is
+    /// a pure translation, so an x/y swap is the failure a same-on-both-axes
+    /// origin would hide. (Rotation, which is what the non-square-page rule
+    /// guards against, is skipped by the layer author entirely.)
+    fn text_pdf_bytes_with_origin(page_texts: &[&str], ox: f32, oy: f32) -> Vec<u8> {
         let mut doc = Document::with_version("1.5");
         let pages_id = doc.new_object_id();
         let font_id = doc.add_object(dictionary! {
@@ -1335,15 +1347,19 @@ mod tests {
         });
         let mut kids = Vec::new();
         for text in page_texts {
-            let content = format!("BT /F1 24 Tf 20 150 Td ({text}) Tj ET");
+            let content = format!(
+                "BT /F1 24 Tf {} {} Td ({text}) Tj ET",
+                ox + 20.0,
+                oy + 150.0
+            );
             let cid = doc.add_object(Stream::new(Dictionary::new(), content.into_bytes()));
             let page_id = doc.add_object(dictionary! {
                 "Type" => "Page",
                 "Parent" => pages_id,
                 "Contents" => cid,
                 "MediaBox" => vec![
-                    Object::Integer(0), Object::Integer(0),
-                    Object::Integer(200), Object::Integer(200),
+                    Object::Real(ox), Object::Real(oy),
+                    Object::Real(ox + 200.0), Object::Real(oy + 200.0),
                 ],
                 "Resources" => dictionary! {
                     "Font" => dictionary! { "F1" => Object::Reference(font_id) },
@@ -2994,6 +3010,110 @@ mod tests {
         let text = reloaded.pages().get(0).expect("page").text().expect("text").all();
         assert!(text.contains("ab") && text.contains("cd"), "got: {text:?}");
         assert!(!text.contains("SECRET"), "got: {text:?}");
+    }
+
+    /// The same middle-of-line redaction, on a page whose MediaBox sits at a
+    /// non-zero origin — the shape of every page of a deskewed scan (issue
+    /// #129).
+    ///
+    /// Redaction is insulated from the origin problem by
+    /// [`replace_page_with_image`], which rewrites every flattened page to
+    /// `MediaBox [0 0 w h]` with `/Rotate 0` because the raster already bakes
+    /// in the original geometry. Re-OCR only ever runs on flattened pages, so
+    /// it only ever sees a normalized one — which is why this path never
+    /// showed the bug that made Add Text Layer skip 360 of 367 pages.
+    ///
+    /// That insulation is the thing under test. It is a property of the
+    /// flattening step, not of the layer author, and nothing else asserts it:
+    /// if flattening ever stopped normalizing, re-OCR would start meeting real
+    /// page geometry and the writer's and verifier's separate origin handling
+    /// (the author adds the render-box origin; `verify_redactions` subtracts
+    /// `page_origin` from extracted char boxes) would become load-bearing
+    /// under a safety check. The y assertion below would then move off 145..157
+    /// and say so.
+    #[test]
+    fn reocr_layer_on_an_offset_page_lands_clear_of_the_burned_gap() {
+        let pdfium = crate::test_pdfium();
+        let state = AppState::new(pdfium.get(), None);
+        // Origin (50, 60): different on each axis, so an x/y swap can't pass.
+        let bytes = text_pdf_bytes_with_origin(&["ab SECRET cd"], 50.0, 60.0);
+        open_mem_doc(&state, "doc1", bytes.clone());
+
+        let regions = find_redaction_matches_impl(
+            &state,
+            "doc1".to_string(),
+            "SECRET".to_string(),
+            false,
+            false,
+            false,
+        )
+        .expect("find matches");
+        assert_eq!(regions.len(), 1);
+
+        // The region is reported in render space, so the offset page yields
+        // the same box as the zero-origin fixture. If this ever shifts by the
+        // origin, the two sides have drifted apart and the assertions below
+        // would be checking the wrong geometry.
+        assert!(
+            regions[0].rect.x > 45.0 && regions[0].rect.x < 60.0,
+            "region should be in render space, got x={}",
+            regions[0].rect.x
+        );
+
+        let engine: Arc<dyn OcrEngine> = Arc::new(RemainingWordsOcr);
+        let (result, output) = apply_redactions_impl(
+            &no_progress,
+            pdfium.get(),
+            &bytes,
+            &regions,
+            &["SECRET".to_string()],
+            150.0,
+            &engine,
+            &not_cancelled(),
+        )
+        .expect("apply");
+
+        // Fails before the fix: the offset page was skipped, so reocr_pages
+        // was 0 and the output carried no text at all.
+        assert_eq!(
+            result.reocr_pages, 1,
+            "an offset page must still get a re-OCR layer"
+        );
+        assert!(
+            result.verified,
+            "offset-page redaction must verify clean; leaks: {:?}",
+            result.leaks
+        );
+        assert!(result.leaks.is_empty());
+
+        let out = output.expect("output bytes");
+        let reloaded = pdfium.get().load_pdf_from_byte_vec(out, None).expect("reload");
+        let page = reloaded.pages().get(0).expect("page");
+        let text = page.text().expect("text").all();
+        assert!(
+            text.contains("ab") && text.contains("cd"),
+            "surviving words must be searchable in the output, got: {text:?}"
+        );
+        assert!(!text.contains("SECRET"), "got: {text:?}");
+
+        // And the layer is actually *on* the words, not merely present. The
+        // fixture draws its line at render-space y 145..157; the output page
+        // was normalized to origin (0,0) by flattening, so user space and
+        // render space coincide there and the run reads back at 145..157 —
+        // *not* at 203..215, which is where it would sit had the source page's
+        // origin of 60 survived into the output.
+        let text = page.text().expect("text");
+        let (mut bottom, mut top) = (f32::INFINITY, f32::NEG_INFINITY);
+        for ch in text.chars().iter() {
+            if let Ok(b) = ch.loose_bounds() {
+                bottom = bottom.min(b.bottom().value);
+                top = top.max(b.top().value);
+            }
+        }
+        assert!(
+            (bottom - 145.0).abs() < 4.0 && (top - 157.0).abs() < 4.0,
+            "layer at y {bottom}..{top}, want ~145..157 — flattening should have              normalized the page box, leaving render space == user space"
+        );
     }
 
     /// A pre-set cancel token stops the run before any output is produced.
