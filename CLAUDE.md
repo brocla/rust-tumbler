@@ -4,7 +4,7 @@ Tumbler is a personal PDF viewer for Windows built with Tauri v2 (Rust backend, 
 
 ## What the app does
 
-Opens PDF files (via file-association or drag-and-drop), displays them in a continuous-scroll viewer with zoom, and provides: full-text search with OCR fallback for scanned pages, text selection/copy, text export, thumbnail sidebar, metadata editing, page operations (delete/rotate/reorder/merge/split), native Windows printing, and a compression pipeline that reduces file size through five lopdf-based transforms.
+Opens PDF files (via file association, or the Open dialog — Ctrl+O / toolbar; there is no drag-and-drop open, `dragDropEnabled` is off), displays them in a continuous-scroll viewer with zoom, and provides: full-text search with OCR fallback for scanned pages, text selection/copy, text export, thumbnail sidebar, metadata editing, page operations (delete/rotate/reorder/merge/split), native Windows printing, and a compression pipeline that reduces file size through five lopdf-based transforms.
 
 ---
 
