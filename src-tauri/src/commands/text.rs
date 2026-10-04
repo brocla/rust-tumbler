@@ -3,6 +3,7 @@ use crate::commands::ocr::{
     OcrCache, OcrEngine, OcrLine, OcrProgress,
 };
 use regex::RegexBuilder;
+use crate::commands::page_space::PageSpace;
 use crate::error::AppError;
 use crate::state::{lock_mutex, AppState, DocEntry};
 use pdfium_render::prelude::*;
@@ -55,20 +56,50 @@ pub struct TextExportResult {
     pub cancelled: bool,
 }
 
-/// Returns the effective left and bottom origin of the page's bounding box.
-/// Most PDFs have origin (0,0), but some have non-zero origins that shift
-/// text coordinates relative to the rendered output.
-pub(crate) fn page_origin(page: &PdfPage) -> (f32, f32) {
-    // Try CropBox first (used for display), fall back to MediaBox
-    let bbox = page
-        .boundaries()
-        .crop()
-        .or_else(|_| page.boundaries().media());
+/// The page's render space as pdfium reports it: the box it draws (CropBox,
+/// else MediaBox) and the `/Rotate` it draws it at.
+///
+/// pdfium hands back text boxes in *unrotated* user space while the overlays
+/// measure the page as rendered, so every text rect bound for the frontend
+/// goes through [`user_rect_to_render`] with this. Flipping y against
+/// `page.height()` alone is right only at `/Rotate 0`: on a 90° page it puts
+/// highlights where the text would be had the page never been turned —
+/// usually somewhere else, often off the page.
+pub(crate) fn render_space(page: &PdfPage) -> PageSpace {
+    let rotate = match page.rotation() {
+        Ok(PdfPageRenderRotation::Degrees90) => 90,
+        Ok(PdfPageRenderRotation::Degrees180) => 180,
+        Ok(PdfPageRenderRotation::Degrees270) => 270,
+        _ => 0,
+    };
+    let ebox = match page.boundaries().crop().or_else(|_| page.boundaries().media()) {
+        Ok(b) => [
+            b.bounds.left().value,
+            b.bounds.bottom().value,
+            b.bounds.right().value,
+            b.bounds.top().value,
+        ],
+        // No readable box: fall back to the page's size, un-swapped back into
+        // user space, at the origin.
+        Err(_) => {
+            let (w, h) = (page.width().value, page.height().value);
+            let (w, h) = if rotate % 180 == 90 { (h, w) } else { (w, h) };
+            [0.0, 0.0, w, h]
+        }
+    };
+    PageSpace::new(rotate, ebox)
+}
 
-    match bbox {
-        Ok(b) => (b.bounds.left().value, b.bounds.bottom().value),
-        Err(_) => (0.0, 0.0),
-    }
+/// A pdfium text box (user space, bottom-left origin) as a render-space rect
+/// (top-left origin, rotated as displayed).
+pub(crate) fn user_rect_to_render(space: &PageSpace, bounds: &PdfRect) -> TextRect {
+    let (x, y, width, height) = space.rect_to_render([
+        bounds.left().value,
+        bounds.bottom().value,
+        bounds.right().value,
+        bounds.top().value,
+    ]);
+    TextRect { x, y, width, height }
 }
 
 /// Returns a page's full text by walking its characters in document order and
@@ -219,7 +250,7 @@ pub(crate) fn extract_page_text_impl(
         .map_err(|e| AppError::pdfium(format!("Failed to get page {page}"), e))?;
 
     let page_height = pdf_page.height().value;
-    let (origin_x, origin_y) = page_origin(&pdf_page);
+    let space = render_space(&pdf_page);
 
     // A force-re-OCR'd page (issue #97) serves its recognized words *instead
     // of* the native layer — the user has told us that layer is junk, so the
@@ -258,14 +289,25 @@ pub(crate) fn extract_page_text_impl(
             Err(_) => continue,
         };
 
-        let font_size = ch.scaled_font_size().value;
+        // Into render space first: the grouping below compares positions as
+        // the user reads them, and on a rotated page a level line runs along
+        // user-space y, which would split it into one run per character.
+        let TextRect {
+            x: char_x,
+            y: char_y,
+            width: char_w,
+            height: char_h,
+        } = user_rect_to_render(&space, &bounds);
 
-        // Convert PDF coordinates (origin bottom-left) to top-left origin,
-        // adjusting for any non-zero page origin
-        let char_x = bounds.left().value - origin_x;
-        let char_y = page_height - (bounds.top().value - origin_y);
-        let char_w = bounds.right().value - bounds.left().value;
-        let char_h = bounds.top().value - bounds.bottom().value;
+        // pdfium scales the font size by the text matrix's diagonal, which is
+        // zero for text laid at a quarter turn — exactly the text a rotated
+        // page carries to read level on screen. Zero would join nothing below
+        // and size the overlay span to 0px, so fall back to the glyph's
+        // rendered height.
+        let font_size = match ch.scaled_font_size().value {
+            size if size > 0.0 => size,
+            _ => char_h,
+        };
 
         // Group characters into text runs based on proximity and font size
         let same_line = has_current
@@ -412,7 +454,7 @@ pub(crate) fn search_document_impl(
         };
 
         let page_height = pdf_page.height().value;
-        let (origin_x, origin_y) = page_origin(&pdf_page);
+        let space = render_space(&pdf_page);
 
         let text = match pdf_page.text() {
             Ok(t) => t,
@@ -450,9 +492,7 @@ pub(crate) fn search_document_impl(
                 };
                 page_matches.extend(segments_to_match(
                     &text.segments_subset(start, count),
-                    page_height,
-                    origin_x,
-                    origin_y,
+                    &space,
                 ));
             }
         } else {
@@ -466,12 +506,7 @@ pub(crate) fn search_document_impl(
             // single occurrence, from FPDFText_GetRect (pdfium's canonical
             // highlight-position function). One hit becomes one SearchMatch.
             for match_segments in search.iter(PdfSearchDirection::SearchForward) {
-                page_matches.extend(segments_to_match(
-                    &match_segments,
-                    page_height,
-                    origin_x,
-                    origin_y,
-                ));
+                page_matches.extend(segments_to_match(&match_segments, &space));
             }
         }
 
@@ -568,28 +603,19 @@ pub(crate) fn search_document_impl(
 }
 
 /// Turns one search hit's segments into a [`SearchMatch`], converting each rect
-/// from PDF user space (origin bottom-left) into the top-left origin the UI
-/// uses, and collapsing per-glyph rects into one box per line.
+/// from PDF user space into the render space the UI draws in (see
+/// [`render_space`]), and collapsing per-glyph rects into one box per line.
+///
+/// The conversion has to come first: [`merge_line_runs`] joins boxes that sit
+/// side by side on screen, and on a rotated page that is not what sits side by
+/// side in user space.
 ///
 /// Returns `None` for a hit that yields no readable rects, so it can be fed
 /// straight to `extend`.
-fn segments_to_match(
-    segments: &PdfPageTextSegments,
-    page_height: f32,
-    origin_x: f32,
-    origin_y: f32,
-) -> Option<SearchMatch> {
+fn segments_to_match(segments: &PdfPageTextSegments, space: &PageSpace) -> Option<SearchMatch> {
     let rects: Vec<TextRect> = (0..segments.len())
         .filter_map(|i| segments.get(i).ok())
-        .map(|segment| {
-            let bounds = segment.bounds();
-            TextRect {
-                x: bounds.left().value - origin_x,
-                y: page_height - (bounds.top().value - origin_y),
-                width: bounds.right().value - bounds.left().value,
-                height: bounds.top().value - bounds.bottom().value,
-            }
-        })
+        .map(|segment| user_rect_to_render(space, &segment.bounds()))
         .collect();
 
     (!rects.is_empty()).then(|| SearchMatch {
@@ -2043,5 +2069,126 @@ mod tests {
         let c = page_text_coverage_impl(blank_doc, "blank".to_string(), state.ocr_cache_handle())
             .expect("count");
         assert_eq!((c.needing_ocr, c.ocr_only), (0, 1));
+    }
+    // ── Rotated pages ───────────────────────────────────────────────────────
+    //
+    // A publisher can build a portrait page by laying the content sideways on
+    // a landscape MediaBox and setting `/Rotate 90` (the Church News authority
+    // chart does exactly this). pdfium reports text boxes in *unrotated* user
+    // space; the overlays draw in render space. Every rect leaving this module
+    // has to cross between the two, and these tests check it by rendering — a
+    // highlight must sit on the ink, which no amount of reading coordinates
+    // back can prove (see CLAUDE.md, "Page-authoring tools and rotated pages").
+
+    const ROTATED_W: f32 = 300.0;
+    const ROTATED_H: f32 = 500.0;
+    const ROTATED_CROP: [f32; 4] = [20.0, 30.0, 280.0, 470.0];
+
+    /// A non-square page at `rotate` carrying "WORD" in red 24pt Helvetica,
+    /// drawn counter-rotated so it reads level on screen at every rotation.
+    fn rotated_word_page(rotate: i64, crop: Option<[f32; 4]>) -> Vec<u8> {
+        use crate::commands::page_space::quarter_turn_matrix;
+        use lopdf::{dictionary, Document, Object, Stream};
+
+        let bytes = crate::geometry_page_bytes(ROTATED_W, ROTATED_H, rotate, crop);
+        let mut doc = Document::load_mem(&bytes).expect("load geometry page");
+        let page_id = *doc.get_pages().get(&1).expect("page 1");
+        let [a, b, c, d, _, _] = quarter_turn_matrix(rotate);
+        let content = format!("1 0 0 rg BT /F1 24 Tf {a} {b} {c} {d} 150 250 Tm (WORD) Tj ET");
+        let content_id = doc.add_object(Object::Stream(Stream::new(
+            lopdf::Dictionary::new(),
+            content.into_bytes(),
+        )));
+        let page = doc.get_object_mut(page_id).unwrap().as_dict_mut().unwrap();
+        page.set("Contents", Object::Reference(content_id));
+        page.set(
+            "Resources",
+            dictionary! {
+                "Font" => dictionary! {
+                    "F1" => dictionary! {
+                        "Type" => "Font",
+                        "Subtype" => "Type1",
+                        "BaseFont" => "Helvetica",
+                    },
+                },
+            },
+        );
+        let mut out = Vec::new();
+        doc.save_to(&mut out).expect("serialize rotated word page");
+        out
+    }
+
+    fn is_red(px: &[u8]) -> bool {
+        // `as_rgba_bytes` is RGBA.
+        px[0] > 160 && px[1] < 110 && px[2] < 110
+    }
+
+    fn load_bytes(state: &AppState, doc_id: &str, bytes: Vec<u8>) {
+        let path = std::env::temp_dir().join(format!("tumbler_rotated_{doc_id}.pdf"));
+        std::fs::write(&path, &bytes).expect("write rotated page");
+        let entry = DocEntry::load(state.pdfium, &path.to_string_lossy(), None).expect("load");
+        state.insert_document(doc_id.to_string(), entry).expect("insert");
+    }
+
+    /// The rendered ink must sit inside `(x, y, w, h)`, and the box must be
+    /// level on screen — wider than tall, as the word reads.
+    fn assert_box_covers_ink(ink: [f32; 4], (x, y, w, h): (f32, f32, f32, f32), what: &str) {
+        let tol = 1.5;
+        assert!(
+            ink[0] >= x - tol && ink[1] >= y - tol && ink[2] <= x + w + tol && ink[3] <= y + h + tol,
+            "{what}: ink {ink:?} is not inside box ({x:.1}, {y:.1}, {w:.1}, {h:.1})"
+        );
+        assert!(w > h, "{what}: box {w:.1}x{h:.1} is not level on screen");
+    }
+
+    fn rotated_cases() -> Vec<(i64, Option<[f32; 4]>)> {
+        [0, 90, 180, 270]
+            .into_iter()
+            .flat_map(|r| [(r, None), (r, Some(ROTATED_CROP))])
+            .collect()
+    }
+
+    #[test]
+    fn search_highlight_lands_on_the_ink_of_a_rotated_page() {
+        let pdfium = crate::test_pdfium();
+        let state = AppState::new(pdfium.get(), None);
+        for (i, (rotate, crop)) in rotated_cases().into_iter().enumerate() {
+            let what = format!("rotate {rotate}, crop {crop:?}");
+            let bytes = rotated_word_page(rotate, crop);
+            let ink = crate::rendered_mark_bbox(pdfium.get(), bytes.clone(), false, is_red)
+                .unwrap_or_else(|| panic!("{what}: the word did not render"));
+            let doc_id = format!("search{i}");
+            load_bytes(&state, &doc_id, bytes);
+
+            let results =
+                search_document_impl(&state, doc_id, "WORD".into(), false, false, false)
+                    .expect("search");
+            assert_eq!(results.len(), 1, "{what}: expected one page of hits");
+            let rects = &results[0].matches[0].rects;
+            assert_eq!(rects.len(), 1, "{what}: one word, one highlight: {rects:?}");
+            let r = &rects[0];
+            assert_box_covers_ink(ink, (r.x, r.y, r.width, r.height), &what);
+        }
+    }
+
+    #[test]
+    fn text_overlay_runs_land_on_the_ink_of_a_rotated_page() {
+        let pdfium = crate::test_pdfium();
+        let state = AppState::new(pdfium.get(), None);
+        for (i, (rotate, crop)) in rotated_cases().into_iter().enumerate() {
+            let what = format!("rotate {rotate}, crop {crop:?}");
+            let bytes = rotated_word_page(rotate, crop);
+            let ink = crate::rendered_mark_bbox(pdfium.get(), bytes.clone(), false, is_red)
+                .unwrap_or_else(|| panic!("{what}: the word did not render"));
+            let doc_id = format!("overlay{i}");
+            load_bytes(&state, &doc_id, bytes);
+
+            let items = extract_page_text_impl(&state, doc_id, 1).expect("extract");
+            assert_eq!(items.len(), 1, "{what}: the word must be one run, got {} items", items.len());
+            assert_eq!(items[0].text, "WORD", "{what}");
+            let it = &items[0];
+            assert!(it.font_size > 0.0, "{what}: a 0pt run renders as a 0px overlay span");
+            assert_box_covers_ink(ink, (it.x, it.y, it.width, it.height), &what);
+        }
     }
 }
