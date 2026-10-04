@@ -187,6 +187,23 @@ export function SearchPanel() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [totalMatches, nextSearchResult, prevSearchResult]);
 
+  // App clears a tab's search when its pages are edited (rotate, delete,
+  // reorder, merge). Follow it into the query box, or the panel keeps the old
+  // query beside an empty result list and reports "No matches found" — and
+  // offers to OCR a page that has text. Only a drop to "" on the *same* tab
+  // counts: a tab switch changes the store's query without anything clearing.
+  const storeQuery = activeTab?.searchQuery ?? "";
+  const prevStoreQueryRef = useRef({ tabId, query: storeQuery });
+  useEffect(() => {
+    const prev = prevStoreQueryRef.current;
+    prevStoreQueryRef.current = { tabId, query: storeQuery };
+    if (prev.tabId === tabId && prev.query !== "" && storeQuery === "") {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+      setQuery("");
+      setResultPage(0);
+    }
+  }, [tabId, storeQuery]);
+
   // Clear any stale search/OCR state when switching tabs.
   useEffect(() => {
     setSearchError(null);

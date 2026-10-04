@@ -161,6 +161,46 @@ describe("App single-instance-per-file open guard", () => {
     expect(usePdfStore.getState().tabs[0].isDirty).toBe(false);
   });
 
+  it("clears the search of a document whose pages were edited", async () => {
+    // Saved highlight boxes are positions on the old page layout: a rotate
+    // turns the page under them, a delete or reorder renumbers it. They are
+    // dropped rather than left pointing at the wrong place.
+    let pagesHandler:
+      | ((event: { payload: { docIds: string[]; pageCount: number; pageDimensions: unknown[] } }) => void)
+      | undefined;
+    vi.mocked(listen).mockImplementation(async (event, handler) => {
+      if (event === "document-pages-changed") pagesHandler = handler as unknown as typeof pagesHandler;
+      return () => {};
+    });
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => (cmd === "read_typewriter" ? [] : null));
+
+    await act(async () => {
+      render(<App />);
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    const hits = [{ page: 2, matches: [{ rects: [{ x: 1, y: 2, width: 3, height: 4 }] }] }];
+    usePdfStore.setState({
+      tabs: [
+        makeTab({ id: "tab-1", docId: "doc-1", searchQuery: "foo", searchResults: hits, searchResultIndex: 0 }),
+        makeTab({ id: "tab-2", docId: "doc-2", searchQuery: "bar", searchResults: hits, searchResultIndex: 0 }),
+      ],
+      activeTabId: "tab-1",
+    });
+
+    await act(async () => {
+      pagesHandler!({ payload: { docIds: ["doc-1"], pageCount: 3, pageDimensions: [{ width: 200, height: 200 }] } });
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    const [edited, other] = usePdfStore.getState().tabs;
+    expect(edited.searchQuery).toBe("");
+    expect(edited.searchResults).toEqual([]);
+    expect(edited.searchResultIndex).toBe(-1);
+    // Another document's search is untouched.
+    expect(other.searchQuery).toBe("bar");
+    expect(other.searchResults).toEqual(hits);
+  });
+
   it("falls back to the raw path when canonicalization fails", async () => {
     const openFile = await renderAppAndGetOpenFile();
     vi.mocked(invoke).mockImplementation(async (cmd: string) => {

@@ -1620,7 +1620,7 @@ mod tests {
             .load_pdf_from_byte_vec(edited.expect("edited bytes"), None)
             .expect("reopen");
         let page = doc.pages().get(page_1based as i32 - 1).expect("page");
-        let (ox, oy) = crate::commands::text::page_origin(&page);
+        let [ox, oy] = crate::commands::text::render_space(&page).origin();
         println!("page origin = ({ox:.2}, {oy:.2})");
         let text = page.text().expect("text");
         let options = PdfSearchOptions::new();

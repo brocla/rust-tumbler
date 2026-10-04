@@ -65,7 +65,7 @@
 //! and `check_parser_agreement_fails_closed_on_mismatch` (issue #77).
 
 use crate::commands::ocr::{OcrCache, OcrEngine, OCR_UNAVAILABLE_MESSAGE};
-use crate::commands::text::{page_origin, search_document_impl, TextRect};
+use crate::commands::text::{render_space, search_document_impl, user_rect_to_render, TextRect};
 use crate::commands::text_layer::add_text_layer_impl_filtered;
 use crate::error::AppError;
 use crate::state::{lock_mutex, AppState, DocEntry, PendingRedaction};
@@ -731,8 +731,7 @@ pub(crate) fn verify_redactions(
             .pages()
             .get(page_num.saturating_sub(1) as i32)
             .map_err(|e| AppError::pdfium(format!("Failed to get page {page_num}"), e))?;
-        let page_height = page.height().value;
-        let (origin_x, origin_y) = page_origin(&page);
+        let space = render_space(&page);
         let text = page
             .text()
             .map_err(|e| AppError::pdfium("Failed to read text for verification", e))?;
@@ -742,12 +741,7 @@ pub(crate) fn verify_redactions(
                 continue;
             }
             let Ok(bounds) = ch.loose_bounds() else { continue };
-            let char_rect = TextRect {
-                x: bounds.left().value - origin_x,
-                y: page_height - (bounds.top().value - origin_y),
-                width: bounds.right().value - bounds.left().value,
-                height: bounds.top().value - bounds.bottom().value,
-            };
+            let char_rect = user_rect_to_render(&space, &bounds);
             for &i in indices {
                 if !leaked.contains(&i) && rects_intersect(&char_rect, &regions[i].rect) {
                     leaked.insert(i);
@@ -763,22 +757,15 @@ pub(crate) fn verify_redactions(
         let page_count = doc.pages().len();
         for page_idx in 0..page_count {
             let Ok(page) = doc.pages().get(page_idx) else { continue };
-            let page_height = page.height().value;
-            let (origin_x, origin_y) = page_origin(&page);
+            let space = render_space(&page);
             let Ok(text) = page.text() else { continue };
             let Ok(search) = text.search(query, &options) else { continue };
             for match_segments in search.iter(PdfSearchDirection::SearchForward) {
                 for i in 0..match_segments.len() {
                     if let Ok(segment) = match_segments.get(i) {
-                        let bounds = segment.bounds();
                         leaks.push(RedactRegion {
                             page: (page_idx + 1) as u32,
-                            rect: TextRect {
-                                x: bounds.left().value - origin_x,
-                                y: page_height - (bounds.top().value - origin_y),
-                                width: bounds.right().value - bounds.left().value,
-                                height: bounds.top().value - bounds.bottom().value,
-                            },
+                            rect: user_rect_to_render(&space, &segment.bounds()),
                         });
                     }
                 }
@@ -3027,8 +3014,8 @@ mod tests {
     /// flattening step, not of the layer author, and nothing else asserts it:
     /// if flattening ever stopped normalizing, re-OCR would start meeting real
     /// page geometry and the writer's and verifier's separate origin handling
-    /// (the author adds the render-box origin; `verify_redactions` subtracts
-    /// `page_origin` from extracted char boxes) would become load-bearing
+    /// (the author adds the render-box origin; `verify_redactions` maps
+    /// extracted char boxes through `render_space`) would become load-bearing
     /// under a safety check. The y assertion below would then move off 145..157
     /// and say so.
     #[test]

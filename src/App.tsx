@@ -296,9 +296,21 @@ function App() {
         // what remounts every slot and blinks the whole document. A destructive
         // op (delete/rotate/merge) evicts everything and bumps pagesVersion so
         // the document fully re-renders.
+        //
+        // Either way the search is cleared. Its hits are boxes on the old page
+        // layout: a rotate turns the page under them, a delete or reorder
+        // renumbers it, and they would keep highlighting the wrong place until
+        // the user searched again. Re-running the search instead would need
+        // the panel's mode flags, which live in the panel, not the tab.
+        const clearedSearch = { searchQuery: "", searchResults: [], searchResultIndex: -1 };
         if (optimistic) {
           evictPages(tab.docId);
-          updateTab(tab.id, { pageCount, pageDimensions, contentEpoch: tab.contentEpoch + 1 });
+          updateTab(tab.id, {
+            pageCount,
+            pageDimensions,
+            contentEpoch: tab.contentEpoch + 1,
+            ...clearedSearch,
+          });
         } else {
           evictDoc(tab.docId);
           updateTab(tab.id, {
@@ -306,6 +318,7 @@ function App() {
             pageDimensions,
             pagesVersion: tab.pagesVersion + 1,
             contentEpoch: tab.contentEpoch + 1,
+            ...clearedSearch,
           });
         }
         // The edit rewrote the document's bytes, so any signature is now
