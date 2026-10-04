@@ -419,6 +419,31 @@ describe("SearchPanel", () => {
     }
   });
 
+  it("empties the query box when the tab's search is cleared by a page edit", async () => {
+    const results: SearchResult[] = [
+      { page: 1, matches: [{ rects: [{ x: 0, y: 0, width: 10, height: 10 }] }] },
+    ];
+    setTab({ searchQuery: "test", searchResults: results, searchResultIndex: 0 });
+    render(<SearchPanel />);
+    expect(screen.getByPlaceholderText("Search...")).toHaveValue("test");
+
+    // What App's document-pages-changed handler does to the tab.
+    await act(async () => {
+      usePdfStore.getState().updateTab("tab-1", {
+        searchQuery: "",
+        searchResults: [],
+        searchResultIndex: -1,
+      });
+    });
+
+    expect(screen.getByPlaceholderText("Search...")).toHaveValue("");
+    // Without the box emptying, the panel would claim the query has no
+    // matches — and offer to OCR a page that has text.
+    expect(screen.queryByText("No matches found")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Run OCR/)).not.toBeInTheDocument();
+    expect(invoke).not.toHaveBeenCalledWith("search_document", expect.anything());
+  });
+
   it("toggling a flag after a tab switch does not fire a cross-tab search", async () => {
     // Start on tab A with an active query.
     usePdfStore.setState({
