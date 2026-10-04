@@ -15,7 +15,7 @@ Opens PDF files (via file association, or the Open dialog — Ctrl+O / toolbar; 
 | Shell | Tauri v2 | Wraps a WebView2 window; Rust/frontend communicate via typed IPC commands |
 | Frontend | React 18, TypeScript, Vite | Single-page app mounted in the WebView |
 | State | Zustand | `src/store/usePdfStore.ts` — one global store |
-| PDF rendering | pdfium-render (wraps Google's pdfium) | Read-only; renders pages to RGBA bitmaps |
+| PDF rendering | pdfium-render (wraps Google's pdfium) | Renders pages to RGBA bitmaps, reads text and its positions, and performs the page ops (see [The two PDF libraries](#the-two-pdf-libraries-and-when-to-use-each)) |
 | PDF editing | lopdf | Object-model write operations: metadata, compression, forms, text layer (page ops use pdfium) |
 | OCR | Windows.Media.Ocr (WinRT) | Windows 10/11 built-in; requires a language pack |
 | Printing | windows crate (GDI / PrintDlgExW) | Native Windows print dialogs and spooler |
@@ -61,11 +61,13 @@ rust-tumbler/
 | `pages.rs` | delete, rotate, reorder, merge, split pages (**pdfium** — mutates the `PdfDocument` then `save_to_bytes()`) |
 | `save.rs` | Save / Save As — the only commands that write the in-memory buffer to disk |
 | `optimize.rs` | five-step compression pipeline (lopdf) |
+| `linearize.rs` | Save Linearized Copy: writes a linearized (Fast Web View) copy of the buffer through qpdf (`qpdf.dll`, FFI). Export-only, never touches the buffer; the copy is written unencrypted (issue #3) |
 | `margins.rs` | Expand Margins: detect each page's ink bounding box (pdfium raster scan) and scale content uniformly to fill the page (lopdf `q cm … Q` wrap; annotations ride along) |
 | `text_layer.rs` | embed an invisible OCR text layer into the document buffer (lopdf; issue #4) |
+| `redact.rs` | true redaction: each page holding a region is rendered, the regions burned to black and the page replaced by one full-page JPEG; document-level leak vectors are scrubbed, the flattened pages re-OCR'd, and the output verified. The result is staged as a `PendingRedaction` and written only by `save_redacted_copy` (Save As), never into `DocEntry.buffer` (issue #1) |
 | `typewriter.rs` | place free-text "typewriter" notes anywhere on a page as FreeText annotations with a generated appearance stream (lopdf on the buffer; re-hydrated on open; issue #99) |
 | `ink.rs` | Ink Signature: freehand strokes flattened into the page content stream (lopdf on the buffer; issue #120) |
-| `page_space.rs` | not a command — the shared conversion between the frontend's coordinates and PDF user space, for pages with a `/Rotate` or a CropBox. Used by Typewriter and Ink; its inherited box / rotate readers are also used by Expand Margins (issue #121) |
+| `page_space.rs` | not a command — the shared conversion between the frontend's coordinates and PDF user space, for pages with a `/Rotate` or a CropBox. Typewriter and Ink use it to place content; search, the text overlay and redaction use it (through `text::render_space`) to bring pdfium's text boxes into the frontend's space; Expand Margins and the OCR text layer use its inherited box / rotate readers (issue #121) |
 | `forms.rs` | AcroForm field discovery + inline value writes (lopdf on the buffer; issue #2) |
 | `signature.rs` | digital-signature integrity verification, read-only (lopdf `/ByteRange` parse; CMS parsed via Windows CryptoAPI `CryptMsg*`, which handles Adobe's BER encoding; issues #17, #39) |
 | `conformance.rs` | declared ISO sub-format detection — PDF/A, PDF/X, PDF/E, PDF/UA — from the XMP packet (lopdf) |
@@ -112,7 +114,7 @@ Key fields:
 
 `DocEntry` holds the `PdfDocument<'static>` (pdfium handle), the `file_path` string, `buffer: Vec<u8>` (the authoritative current bytes, including unsaved edits; `document` is always a pdfium render of it) and `dirty: bool` (true when there are unsaved changes). Buffer-model edits end with `state.set_buffer_and_refresh(doc_id, bytes)` and emit `document-dirty-changed`; `save_document` / `save_document_as` (in `commands/save.rs`) are the only commands that write the buffer to disk.
 
-A password-protected file is decrypted **into the buffer** at open (issue #57), so the buffer is always plaintext and every editing feature works on encrypted documents. `DocEntry` keeps `encrypted: bool`, the `password` (in memory only), and the original permission bits; Save re-encrypts the buffer with AES-256 on the way to disk. The `remove_password` command (in `commands/encryption.rs`) clears the stored password so the next Save writes an unprotected file; its mirror `set_password` (issue #58) stores one — protecting a plain document or changing an existing password — so the next Save writes an AES-256-encrypted file.
+A password-protected file is decrypted **into the buffer** at open (issue #57), so the buffer is always plaintext and every editing feature works on encrypted documents. `DocEntry.protection` is a `Protection`: `Plaintext`, or `Encrypted { password, permissions }` holding the password (in memory only) and the original permission bits, so an encrypted document without a password cannot be represented. Save re-encrypts the buffer with AES-256 on the way to disk when it is `Encrypted`. The `remove_password` command (in `commands/encryption.rs`) sets it to `Plaintext` so the next Save writes an unprotected file; its mirror `set_password` (issue #58) sets `Encrypted` — protecting a plain document or changing an existing password — so the next Save writes an AES-256-encrypted file.
 
 Accessing a document safely:
 ```rust
@@ -224,7 +226,7 @@ All edits follow the **buffer model** — they read from and write back to `DocE
 Key slices:
 - `tabs: TabState[]` — one entry per open document tab; holds `docId`, `currentPage`, `searchResults`, `zoom`, `displayMode`, `ocrEpoch`, `pagesVersion`, etc.
 - `activeTabId` — which tab is focused.
-- `activeSidebarTool` — which panel is open in the sidebar (`"thumbnails" | "search" | "metadata" | "pages" | "optimize" | null`).
+- `activeSidebarTool` — which panel is open in the sidebar (`"thumbnails" | "search" | "metadata" | "pages" | "optimize" | "margins" | "redact" | "typewriter" | "ink" | null`).
 - `ocrProgress` / `compressProgress` — shared between the trigger (Toolbar/panel) and the progress overlay (App).
 
 `doc_id` is a UUID string generated on the frontend when a file is opened. It is the key used in all backend `HashMap`s.
@@ -291,7 +293,7 @@ cargo test
 
 pdfium can only be bound once per process, so tests share one instance. pdfium-render's `thread_safe` feature serializes individual API calls, but multi-step sequences (create + edit + save + reload) interleave into pdfium's internal races, surfacing as `STATUS_HEAP_CORRUPTION` — intermittently, and often at teardown, so a green run proves little.
 
-`test_pdfium()` returns a handle that **holds the lock and hands out the instance together**, so a test that forgets to lock cannot compile. That replaced a separate `test_pdfium_guard()` that tests were asked to remember; it left 47 of them unguarded, invisibly, because the suite ran with `--test-threads=1`. Plain `cargo test` is now correct: pdfium tests serialize against each other while everything else runs in parallel (9.1s → 5.7s).
+`test_pdfium()` returns a handle that **holds the lock and hands out the instance together**, so a test that forgets to lock cannot compile. Keep it that way: a lock that tests must remember to take separately gets forgotten without anything failing. Plain `cargo test` is correct: pdfium tests serialize against each other while everything else runs in parallel.
 
 Two rules follow from the lock not being reentrant:
 
@@ -324,13 +326,15 @@ npm run tauri -- icon tumbler.png
 
 - Node.js 20+
 - Rust stable + Tauri v2 prerequisites for Windows
-- `src-tauri/resources/pdfium.dll` — win-x64 build from [pdfium-binaries](https://github.com/bblanchon/pdfium-binaries) (not checked in)
+- Every DLL listed in `bundle.resources` (`src-tauri/tauri.conf.json`), in `src-tauri/resources/`. Tauri checks these paths when the crate compiles, so a missing one fails `tauri dev`, `tauri build` and `cargo test` alike. None are checked in:
+  - `pdfium.dll`: win-x64 build from [pdfium-binaries](https://github.com/bblanchon/pdfium-binaries)
+  - `qpdf.dll` (renamed from `bin/qpdf30.dll`) plus `msvcp140.dll`, `vcruntime140.dll` and `vcruntime140_1.dll`: from the official qpdf `msvc64` release zip, at the version `.github/workflows/release.yml` pins
+  - `tumbler-thumbnailer.dll`: built and copied in by `beforeBuildCommand`
+
+  An empty placeholder file passes the compile-time check (CI does this), but the feature that loads that DLL then fails at runtime.
 
 ---
 
 ## Version
 
-Version is set in three files — keep them in sync:
-- `package.json` → `"version"`
-- `src-tauri/tauri.conf.json` → `"version"`
-- `src-tauri/Cargo.toml` → `version`
+The version lives in `package.json`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml` and this crate's entry in `src-tauri/Cargo.lock`. Bump it with `npm version <patch|minor|major>`: its `version` lifecycle script (`scripts/sync-version.js`) copies the new version into the other three and stages them, so the bump is one commit and one tag.
