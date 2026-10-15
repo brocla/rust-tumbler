@@ -306,3 +306,23 @@ fn cancellation_mid_ocr_stops_the_call_and_the_server_stays_responsive() {
     assert_eq!(info["dirty"], false, "the cancelled edit was not applied");
     assert!(started.try_iter().count() < 2, "OCR kept going after the cancel");
 }
+
+/// An unverified redaction wrote nothing; an agent that only checks isError
+/// must still see that it failed.
+#[test]
+fn an_unverified_redaction_is_an_error_result() {
+    use super::tests_v11::{session_with, SeesThroughBlackBoxes};
+    let pdfium = crate::test_pdfium();
+    let root = TempDir::new("mcp");
+    fixture_copy(&root, "a.pdf");
+    let out = transcript(
+        session_with(pdfium.get(), Arc::new(SeesThroughBlackBoxes), &root),
+        &[
+            call(1, "doc_open", json!({ "path": "a.pdf" })),
+            call(2, "redact_apply", json!({ "doc": 1, "terms": ["Fixture"], "dpi": 100, "out": "x.pdf" })),
+        ],
+    );
+    let r = response(&out, 2)["result"].clone();
+    assert_eq!(r["isError"], true, "{r}");
+    assert_eq!(r["structuredContent"]["verified"], false);
+}

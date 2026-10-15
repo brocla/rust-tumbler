@@ -8,7 +8,9 @@
 //! [`check_args`] before the handler runs.
 
 use super::args::*;
-use super::handlers::{document, linearize, margins, metadata, ocr, optimize, pages, render, standards, text};
+use super::handlers::{
+    document, forms, linearize, margins, metadata, ocr, optimize, pages, redact, render, standards, text, typewriter,
+};
 use super::{Automation, Content, ToolError};
 use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
@@ -422,6 +424,96 @@ fn table() -> Vec<ToolDef> {
             margins::margins_expand,
         )
         .commands(&["expand_margins"]),
+        // ── Redaction (v1.1) ────────────────────────────────────────────────
+        tool::<RedactFindArgs>(
+            "redact_find",
+            "Find text to redact",
+            "Find every occurrence of the terms, as the regions redact_apply would burn, in points \
+             from the top-left of the page as displayed (the same shape redact_apply's rects \
+             take). For a plain search (not match_case, whole_word or regex), metadata_matches \
+             lists the metadata fields (Title, Author, ...) that contain a term. Changes \
+             nothing.",
+            redact::redact_find,
+        )
+        .read_only()
+        .commands(&["find_redaction_matches", "find_redaction_metadata_matches"]),
+        tool::<RedactApplyArgs>(
+            "redact_apply",
+            "Redact into a new file",
+            "Permanently remove text: every page holding a region (each match of terms, plus \
+             rects) is replaced by an image with the regions burned black, and the document's \
+             other hiding places (metadata, annotations, form data, structure tree and so on) \
+             are scrubbed. The result is verified, and written to out only if nothing \
+             recoverable remains; verified false means nothing was written, and leaks says \
+             where. The open document is not changed, and out cannot be its own file. A plain \
+             term (not match_case, whole_word or regex) must then be gone from the whole \
+             output, metadata included. Flattened pages are OCR'd so they stay searchable. \
+             Slow; reports progress.",
+            redact::redact_apply,
+        )
+        .destructive()
+        .commands(&["apply_redactions", "save_redacted_copy"]),
+        // ── Forms (v1.1) ────────────────────────────────────────────────────
+        tool::<DocPageArgs>(
+            "form_fields",
+            "List form fields",
+            "Every AcroForm field: its id (the fully qualified name form_fill and form_reset \
+             take), type, current value, the export_value a checkbox or radio button sets, \
+             dropdown options, page, rectangle and whether it is read-only. A radio group lists \
+             one entry per button, sharing an id. Empty when the document has no form.",
+            forms::form_fields,
+        )
+        .read_only()
+        .commands(&["get_form_fields", "document_has_form"]),
+        tool::<FormFillArgs>(
+            "form_fill",
+            "Fill in form fields",
+            "Set field values by name in the in-memory document; call doc_save to write it. \
+             Every name and checkbox or radio choice is checked first, so if any is wrong \
+             nothing is changed.",
+            forms::form_fill,
+        )
+        .commands(&["set_form_field_value"]),
+        tool::<FormResetArgs>(
+            "form_reset",
+            "Reset form fields",
+            "Reset fields to their default values (or empty), all of them or the ones named, in \
+             the in-memory document; call doc_save to write it.",
+            forms::form_reset,
+        )
+        .destructive()
+        .commands(&["clear_form"]),
+        // ── Typewriter and ink (v1.1) ───────────────────────────────────────
+        tool::<DocPageArgs>(
+            "typewriter_list",
+            "List typewriter notes",
+            "The typewriter notes Tumbler has placed (FreeText annotations it wrote), with their \
+             boxes in points from the top-left of the page as displayed, text and font.",
+            typewriter::typewriter_list,
+        )
+        .read_only()
+        .commands(&["read_typewriter"]),
+        tool::<TypewriterSetArgs>(
+            "typewriter_set",
+            "Place typewriter notes",
+            "Replace one page's typewriter notes with the given list (empty removes them), in the \
+             in-memory document; call doc_save to write it. Each note is text wrapped in a box, \
+             in points from the top-left of the page as displayed. Notes are annotations that \
+             other readers show and that stay editable; their text is also searchable.",
+            typewriter::typewriter_set,
+        )
+        .commands(&["apply_typewriter"]),
+        tool::<InkAddArgs>(
+            "ink_add",
+            "Draw ink",
+            "Draw freehand strokes (polylines, in points from the top-left of the page as \
+             displayed) onto a page in blue ballpoint ink, in the in-memory document; call \
+             doc_save to write it. For signing a document that has no signature field. The ink \
+             becomes part of the page content and cannot be removed afterwards except by closing \
+             without saving. It is not a digital signature.",
+            typewriter::ink_add,
+        )
+        .commands(&["apply_ink"]),
     ]
 }
 
@@ -431,21 +523,10 @@ fn table() -> Vec<ToolDef> {
 #[cfg(test)]
 pub(crate) const NOT_AUTOMATED: &[(&str, &str)] = &[
     ("canonicalize_path", "GUI plumbing: tools canonicalize the paths they are given"),
-    ("document_has_form", "v1.1 (form tools); doc_info already reports has_form"),
-    ("get_form_fields", "v1.1: form_fields"),
-    ("set_form_field_value", "v1.1: form_fill"),
-    ("clear_form", "v1.1: form_reset"),
-    ("reset_form_via_button", "a form button's reset action; after v1.1"),
-    ("set_signature_strokes", "drawing into a signature field; after v1.1"),
-    ("find_redaction_matches", "v1.1: redact_find"),
-    ("find_redaction_metadata_matches", "v1.1: redact_find"),
-    ("apply_redactions", "v1.1: redact_apply"),
-    ("save_redacted_copy", "v1.1: redact_apply"),
+    ("reset_form_via_button", "a form button's reset action; form_reset covers resetting"),
+    ("set_signature_strokes", "drawing into a signature field; a candidate for after v1.1"),
     ("render_redacted_page", "GUI preview of a staged redaction; redact_apply writes directly"),
     ("discard_redaction", "GUI preview of a staged redaction; redact_apply writes directly"),
-    ("read_typewriter", "v1.1: typewriter_list"),
-    ("apply_typewriter", "v1.1: typewriter_set"),
-    ("apply_ink", "v1.1: ink_add"),
     ("cancel_ocr", "replaced by MCP notifications/cancelled and Ctrl+C"),
     ("cancel_compress", "replaced by MCP notifications/cancelled and Ctrl+C"),
     ("cancel_margins", "replaced by MCP notifications/cancelled and Ctrl+C"),

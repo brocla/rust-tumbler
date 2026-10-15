@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 
 /// A PDF with one blank page per `(width, height)`, built with lopdf so the
 /// fixture needs no pdfium.
-fn pages_pdf(sizes: &[(f32, f32)]) -> Vec<u8> {
+pub(super) fn pages_pdf(sizes: &[(f32, f32)]) -> Vec<u8> {
     use lopdf::{dictionary, Dictionary, Document, Object, Stream};
     let mut doc = Document::with_version("1.5");
     let pages_id = doc.new_object_id();

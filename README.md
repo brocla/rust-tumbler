@@ -68,13 +68,16 @@ tumbler-cli ocr scan.pdf --out searchable.pdf
 tumbler-cli compress big.pdf --out small.pdf
 tumbler-cli linearize report.pdf --out web.pdf
 tumbler-cli expand-margins score.pdf --out bigger.pdf
+tumbler-cli redact contract.pdf --term "Jane Doe" --rect 2:72,100,200,20 --out public.pdf
 ```
 
 Underneath, every command is a sequence of calls to a table of tools, which
 `tumbler-cli tools` lists (`--json` for their argument schemas). Call one
 directly with `tumbler-cli run <tool> key=value ...`, or several in one session
 with `tumbler-cli run --script steps.json`. Results go to stdout as JSON; exit
-codes are 0 (success), 1 (the operation failed) and 2 (a usage error).
+codes are 0 (success), 1 (the operation failed), 2 (a usage error) and 3 (a
+redaction that could not be verified, so nothing was written). Redaction always
+writes a new file and never changes the original.
 Passwords come from `--password-file` or the `TUMBLER_PDF_PASSWORD` environment
 variable, never the command line.
 

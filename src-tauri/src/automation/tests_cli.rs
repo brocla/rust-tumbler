@@ -43,6 +43,11 @@ fn cli(pdfium: &'static Pdfium, args: &[&str]) -> Run {
 }
 
 fn cli_with(pdfium: &'static Pdfium, args: &[&str], opts: Options) -> Run {
+    cli_session(args, opts, || session(pdfium))
+}
+
+/// A run with its own session factory (another OCR engine, say).
+fn cli_session(args: &[&str], opts: Options, make: impl FnOnce() -> Automation) -> Run {
     let stdout = Arc::new(Mutex::new(Vec::<u8>::new()));
     let stderr = Arc::new(Mutex::new(Vec::<u8>::new()));
     let io = Io {
@@ -52,7 +57,7 @@ fn cli_with(pdfium: &'static Pdfium, args: &[&str], opts: Options) -> Run {
         stderr_is_terminal: opts.stderr_is_terminal,
     };
     let argv = std::iter::once("tumbler-cli").chain(args.iter().copied()).map(Into::into).collect();
-    let code = main_with(argv, opts.env, io, opts.cancel, || Ok(session(pdfium)));
+    let code = main_with(argv, opts.env, io, opts.cancel, || Ok(make()));
     let text = |b: &Arc<Mutex<Vec<u8>>>| String::from_utf8(b.lock().unwrap().clone()).expect("utf-8");
     Run { code, stdout: text(&stdout), stderr: text(&stderr) }
 }
@@ -575,4 +580,57 @@ fn split_creates_its_output_folder_only_without_root() {
     let r = cli(pdfium.get(), &["split", "in.pdf", "--out-dir", "missing", "--root", &ps(dir.path())]);
     assert_eq!(r.code, 1);
     assert!(!dir.0.join("missing").exists());
+}
+
+// ── redact (v1.1) ────────────────────────────────────────────────────────────
+
+#[test]
+fn redact_writes_a_verified_copy() {
+    use super::tests_v11::{session_with, NoWords};
+    let pdfium = crate::test_pdfium();
+    let dir = TempDir::new("cli");
+    let input = ps(&fixture_copy(&dir, "a.pdf"));
+    let out = dir.0.join("red.pdf");
+    let args = ["redact", &input, "--term", "Fixture", "--rect", "1:10,150,20,20", "--dpi", "100", "--out", &ps(&out)];
+    let r = cli_session(&args, Options::default(), || session_with(pdfium.get(), Arc::new(NoWords), &dir));
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(r.json()["verified"], true);
+    assert!(out.exists());
+    let r = cli_session(&["redact", &input, "--out", &ps(&out)], Options::default(), || session(pdfium.get()));
+    assert_eq!(r.code, 2, "nothing to redact is a usage error");
+    let r = cli_session(&["redact", &input, "--rect", "1:10,x", "--out", &ps(&out)], Options::default(), || session(pdfium.get()));
+    assert_eq!(r.code, 2);
+}
+
+/// Exit code 3: the redaction ran but could not be verified, so nothing was
+/// written. The result still goes to stdout, so a script can see the leaks.
+#[test]
+fn unverified_redaction_exits_3_and_writes_nothing() {
+    use super::tests_v11::{session_with, SeesThroughBlackBoxes};
+    let pdfium = crate::test_pdfium();
+    let dir = TempDir::new("cli");
+    let input = ps(&fixture_copy(&dir, "a.pdf"));
+    let out = dir.0.join("leaky.pdf");
+    let args = ["redact", &input, "--term", "Fixture", "--dpi", "100", "--out", &ps(&out)];
+    let r = cli_session(&args, Options::default(), || session_with(pdfium.get(), Arc::new(SeesThroughBlackBoxes), &dir));
+    assert_eq!(r.code, 3, "{}", r.stderr);
+    assert_eq!(r.json()["verified"], false);
+    assert!(r.stderr.contains("not verified"), "{}", r.stderr);
+    assert!(!out.exists());
+
+    let script = dir.file(
+        "s.json",
+        json!([
+            { "tool": "doc_open", "args": { "path": input } },
+            { "tool": "redact_apply", "args": { "doc": 1, "terms": ["Fixture"], "dpi": 100, "out": ps(&out) } },
+            { "tool": "doc_close", "args": { "doc": 1 } }
+        ])
+        .to_string()
+        .as_bytes(),
+    );
+    let r = cli_session(&["run", "--script", &ps(&script)], Options::default(), || {
+        session_with(pdfium.get(), Arc::new(SeesThroughBlackBoxes), &dir)
+    });
+    assert_eq!(r.code, 3, "{}", r.stderr);
+    assert_eq!(r.json().as_array().unwrap().len(), 2, "the script stops at the unverified step");
 }

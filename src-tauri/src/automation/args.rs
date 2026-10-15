@@ -5,6 +5,7 @@
 
 use schemars::JsonSchema;
 use serde::Deserialize;
+use std::collections::BTreeMap;
 
 /// No arguments.
 #[derive(Deserialize, JsonSchema)]
@@ -339,4 +340,183 @@ pub struct MarginsArgs {
     #[serde(default)]
     #[schemars(range(min = 0, max = 36))]
     pub padding: Option<f32>,
+}
+
+// ── v1.1: forms ──────────────────────────────────────────────────────────────
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DocPageArgs {
+    /// Document id, from doc_open or doc_list.
+    #[schemars(range(min = 1))]
+    pub doc: u64,
+    /// Only this page (1-based). Default: every page.
+    #[serde(default)]
+    #[schemars(range(min = 1))]
+    pub page: Option<u32>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FormFillArgs {
+    /// Document id, from doc_open or doc_list.
+    #[schemars(range(min = 1))]
+    pub doc: u64,
+    /// Field name (its id from form_fields) to value. A checkbox takes its
+    /// export_value (such as "Yes") or "Off"; a radio group takes one button's
+    /// export_value; a dropdown takes one of its options.
+    pub values: BTreeMap<String, String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FormResetArgs {
+    /// Document id, from doc_open or doc_list.
+    #[schemars(range(min = 1))]
+    pub doc: u64,
+    /// Field names (ids from form_fields) to reset. Default: every field.
+    #[serde(default)]
+    #[schemars(length(min = 1))]
+    pub fields: Option<Vec<String>>,
+}
+
+// ── v1.1: typewriter and ink ─────────────────────────────────────────────────
+
+/// The typewriter fonts, which need no embedding.
+#[derive(Deserialize, JsonSchema, Clone, Copy)]
+pub enum NoteFont {
+    Helvetica,
+    Times,
+    Courier,
+}
+
+/// One typewriter note: text in a box, in points from the top-left of the
+/// page as displayed.
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NoteArgs {
+    /// Left edge of the box.
+    pub x: f32,
+    /// Top edge of the box.
+    pub y: f32,
+    /// Box width; the text wraps inside it.
+    pub width: f32,
+    /// Box height.
+    pub height: f32,
+    /// The text; newlines start new lines.
+    pub text: String,
+    /// Default Helvetica.
+    #[serde(default)]
+    pub font_family: Option<NoteFont>,
+    /// Font size in points. Default 12.
+    #[serde(default)]
+    pub font_size: Option<f32>,
+    /// Default false.
+    #[serde(default)]
+    pub bold: bool,
+    /// Default false.
+    #[serde(default)]
+    pub italic: bool,
+    /// Text color as [red, green, blue], each 0 to 1. Default black.
+    #[serde(default)]
+    pub color: Option<[f32; 3]>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TypewriterSetArgs {
+    /// Document id, from doc_open or doc_list.
+    #[schemars(range(min = 1))]
+    pub doc: u64,
+    /// The page (1-based) whose notes these replace.
+    #[schemars(range(min = 1))]
+    pub page: u32,
+    /// The page's notes after the call; an empty list removes them all.
+    pub notes: Vec<NoteArgs>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct InkAddArgs {
+    /// Document id, from doc_open or doc_list.
+    #[schemars(range(min = 1))]
+    pub doc: u64,
+    /// The page (1-based) to draw on.
+    #[schemars(range(min = 1))]
+    pub page: u32,
+    /// Strokes, each a list of [x, y] points in points from the top-left of
+    /// the page as displayed, joined by straight lines.
+    #[schemars(length(min = 1))]
+    pub strokes: Vec<Vec<[f32; 2]>>,
+}
+
+// ── v1.1: redaction ──────────────────────────────────────────────────────────
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RedactFindArgs {
+    /// Document id, from doc_open or doc_list.
+    #[schemars(range(min = 1))]
+    pub doc: u64,
+    /// Words, phrases or (with regex) patterns to find.
+    #[schemars(length(min = 1))]
+    pub terms: Vec<String>,
+    /// Match case exactly. Default false.
+    #[serde(default)]
+    pub match_case: bool,
+    /// Match whole words only. Default false.
+    #[serde(default)]
+    pub whole_word: bool,
+    /// Treat the terms as regular expressions. Default false.
+    #[serde(default)]
+    pub regex: bool,
+}
+
+/// A rectangle to redact, in points from the top-left of the page as
+/// displayed.
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RedactRect {
+    /// The page, 1-based.
+    #[schemars(range(min = 1))]
+    pub page: u32,
+    /// Left edge.
+    pub x: f32,
+    /// Top edge.
+    pub y: f32,
+    /// Width.
+    pub width: f32,
+    /// Height.
+    pub height: f32,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RedactApplyArgs {
+    /// Document id, from doc_open or doc_list.
+    #[schemars(range(min = 1))]
+    pub doc: u64,
+    /// Words, phrases or (with regex) patterns to redact everywhere they occur.
+    #[serde(default)]
+    pub terms: Option<Vec<String>>,
+    /// For terms: match case exactly. Default false.
+    #[serde(default)]
+    pub match_case: bool,
+    /// For terms: match whole words only. Default false.
+    #[serde(default)]
+    pub whole_word: bool,
+    /// For terms: treat them as regular expressions. Default false.
+    #[serde(default)]
+    pub regex: bool,
+    /// Rectangles to redact, besides any terms.
+    #[serde(default)]
+    pub rects: Option<Vec<RedactRect>>,
+    /// Resolution the redacted pages are flattened at. Default 200.
+    #[serde(default)]
+    #[schemars(range(min = 72, max = 600))]
+    pub dpi: Option<f32>,
+    /// The file to write the redacted copy to (relative to --root when one is
+    /// set). Must not be the document's own file.
+    #[schemars(length(min = 1))]
+    pub out: String,
 }

@@ -25,6 +25,8 @@ mod tests_cli;
 mod tests_edit;
 #[cfg(test)]
 mod tests_mcp;
+#[cfg(test)]
+mod tests_v11;
 mod tools;
 pub(crate) mod user_path;
 
@@ -191,6 +193,14 @@ impl Automation {
         ids.sort_unstable();
         Ok(ids)
     }
+}
+
+/// Whether `content` is a redaction that ran but could not be verified, so
+/// wrote nothing. The tool succeeded in reporting that, but front doors treat
+/// it as a failure: MCP marks the result `isError`, and the CLI exits 3.
+pub(crate) fn unverified(tool: &str, content: &[Content]) -> bool {
+    tool == "redact_apply"
+        && content.iter().any(|c| matches!(c, Content::Json(v) if v.get("verified") == Some(&Value::Bool(false))))
 }
 
 fn no_progress() -> Progress {

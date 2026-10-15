@@ -7,8 +7,8 @@
 //!
 //! stdout carries only the result: one JSON document, or the text for `text`.
 //! Progress and errors go to stderr. Exit codes: 0 success; 1 the tool ran and
-//! failed; 2 a usage or argument error. 3 is reserved for v1.1's redaction
-//! ("finished but not verified").
+//! failed; 2 a usage or argument error; 3 a redaction that ran but could not
+//! be verified, so wrote nothing.
 
 use super::{tools, Automation, Content, Progress, ToolError};
 use clap::{Args, Parser, Subcommand};
@@ -57,6 +57,7 @@ impl CliEnv {
 pub const EXIT_OK: u8 = 0;
 pub const EXIT_FAILED: u8 = 1;
 pub const EXIT_USAGE: u8 = 2;
+pub const EXIT_UNVERIFIED: u8 = 3;
 
 #[derive(Parser)]
 #[command(
@@ -68,7 +69,8 @@ pub const EXIT_USAGE: u8 = 2;
         `run` calls one tool, or a script of tool calls, from the table `tools` lists. The \
         other commands are shortcuts built from those tools. Pages are 1-based. Passwords come \
         from --password-file or TUMBLER_PDF_PASSWORD, never the command line.\n\n\
-        Exit codes: 0 success, 1 the operation failed, 2 a usage error."
+        Exit codes: 0 success, 1 the operation failed, 2 a usage error, 3 a redaction that \
+        could not be verified (nothing was written)."
 )]
 struct Cli {
     /// Print progress lines to stderr even when it is not a terminal.
@@ -294,6 +296,38 @@ enum Command {
         #[command(flatten)]
         common: Common,
     },
+    /// Redact text and areas into a new, verified file.
+    #[command(long_about = "Redact text and areas into a new file.\n\n\
+        Each page holding a redaction is replaced by an image with the areas burned black, and \
+        metadata and other hiding places are scrubbed. The result is verified; if anything \
+        recoverable remains, nothing is written and the exit code is 3. The input is never \
+        changed.")]
+    Redact {
+        file: String,
+        /// The new file (must not be the input).
+        #[arg(long, value_name = "FILE")]
+        out: String,
+        /// A word or phrase to redact everywhere. Repeatable.
+        #[arg(long, value_name = "TEXT")]
+        term: Vec<String>,
+        /// An area to redact: PAGE:X,Y,WIDTH,HEIGHT in points from the page's top-left. Repeatable.
+        #[arg(long, value_name = "PAGE:X,Y,W,H")]
+        rect: Vec<String>,
+        /// Terms match case exactly.
+        #[arg(long)]
+        case: bool,
+        /// Terms match whole words only.
+        #[arg(long)]
+        word: bool,
+        /// Terms are regular expressions.
+        #[arg(long)]
+        regex: bool,
+        /// Flatten resolution (72-600; default 200).
+        #[arg(long)]
+        dpi: Option<f32>,
+        #[command(flatten)]
+        common: Common,
+    },
     /// Scale content up to fill the page margins, and save to --out.
     ExpandMargins {
         /// The PDF file.
@@ -312,9 +346,13 @@ enum Command {
 enum Stop {
     Usage(String),
     Failed(String),
+    /// A redaction ran but could not be verified, so nothing was written.
+    Unverified(String),
     /// stdout was closed (`| head`): not an error.
     ClosedPipe,
 }
+
+const UNVERIFIED: &str = "the redaction was not verified, so nothing was written (see leaks)";
 
 impl From<ToolError> for Stop {
     fn from(e: ToolError) -> Self {
@@ -359,6 +397,10 @@ pub fn main_with(
             ctx.error(&m);
             EXIT_FAILED
         }
+        Err(Stop::Unverified(m)) => {
+            ctx.error(&m);
+            EXIT_UNVERIFIED
+        }
     }
 }
 
@@ -397,6 +439,7 @@ impl Ctx {
             | Command::Ocr { common, .. }
             | Command::Compress { common, .. }
             | Command::Linearize { common, .. }
+            | Command::Redact { common, .. }
             | Command::ExpandMargins { common, .. } => common.clone(),
         };
         let password = self.password(&common)?;
@@ -570,6 +613,28 @@ impl Ctx {
                 let doc = s.open(&file)?;
                 let result = s.json("doc_linearize", json!({ "doc": doc, "path": out }))?;
                 s.ctx.print_json(&result)
+            }
+            Command::Redact { file, out, term, rect, case, word, regex, dpi, .. } => {
+                let rects = rect.iter().map(|r| parse_redact_rect(r)).collect::<Result<Vec<_>, _>>()?;
+                let doc = s.open(&file)?;
+                let mut args = json!({ "doc": doc, "out": out, "match_case": case, "whole_word": word, "regex": regex });
+                if !term.is_empty() {
+                    args["terms"] = json!(term);
+                }
+                if !rects.is_empty() {
+                    args["rects"] = json!(rects);
+                }
+                if let Some(dpi) = dpi {
+                    args["dpi"] = json!(dpi);
+                }
+                let content = s.call("redact_apply", args)?;
+                let unverified = super::unverified("redact_apply", &content);
+                let result = s.show(content, None)?;
+                s.ctx.print_json(&result)?;
+                if unverified {
+                    return Err(Stop::Unverified(UNVERIFIED.into()));
+                }
+                Ok(())
             }
             Command::ExpandMargins { file, out, padding, .. } => {
                 let doc = s.open(&file)?;
@@ -760,8 +825,13 @@ impl Session<'_> {
             obj.insert("password".into(), json!(password));
         }
         let content = self.call(tool, Value::Object(obj))?;
+        let unverified = super::unverified(tool, &content);
         let shown = self.show(content, out)?;
-        self.ctx.print_json(&shown)
+        self.ctx.print_json(&shown)?;
+        if unverified {
+            return Err(Stop::Unverified(UNVERIFIED.into()));
+        }
+        Ok(())
     }
 
     fn run_script(&mut self, script: &std::path::Path) -> Outcome {
@@ -776,11 +846,18 @@ impl Session<'_> {
                 stop = Some(Stop::Usage(format!("step {n}: missing \"tool\"")));
                 break;
             };
-            let result = self
-                .call(tool, step.get("args").cloned().unwrap_or(Value::Null))
-                .and_then(|content| self.show(content, step["out"].as_str()));
+            let result = self.call(tool, step.get("args").cloned().unwrap_or(Value::Null)).and_then(|content| {
+                let unverified = super::unverified(tool, &content);
+                self.show(content, step["out"].as_str()).map(|shown| (shown, unverified))
+            });
             match result {
-                Ok(result) => done.push(json!({ "step": n, "tool": tool, "result": result })),
+                Ok((result, unverified)) => {
+                    done.push(json!({ "step": n, "tool": tool, "result": result }));
+                    if unverified {
+                        stop = Some(Stop::Unverified(format!("step {n} ({tool}): {UNVERIFIED}")));
+                        break;
+                    }
+                }
                 Err(Stop::Usage(m)) => {
                     stop = Some(Stop::Usage(format!("step {n} ({tool}): {m}")));
                     break;
@@ -790,6 +867,10 @@ impl Session<'_> {
                     break;
                 }
                 Err(Stop::ClosedPipe) => return Err(Stop::ClosedPipe),
+                Err(unverified @ Stop::Unverified(_)) => {
+                    stop = Some(unverified);
+                    break;
+                }
             }
         }
         // The steps that completed are printed either way, so a failure
@@ -867,6 +948,16 @@ fn parse_range(part: &str) -> Option<(u32, u32)> {
         None => (number(part)?, number(part)?),
     };
     (first <= last).then_some((first, last))
+}
+
+/// `PAGE:X,Y,W,H` as redact_apply's {page, x, y, width, height}.
+fn parse_redact_rect(spec: &str) -> Result<Value, Stop> {
+    let bad = || Stop::Usage(format!("--rect {spec:?}: use PAGE:X,Y,WIDTH,HEIGHT, such as 1:72,100,200,20"));
+    let (page, rest) = spec.split_once(':').ok_or_else(bad)?;
+    let page: u32 = page.trim().parse().map_err(|_| bad())?;
+    let n: Vec<f32> = rest.split(',').map(|v| v.trim().parse::<f32>()).collect::<Result<_, _>>().map_err(|_| bad())?;
+    let [x, y, width, height] = n[..] else { return Err(bad()) };
+    Ok(json!({ "page": page, "x": x, "y": y, "width": width, "height": height }))
 }
 
 /// `PAGES:DEGREES` (`1,3:90`, `all:-90`): `None` pages means every page.

@@ -161,6 +161,9 @@ fn read_only_samples() -> Vec<(&'static str, Value)> {
         ("ocr_status", json!({})),
         ("doc_audit_images", json!({ "doc": 1 })),
         ("margins_analyze", json!({ "doc": 1 })),
+        ("redact_find", json!({ "doc": 1, "terms": ["Fixture"] })),
+        ("form_fields", json!({ "doc": 1 })),
+        ("typewriter_list", json!({ "doc": 1 })),
     ]
 }
 

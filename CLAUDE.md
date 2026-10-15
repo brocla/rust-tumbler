@@ -235,11 +235,12 @@ All edits follow the **buffer model** — they read from and write back to `DocE
 - **A tool is `tool::<Args>(name, title, description, handler)`.** The schema is generated (schemars) from the same `Args` struct the handler receives (`args.rs`), so they cannot drift; its doc comments are the property descriptions, and bounds in `#[schemars(range/length)]` are enforced by `check_args` before parsing.
 - **Handlers compose existing `_impl` functions** (`handlers/*.rs`, one file per domain). Don't refactor a Tauri wrapper for the CLI; call the plain functions it calls, in the same order.
 - **Conventions:** pages are 1-based; rectangles are PDF points, top-left origin, on the page as displayed; results are snake_case JSON (`snake_json` converts the GUI's camelCase types); every edit reports `{doc, dirty, page_count, encrypted, invalidates_signatures}`.
-- **GUI rules enforced in TypeScript move into the tool:** closing with unsaved changes fails without `discard_changes`; edits report `invalidates_signatures` (the GUI's `confirmBreakingEdit`); `doc_optimize` reports `breaks_conformance`.
+- **GUI rules enforced in TypeScript move into the tool:** closing with unsaved changes fails without `discard_changes`; edits report `invalidates_signatures` (the GUI's `confirmBreakingEdit`); `doc_optimize` reports `breaks_conformance`; `redact_apply` turns terms into regions and plain terms into verify queries as RedactPanel does; `form_fill` checks every name and choice before writing any.
 - **A read-only tool writes nothing**, not even an output file (MCP clients may run read-only tools without asking). That is why `page_render` returns the image and front doors write it with `Automation::write_output`.
 - **Paths** go through `paths.rs`: with a root, canonical containment plus refusal by name of `..`, alternate data streams, device names and UNC paths. Document ids are `1, 2, ...`, stored in `AppState` as `"1"`, `"2"`.
 - **Long tools** take `Automation::call_with(..., progress, cancel)`; a cancelled edit applies nothing and fails with "cancelled".
-- **Exit codes:** 0 success, 1 the tool failed, 2 usage or arguments. 3 is reserved for v1.1's redaction ("finished but not verified").
+- **Exit codes:** 0 success, 1 the tool failed, 2 usage or arguments, 3 a redaction that ran but could not be verified, so wrote nothing. That case is an `Ok` result with `verified: false` (`automation::unverified`), which MCP marks `isError`.
+- **Redaction is Save As only here too:** `redact_apply` composes `apply_redactions_impl`, the staging and `save_redacted_copy_impl`, so the document buffer is never redacted and unverified output is never written.
 - `automation/user_path.rs` backs the hidden `tumbler-cli __path add|remove DIR` that the NSIS hooks call to edit the per-user PATH; the MSI uses WiX's `Environment` element.
 
 ---

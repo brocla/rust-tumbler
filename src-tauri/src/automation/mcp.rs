@@ -170,7 +170,12 @@ fn work(mut auto: Automation, queue: Receiver<Job>, output: SharedWriter, in_fli
             continue;
         }
         let result = match outcome {
-            Ok(Ok(content)) => call_result(content),
+            Ok(Ok(content)) => {
+                let unverified = super::unverified(&job.tool, &content);
+                let mut result = call_result(content);
+                result["isError"] = json!(unverified);
+                result
+            }
             Ok(Err(ToolError::UnknownTool(t))) => {
                 let _ = send(&output, &error(job.id, INVALID_PARAMS, &format!("unknown tool {t:?}")));
                 continue;

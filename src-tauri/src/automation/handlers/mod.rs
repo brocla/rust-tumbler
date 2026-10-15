@@ -3,15 +3,18 @@
 //! shapes the JSON result.
 
 pub(super) mod document;
+pub(super) mod forms;
 pub(super) mod linearize;
 pub(super) mod margins;
 pub(super) mod metadata;
 pub(super) mod ocr;
 pub(super) mod optimize;
 pub(super) mod pages;
+pub(super) mod redact;
 pub(super) mod render;
 pub(super) mod standards;
 pub(super) mod text;
+pub(super) mod typewriter;
 
 use super::{failed, Automation, Content, ToolError};
 use crate::commands::signature::{get_signature_info_impl, SignatureStatus};
