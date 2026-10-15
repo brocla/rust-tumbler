@@ -2,7 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # feature/tumbler-cli is a long-lived branch (doc/cli-plan.html) that
+    # lands as one PR; listed so its pushes are tested. Remove it at merge.
+    branches: [main, feature/tumbler-cli]
   pull_request:
     branches: [main]
 
@@ -19,8 +21,8 @@ jobs:
       - run: npm ci
       - run: npm test
 
-  build-rust:
-    name: Rust Build
+  test-rust:
+    name: Rust Tests
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v6
@@ -32,10 +34,23 @@ jobs:
         run: npm ci
       - name: Build frontend
         run: npm run build
+      - name: Download pdfium.dll
+        # The tests render, search and edit real PDFs, so they need the real
+        # engine, not a placeholder. Pinned to the build development uses
+        # (src-tauri/resources/pdfium.dll, file version 151.0.7881.0);
+        # release.yml pins the same tag. Bump the three together.
+        working-directory: src-tauri
+        run: |
+          New-Item -ItemType Directory -Force -Path resources | Out-Null
+          $url = "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/7881/pdfium-win-x64.tgz"
+          Invoke-WebRequest -Uri $url -OutFile pdfium.tgz
+          tar -xzf pdfium.tgz bin/pdfium.dll
+          Copy-Item bin/pdfium.dll resources/pdfium.dll -Force
       - name: Create placeholder resource DLLs
         # These DLLs are gitignored (built or downloaded separately); tauri's
         # build script only checks that the resource files exist, not that
-        # they are valid libraries.
+        # they are valid libraries. Tests use a fake linearizer, so qpdf can
+        # stay a placeholder; the real-qpdf test is #[ignore]d.
         working-directory: src-tauri
         run: |
           New-Item -ItemType Directory -Force -Path resources | Out-Null
@@ -53,6 +68,9 @@ jobs:
               New-Item -ItemType File -Path "resources/$f" | Out-Null
             }
           }
-      - name: Check Rust
+      - name: Test Rust
+        # --locked: fail rather than rewrite Cargo.lock. A floated lockfile can
+        # pull a second `windows` copy and break pdfium-render (CLAUDE.md,
+        # "Dependency constraints").
         working-directory: src-tauri
-        run: cargo check
+        run: cargo test --locked
