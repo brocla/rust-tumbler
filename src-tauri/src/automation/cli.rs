@@ -61,6 +61,7 @@ pub const EXIT_USAGE: u8 = 2;
 #[derive(Parser)]
 #[command(
     name = "tumbler-cli",
+    bin_name = "tumbler-cli",
     version,
     about = "Tumbler's PDF engine from the command line.",
     long_about = "Tumbler's PDF engine from the command line.\n\n\
@@ -130,12 +131,14 @@ enum Command {
     },
     /// Print a PDF's summary (doc_info) as JSON.
     Info {
+        /// The PDF file.
         file: String,
         #[command(flatten)]
         common: Common,
     },
     /// Print a PDF's text, pages separated by form feeds.
     Text {
+        /// The PDF file.
         file: String,
         /// Only this page (1-based).
         #[arg(long)]
@@ -148,7 +151,9 @@ enum Command {
     },
     /// Find text and print the matches as JSON.
     Find {
+        /// The PDF file.
         file: String,
+        /// The text to find.
         query: String,
         /// Match case exactly.
         #[arg(long)]
@@ -164,6 +169,7 @@ enum Command {
     },
     /// Render one page to a PNG file.
     Render {
+        /// The PDF file.
         file: String,
         /// The page (1-based).
         #[arg(long)]
@@ -182,6 +188,7 @@ enum Command {
         Page numbers in --rotate and --delete refer to the input. Rotation is applied before \
         deletion. --order cannot be combined with --delete.")]
     Edit {
+        /// The PDF file to edit.
         input: String,
         /// Where to save the result (may be the input itself).
         #[arg(long, value_name = "FILE")]
@@ -195,12 +202,16 @@ enum Command {
         /// The complete new page order, such as 3,1,2.
         #[arg(long, value_name = "PAGES", conflicts_with = "delete")]
         order: Option<String>,
+        /// New Title.
         #[arg(long)]
         title: Option<String>,
+        /// New Author.
         #[arg(long)]
         author: Option<String>,
+        /// New Subject.
         #[arg(long)]
         subject: Option<String>,
+        /// New Keywords.
         #[arg(long)]
         keywords: Option<String>,
         /// Protect the output with the password in --new-password-file or TUMBLER_PDF_NEW_PASSWORD.
@@ -227,6 +238,7 @@ enum Command {
     },
     /// Split a PDF into files of N pages, or of the given ranges.
     Split {
+        /// The PDF file.
         file: String,
         /// The existing folder to write into.
         #[arg(long, value_name = "DIR")]
@@ -242,6 +254,7 @@ enum Command {
     },
     /// Make scanned pages searchable (OCR text layer) and save to --out.
     Ocr {
+        /// The PDF file.
         file: String,
         #[arg(long, value_name = "FILE")]
         out: String,
@@ -256,6 +269,7 @@ enum Command {
     },
     /// Reduce file size and save to --out.
     Compress {
+        /// The PDF file.
         file: String,
         #[arg(long, value_name = "FILE")]
         out: String,
@@ -273,6 +287,7 @@ enum Command {
     },
     /// Write a linearized (Fast Web View) copy to --out.
     Linearize {
+        /// The PDF file.
         file: String,
         #[arg(long, value_name = "FILE")]
         out: String,
@@ -281,6 +296,7 @@ enum Command {
     },
     /// Scale content up to fill the page margins, and save to --out.
     ExpandMargins {
+        /// The PDF file.
         file: String,
         #[arg(long, value_name = "FILE")]
         out: String,
@@ -506,7 +522,12 @@ impl Ctx {
                 let saved = s.json("doc_save", json!({ "doc": doc, "path": out }))?;
                 s.ctx.print_json(&merge(&last, &saved))
             }
-            Command::Split { file, out_dir, every, ranges, .. } => {
+            Command::Split { file, out_dir, every, ranges, common } => {
+                // At a shell the folder is created, as `mkdir` would; under
+                // --root it must already exist, so confinement decides first.
+                if common.root.is_none() {
+                    std::fs::create_dir_all(&out_dir).map_err(|e| Stop::Failed(format!("--out-dir {out_dir}: {e}")))?;
+                }
                 let doc = s.open(&file)?;
                 let mut args = json!({ "doc": doc, "out_dir": out_dir });
                 if let Some(every) = every {

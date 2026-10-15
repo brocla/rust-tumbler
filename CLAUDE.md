@@ -6,6 +6,8 @@ Tumbler is a personal PDF viewer for Windows built with Tauri v2 (Rust backend, 
 
 Opens PDF files (via file association, or the Open dialog — Ctrl+O / toolbar; there is no drag-and-drop open, `dragDropEnabled` is off), displays them in a continuous-scroll viewer with zoom, and provides: full-text search with OCR fallback for scanned pages, text selection/copy, text export, thumbnail sidebar, metadata editing, page operations (delete/rotate/reorder/merge/split), native Windows printing, and a compression pipeline that reduces file size through five lopdf-based transforms.
 
+The same engine also runs without the window: `tumbler-cli.exe` is a command line and an MCP server over a table of tools (see [Automation](#automation-tumbler-cli-and-the-mcp-server)).
+
 ---
 
 ## Tech stack
@@ -36,11 +38,16 @@ rust-tumbler/
 ├── src-tauri/                    # Rust / Tauri backend
 │   ├── src/
 │   │   ├── commands/             # One file per feature domain (see below)
+│   │   ├── automation/           # The tool table behind tumbler-cli and its MCP server
+│   │   ├── bin/tumbler-cli.rs    # The console binary (binds pdfium, calls automation::cli)
 │   │   ├── state.rs              # AppState — the shared runtime state
 │   │   ├── error.rs              # AppError enum
 │   │   ├── lib.rs                # Tauri builder, pdfium init, command registration
 │   │   └── main.rs               # Entry point (calls lib::run)
 │   ├── tests/fixtures/sample.pdf # Checked-in PDF used by backend tests
+│   ├── tests/cli.rs              # Runs the real tumbler-cli.exe
+│   ├── wix/                      # MSI fragments (file associations, PATH)
+│   ├── windows/hooks.nsh         # NSIS installer hooks (PATH)
 │   ├── Cargo.toml
 │   └── tauri.conf.json
 ├── app-icon.svg                  # Placeholder; NOT the current app icon
@@ -96,6 +103,7 @@ Backend-to-frontend events (for progress updates) use `window.emit("event-name",
 1. Write the function in the appropriate `src-tauri/src/commands/*.rs` file with `#[tauri::command]`.
 2. Add it to `tauri::generate_handler![...]` in `src-tauri/src/lib.rs`.
 3. Call it with `invoke("command_name", { ... })` from the frontend.
+4. Decide its CLI fate: name it in some tool's `commands` in `automation/tools.rs`, or add it to `NOT_AUTOMATED` there with the reason. The coverage test `every_gui_command_is_automated_or_excluded` fails until you do.
 
 ---
 
@@ -215,7 +223,24 @@ All edits follow the **buffer model** — they read from and write back to `DocE
 
 - **Tumbler's `windows` version must match the one `pdfium-render` resolves to — keep them on the same `0.x`.** `pdfium-render` 0.9.x (with `pdfium_use_win32`) references `windows::Win32::Graphics::Gdi::HDC`, but declares its dependency as `windows = "0"` **with no features**. The `Win32` module is feature-gated in every `windows` version, so pdfium-render only compiles because Cargo **feature-unification** flows Tumbler's own `Win32_Graphics_Gdi` feature onto the shared `windows` copy. `windows` is a `0.x` crate, so `0.61` and `0.62` are semver-**incompatible** and do **not** unify — they coexist as two copies. A bare `cargo update` bumps pdfium-render's floating `"0"` to `0.62` as a **second** copy (with no features → no `Win32` module), and pdfium-render then fails to compile with `cannot find Win32 in windows`. (It is *not* that 0.62 moved `Win32` — the feature chain `Win32_Graphics_Gdi → Win32_Graphics → Win32 → Win32_Foundation` is identical across 0.61 and 0.62; the break is purely the version split.) So `windows` isn't pinned to 0.61 forever — to move to 0.62 you bump **Tumbler's** `windows` dep to 0.62 in the same change (and, if needed, `pdfium-render`) so both unify on 0.62; you just must never let the two diverge.
 - **Never run a bare `cargo update`.** It floats the whole graph and will add a second `windows` at 0.62 (see above). Always update targeted: `cargo update -p <crate>` (add `--precise <ver>` when a bump needs to cascade a transitive minor, e.g. `cargo update -p tauri --precise 2.11.5` also moves `tray-icon`).
+- **`schemars` is held at the version Tauri already brings in, and `clap` at `~4.5`** (4.6's derive pulls a second `syn`). Both are CLI-only.
 - **`time` is not a direct-use dependency.** It's declared only to steer version resolution; it arrives transitively via `cookie` (Tauri). See the note on the `time` line in `Cargo.toml`.
+
+---
+
+## Automation (tumbler-cli and the MCP server)
+
+`src-tauri/src/automation/` exposes the engine as **one table of tools** (`tools.rs`), each with a name, a description, a JSON Schema for its arguments, `read_only` / `destructive` flags, the GUI `commands` it automates, and a handler. `Automation::call(name, json)` runs one, and every front door goes through it: `tumbler-cli run` and the friendly subcommands (`cli.rs`), and `tumbler-cli mcp --root DIR` (`mcp.rs`, newline-delimited JSON-RPC over stdio). The design follows pdfcraft's automation crate; the plan is `doc/cli-plan.html` (gitignored).
+
+- **A tool is `tool::<Args>(name, title, description, handler)`.** The schema is generated (schemars) from the same `Args` struct the handler receives (`args.rs`), so they cannot drift; its doc comments are the property descriptions, and bounds in `#[schemars(range/length)]` are enforced by `check_args` before parsing.
+- **Handlers compose existing `_impl` functions** (`handlers/*.rs`, one file per domain). Don't refactor a Tauri wrapper for the CLI; call the plain functions it calls, in the same order.
+- **Conventions:** pages are 1-based; rectangles are PDF points, top-left origin, on the page as displayed; results are snake_case JSON (`snake_json` converts the GUI's camelCase types); every edit reports `{doc, dirty, page_count, encrypted, invalidates_signatures}`.
+- **GUI rules enforced in TypeScript move into the tool:** closing with unsaved changes fails without `discard_changes`; edits report `invalidates_signatures` (the GUI's `confirmBreakingEdit`); `doc_optimize` reports `breaks_conformance`.
+- **A read-only tool writes nothing**, not even an output file (MCP clients may run read-only tools without asking). That is why `page_render` returns the image and front doors write it with `Automation::write_output`.
+- **Paths** go through `paths.rs`: with a root, canonical containment plus refusal by name of `..`, alternate data streams, device names and UNC paths. Document ids are `1, 2, ...`, stored in `AppState` as `"1"`, `"2"`.
+- **Long tools** take `Automation::call_with(..., progress, cancel)`; a cancelled edit applies nothing and fails with "cancelled".
+- **Exit codes:** 0 success, 1 the tool failed, 2 usage or arguments. 3 is reserved for v1.1's redaction ("finished but not verified").
+- `automation/user_path.rs` backs the hidden `tumbler-cli __path add|remove DIR` that the NSIS hooks call to edit the per-user PATH; the MSI uses WiX's `Environment` element.
 
 ---
 
@@ -304,6 +329,8 @@ Getting this wrong hangs the suite deterministically on the first run, rather th
 
 The fixture PDF (`tests/fixtures/sample.pdf`) is a single 200×200 page with the text "Test Fixture" at 24pt, near the top-left. Many backend tests depend on this layout; don't modify it.
 
+CI downloads the real pinned pdfium and runs `cargo test --locked`, so the whole suite runs on every push and PR. Tests that need a real qpdf, an OCR language pack or a printer are `#[ignore]`d with the reason. Tool tests go through `Automation::call` with a fake OCR engine and linearizer (`automation/tests*.rs`); `tests/cli.rs` runs the real `tumbler-cli.exe`. Temp paths in tests should be canonical (`dunce::canonicalize(temp_dir())`): CI's `TEMP` is an 8.3 short path.
+
 ---
 
 ## Build and run
@@ -327,11 +354,11 @@ npm run tauri -- icon tumbler.png
 - Node.js 20+
 - Rust stable + Tauri v2 prerequisites for Windows
 - Every DLL listed in `bundle.resources` (`src-tauri/tauri.conf.json`), in `src-tauri/resources/`. Tauri checks these paths when the crate compiles, so a missing one fails `tauri dev`, `tauri build` and `cargo test` alike. None are checked in:
-  - `pdfium.dll`: win-x64 build from [pdfium-binaries](https://github.com/bblanchon/pdfium-binaries)
+  - `pdfium.dll`: win-x64 build from [pdfium-binaries](https://github.com/bblanchon/pdfium-binaries), release `chromium/7881`. `ci.yml` and `release.yml` pin the same tag; **bump the three together**
   - `qpdf.dll` (renamed from `bin/qpdf30.dll`) plus `msvcp140.dll`, `vcruntime140.dll` and `vcruntime140_1.dll`: from the official qpdf `msvc64` release zip, at the version `.github/workflows/release.yml` pins
   - `tumbler-thumbnailer.dll`: built and copied in by `beforeBuildCommand`
 
-  An empty placeholder file passes the compile-time check (CI does this), but the feature that loads that DLL then fails at runtime.
+  An empty placeholder file passes the compile-time check (CI does this for the qpdf, MSVC runtime and thumbnailer DLLs), but the feature that loads that DLL then fails at runtime. The DLLs are found next to the executable (`<exe dir>\resources\`, which tauri-build also creates in `target\<profile>\`), never in the working directory; debug builds fall back to `src-tauri\resources\` for test binaries (`resolve_bundled_dll` in lib.rs).
 
 ---
 

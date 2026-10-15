@@ -48,6 +48,67 @@ This is the new world of AI. Anyone can make their own software, just the way th
 - Verify Digital Signatures
 - Web Optimization - Linearize
 - Redaction
+- A command line and an MCP server, `tumbler-cli` (below)
+
+
+## Scriptable
+
+The installers also put `tumbler-cli.exe` on your `PATH`, beside `tumbler.exe`.
+It runs the same engine without the window:
+
+```sh
+tumbler-cli info report.pdf                         # summary as JSON
+tumbler-cli text scan.pdf --ocr                     # plain text, OCR'ing scanned pages
+tumbler-cli find report.pdf "invoice \d+" --regex
+tumbler-cli render report.pdf --page 3 --out p3.png
+tumbler-cli edit in.pdf --out out.pdf --rotate 1,3:90 --delete 2 --title "Q3"
+tumbler-cli combine a.pdf b.pdf c.pdf --out all.pdf
+tumbler-cli split big.pdf --out-dir parts --every 10
+tumbler-cli ocr scan.pdf --out searchable.pdf
+tumbler-cli compress big.pdf --out small.pdf
+tumbler-cli linearize report.pdf --out web.pdf
+tumbler-cli expand-margins score.pdf --out bigger.pdf
+```
+
+Underneath, every command is a sequence of calls to a table of tools, which
+`tumbler-cli tools` lists (`--json` for their argument schemas). Call one
+directly with `tumbler-cli run <tool> key=value ...`, or several in one session
+with `tumbler-cli run --script steps.json`. Results go to stdout as JSON; exit
+codes are 0 (success), 1 (the operation failed) and 2 (a usage error).
+Passwords come from `--password-file` or the `TUMBLER_PDF_PASSWORD` environment
+variable, never the command line.
+
+A terminal that was already open when Tumbler was installed won't see the new
+`PATH` entry; open a new one.
+
+## Built for agents
+
+`tumbler-cli mcp --root <folder>` is a [Model Context Protocol](https://modelcontextprotocol.io)
+server on stdin/stdout, so an AI agent can open, inspect, edit and save PDFs
+with the same tools. It runs only when an agent starts it, opens no network
+port, and can read or write only inside the `--root` folder, which is required.
+
+Claude Code:
+
+```sh
+claude mcp add tumbler -- tumbler-cli mcp --root C:\PDFs
+```
+
+Claude Desktop (`claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "tumbler": {
+      "command": "C:\\Program Files\\Tumbler\\tumbler-cli.exe",
+      "args": ["mcp", "--root", "C:\\PDFs"]
+    }
+  }
+}
+```
+
+The MSI installs to `C:\Program Files\Tumbler`; the NSIS installer installs per
+user, to `%LOCALAPPDATA%\Tumbler`.
 
 
 ## Tech stack
@@ -74,8 +135,10 @@ attaches two installers — use whichever you prefer:
 - **MSI** — `Tumbler_<version>_x64_en-US.msi`
 
 These are self-contained (the required `pdfium.dll` and `qpdf.dll` are bundled),
-so nothing else needs to be installed. The rest of this section is only for
-building from source.
+so nothing else needs to be installed. For the command line alone, each release
+also attaches `tumbler-cli-<version>-windows-x64.zip`: unzip it anywhere and
+run `tumbler-cli.exe` from there. The rest of this section is only for building
+from source.
 
 These installers are not yet digitally signed — an application to the SignPath
 Foundation is pending. See the [Code Signing Policy](CODE-SIGNING-POLICY.md) for
@@ -85,9 +148,10 @@ the intended arrangement and how signatures will be verified.
 
 - Node.js 20+
 - Rust (stable) with the Tauri v2 prerequisites for Windows
-- A win-x64 `pdfium.dll` (e.g. from the
-  [pdfium-binaries](https://github.com/bblanchon/pdfium-binaries) releases),
-  placed at `src-tauri/resources/pdfium.dll` (not checked into the repo)
+- A win-x64 `pdfium.dll` from the
+  [pdfium-binaries](https://github.com/bblanchon/pdfium-binaries) release
+  `chromium/7881` (the build CI and the release workflow use), placed at
+  `src-tauri/resources/pdfium.dll` (not checked into the repo)
 - A win-x64 qpdf DLL (used by "Save Web-Optimized Copy"): download the
   `qpdf-<version>-msvc64.zip` asset from the
   [qpdf releases](https://github.com/qpdf/qpdf/releases), take
@@ -122,6 +186,9 @@ npm run tauri build
 Installers are written to `src-tauri/target/release/bundle/`:
 - NSIS: `nsis/Tumbler_<version>_x64-setup.exe`
 - MSI: `msi/Tumbler_<version>_x64_en-US.msi`
+
+Both include `tumbler-cli.exe`, which the build compiles alongside the app
+(`cargo run` and `npm run tauri dev` still start the app).
 
 ### Test
 

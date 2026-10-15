@@ -559,3 +559,20 @@ fn hidden_path_command_adds_and_removes_its_folder() {
     assert_eq!(cli_with(pdfium.get(), &["__path", "toggle", dir], opts()).code, 2);
     assert!(!cli(pdfium.get(), &["--help"]).stdout.contains("__path"), "installer plumbing stays out of --help");
 }
+
+/// At a shell, `split --out-dir parts` creates the folder; under --root it
+/// must already exist, so nothing is created outside the root.
+#[test]
+fn split_creates_its_output_folder_only_without_root() {
+    let pdfium = crate::test_pdfium();
+    let dir = TempDir::new("cli");
+    let input = ps(&three_pages(&dir, "in.pdf"));
+    let parts = dir.0.join("new").join("parts");
+    let r = cli(pdfium.get(), &["split", &input, "--out-dir", &ps(&parts)]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(r.json()["files"].as_array().unwrap().len(), 3);
+
+    let r = cli(pdfium.get(), &["split", "in.pdf", "--out-dir", "missing", "--root", &ps(dir.path())]);
+    assert_eq!(r.code, 1);
+    assert!(!dir.0.join("missing").exists());
+}
