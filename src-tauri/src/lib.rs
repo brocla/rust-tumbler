@@ -130,59 +130,60 @@ pub fn describe_pdfium_error(e: &PdfiumError) -> String {
     }
 }
 
-/// Resolve the path to pdfium.dll.
-/// In dev mode: look relative to the src-tauri directory.
-/// In production: look in the bundled resources directory.
+/// Resolve the path to pdfium.dll. See [`resolve_bundled_dll`].
 pub fn resolve_pdfium_path() -> String {
-    // In dev mode, the DLL is in src-tauri/resources/
-    let dev_path = std::path::Path::new("resources/pdfium.dll");
-    if dev_path.exists() {
-        return dev_path.to_string_lossy().into_owned();
-    }
-
-    // Try alongside the executable (for bundled builds)
-    if let Ok(exe_path) = std::env::current_exe() {
-        if let Some(exe_dir) = exe_path.parent() {
-            let bundled = exe_dir.join("resources").join("pdfium.dll");
-            if bundled.exists() {
-                return bundled.to_string_lossy().into_owned();
-            }
-            // Also try directly next to the exe
-            let beside_exe = exe_dir.join("pdfium.dll");
-            if beside_exe.exists() {
-                return beside_exe.to_string_lossy().into_owned();
-            }
-        }
-    }
-
-    // Fallback
-    "pdfium.dll".to_string()
+    resolve_bundled_dll("pdfium.dll")
 }
 
 /// Resolve the path to qpdf.dll, used by "Save Web-Optimized Copy" (issue #3).
-/// Same resolution order as `resolve_pdfium_path`; unlike pdfium, qpdf.dll is
-/// loaded lazily per export call rather than at startup, so a missing DLL
-/// only fails that one command.
+/// Unlike pdfium, qpdf.dll is loaded lazily per export call rather than at
+/// startup, so a missing DLL only fails that one command.
 pub fn resolve_qpdf_path() -> String {
-    let dev_path = std::path::Path::new("resources/qpdf.dll");
-    if dev_path.exists() {
-        return dev_path.to_string_lossy().into_owned();
-    }
+    resolve_bundled_dll("qpdf.dll")
+}
 
-    if let Ok(exe_path) = std::env::current_exe() {
-        if let Some(exe_dir) = exe_path.parent() {
-            let bundled = exe_dir.join("resources").join("qpdf.dll");
-            if bundled.exists() {
-                return bundled.to_string_lossy().into_owned();
-            }
-            let beside_exe = exe_dir.join("qpdf.dll");
-            if beside_exe.exists() {
-                return beside_exe.to_string_lossy().into_owned();
-            }
-        }
-    }
+/// Finds a DLL that ships in the bundle's `resources` folder.
+///
+/// Only absolute locations tied to the executable are searched, never the
+/// current directory. `tumbler-cli` runs from wherever the user's shell is,
+/// and the GUI inherits an arbitrary working directory from a
+/// file-association launch, so a current-directory lookup would load whatever
+/// `resources\pdfium.dll` happens to sit there (DLL planting). For the same
+/// reason a miss returns the expected absolute path rather than a bare
+/// `"pdfium.dll"`, which `LoadLibrary` would also search the current directory
+/// for: the load then fails with an error naming where the DLL belongs.
+fn resolve_bundled_dll(name: &str) -> String {
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf));
+    let candidates = dll_candidates(name, exe_dir.as_deref());
+    candidates
+        .iter()
+        .find(|p| p.exists())
+        .or(candidates.first())
+        .map(|p| p.to_string_lossy().into_owned())
+        // Only when the executable's own path is unknowable: an empty path
+        // fails to load rather than searching anywhere.
+        .unwrap_or_default()
+}
 
-    "qpdf.dll".to_string()
+/// Where a bundled DLL may be, most specific first. Every entry is absolute.
+///
+/// - `<exe dir>\resources\`: installed builds, and also `target\<profile>\`,
+///   where tauri-build copies `bundle.resources` next to the binaries.
+/// - `<exe dir>\`: a DLL placed beside the exe by hand.
+/// - Debug builds only: `src-tauri\resources\` by its compile-time path, for
+///   test binaries in `target\debug\deps\`, which have no `resources`
+///   folder beside them.
+fn dll_candidates(name: &str, exe_dir: Option<&std::path::Path>) -> Vec<std::path::PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(dir) = exe_dir {
+        candidates.push(dir.join("resources").join(name));
+        candidates.push(dir.join(name));
+    }
+    #[cfg(debug_assertions)]
+    candidates.push(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("resources").join(name));
+    candidates
 }
 
 /// Exclusive access to the process-wide test `Pdfium` instance.
@@ -396,5 +397,53 @@ pub(crate) fn assert_mark_landed(got: Option<[f32; 4]>, want: [f32; 4], tol: f32
             "{what}: rendered box {got:?} != expected {want:?} (component {i} off by {}, tol {tol})",
             (g - w).abs()
         );
+    }
+}
+
+#[cfg(test)]
+mod dll_lookup_tests {
+    use super::*;
+    use std::path::Path;
+
+    /// The property that rules out DLL planting: no candidate is relative, so
+    /// none can resolve against the working directory.
+    #[test]
+    fn every_candidate_is_absolute() {
+        let exe_dir = Path::new(r"C:\Program Files\Tumbler");
+        for candidates in [dll_candidates("pdfium.dll", Some(exe_dir)), dll_candidates("pdfium.dll", None)] {
+            for c in candidates {
+                assert!(c.is_absolute(), "relative candidate {c:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn bundled_resources_folder_comes_first_then_beside_the_exe() {
+        let exe_dir = Path::new(r"C:\Program Files\Tumbler");
+        let candidates = dll_candidates("qpdf.dll", Some(exe_dir));
+        assert_eq!(candidates[0], exe_dir.join("resources").join("qpdf.dll"));
+        assert_eq!(candidates[1], exe_dir.join("qpdf.dll"));
+    }
+
+    /// Debug builds end with the source tree's `resources` folder, by its
+    /// compile-time path; release builds never look outside the exe's folder.
+    #[test]
+    fn only_debug_builds_fall_back_to_the_source_tree() {
+        let manifest_resources = Path::new(env!("CARGO_MANIFEST_DIR")).join("resources").join("pdfium.dll");
+        let without_exe = dll_candidates("pdfium.dll", None);
+        if cfg!(debug_assertions) {
+            assert_eq!(without_exe, [manifest_resources]);
+        } else {
+            assert!(without_exe.is_empty());
+        }
+    }
+
+    /// Test binaries run from `target\debug\deps\`, which has no `resources`
+    /// folder; the debug fallback is what finds the real DLL for them.
+    #[test]
+    fn resolved_pdfium_path_exists_in_tests() {
+        let path = resolve_pdfium_path();
+        assert!(Path::new(&path).is_absolute(), "{path}");
+        assert!(Path::new(&path).exists(), "{path}");
     }
 }
