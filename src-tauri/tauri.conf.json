@@ -59,14 +59,17 @@
     ],
     "windows": {
       "nsis": {
-        "installMode": "currentUser"
+        "installMode": "currentUser",
+        "installerHooks": "./windows/hooks.nsh"
       },
       "wix": {
         "fragmentPaths": [
-          "wix/file-associations.wxs"
+          "wix/file-associations.wxs",
+          "wix/cli-path.wxs"
         ],
         "componentGroupRefs": [
-          "TumblerFileAssociationGroup"
+          "TumblerFileAssociationGroup",
+          "TumblerCliPathGroup"
         ]
       }
     }

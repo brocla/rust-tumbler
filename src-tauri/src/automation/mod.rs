@@ -26,6 +26,7 @@ mod tests_edit;
 #[cfg(test)]
 mod tests_mcp;
 mod tools;
+pub(crate) mod user_path;
 
 pub use tools::{tools, ToolDef};
 

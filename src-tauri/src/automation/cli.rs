@@ -37,6 +37,10 @@ pub struct CliEnv {
     pub password: Option<String>,
     /// `TUMBLER_PDF_NEW_PASSWORD`: the password `edit --set-password` sets.
     pub new_password: Option<String>,
+    /// The registry key `__path` edits, in place of the real per-user
+    /// environment, so tests never touch the real PATH.
+    #[cfg(test)]
+    pub path_key: Option<String>,
 }
 
 impl CliEnv {
@@ -44,6 +48,8 @@ impl CliEnv {
         Self {
             password: std::env::var("TUMBLER_PDF_PASSWORD").ok(),
             new_password: std::env::var("TUMBLER_PDF_NEW_PASSWORD").ok(),
+            #[cfg(test)]
+            path_key: None,
         }
     }
 }
@@ -112,6 +118,15 @@ enum Command {
         /// The folder every path must be inside (required).
         #[arg(long, value_name = "DIR", required = true)]
         root: PathBuf,
+    },
+    /// Installer support (NSIS hooks): add a folder to, or remove it from, the
+    /// per-user PATH, editing the registry value whole.
+    #[command(name = "__path", hide = true)]
+    UserPath {
+        #[arg(value_parser = ["add", "remove"])]
+        action: String,
+        /// The folder, as an absolute path.
+        dir: PathBuf,
     },
     /// Print a PDF's summary (doc_info) as JSON.
     Info {
@@ -350,8 +365,11 @@ impl Ctx {
         if let Command::Mcp { root } = command {
             return self.mcp(&root, session);
         }
+        if let Command::UserPath { action, dir } = command {
+            return self.user_path(&action, &dir);
+        }
         let common = match &command {
-            Command::Tools { .. } | Command::Mcp { .. } => unreachable!("handled above"),
+            Command::Tools { .. } | Command::Mcp { .. } | Command::UserPath { .. } => unreachable!("handled above"),
             Command::Run { common, .. }
             | Command::Info { common, .. }
             | Command::Text { common, .. }
@@ -372,7 +390,7 @@ impl Ctx {
         }
         let mut s = Session { ctx: self, auto, password };
         match command {
-            Command::Tools { .. } | Command::Mcp { .. } => unreachable!("handled above"),
+            Command::Tools { .. } | Command::Mcp { .. } | Command::UserPath { .. } => unreachable!("handled above"),
             Command::Run { tool, args, script, out, .. } => match script {
                 Some(script) => s.run_script(&script),
                 None => {
@@ -585,6 +603,22 @@ impl Ctx {
         );
         let stdin = std::mem::replace(&mut self.io.stdin, Box::new(std::io::empty()));
         super::mcp::serve(auto, stdin, self.io.stdout.clone()).map_err(|e| Stop::Failed(format!("MCP server: {e}")))
+    }
+
+    fn user_path(&mut self, action: &str, dir: &std::path::Path) -> Outcome {
+        if !dir.is_absolute() {
+            return Err(Stop::Usage(format!("__path: {} is not an absolute path", dir.display())));
+        }
+        #[cfg(test)]
+        let key = self.env.path_key.clone().unwrap_or_else(|| super::user_path::USER_ENVIRONMENT.to_string());
+        #[cfg(not(test))]
+        let key = super::user_path::USER_ENVIRONMENT.to_string();
+        let changed = match action {
+            "add" => super::user_path::add(&key, dir),
+            _ => super::user_path::remove(&key, dir),
+        }
+        .map_err(Stop::Failed)?;
+        self.print_json(&json!({ "action": action, "dir": dir.to_string_lossy(), "changed": changed }))
     }
 
     /// The password for protected inputs: --password-file, else the

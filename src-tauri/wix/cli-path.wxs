@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Puts the install folder on the machine PATH, so `tumbler-cli` runs from any
+  terminal (doc/cli-plan.html, change #9). Windows Installer's own Environment
+  element does the work: it appends the folder as one entry (Part="last"),
+  takes exactly that entry out again on uninstall (Permanent="no"), and tells
+  running programs the environment changed. Unlike editing the value as a
+  string, it has no length limit, so a long PATH keeps every other entry.
+
+  The NSIS (per-user) build does the same for HKCU through installer hooks
+  (windows/hooks.nsh). A terminal already open when Tumbler is installed keeps
+  its old PATH until it is restarted.
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Fragment>
+    <DirectoryRef Id="INSTALLDIR">
+      <Component Id="TumblerCliPath" Guid="C8DCE6CA-5AF8-427C-B3AF-A1BCD2720D0F" Win64="yes">
+        <Environment Id="TumblerCliPathEntry" Name="PATH" Value="[INSTALLDIR]" Part="last" Action="set" System="yes" Permanent="no" />
+        <!-- A component needs a key path; an Environment entry can't be one. -->
+        <RegistryValue Root="HKLM" Key="Software\Tumbler" Name="CliOnPath" Value="1" Type="integer" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <ComponentGroup Id="TumblerCliPathGroup">
+      <ComponentRef Id="TumblerCliPath" />
+    </ComponentGroup>
+  </Fragment>
+</Wix>

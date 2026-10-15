@@ -84,3 +84,23 @@ jobs:
           # defaults to false. `releaseBody` above is pre-pended to the
           # generated notes rather than replacing them.
           generateReleaseNotes: true
+
+      - name: Attach the tumbler-cli zip
+        # For script-only use without the installer: tumbler-cli.exe plus the
+        # DLLs it loads, laid out as installed (resources\ beside the exe,
+        # which is where it looks for them). tauri build has already compiled
+        # tumbler-cli.exe into target\release. The thumbnailer DLL is the
+        # GUI's, so it is left out.
+        working-directory: src-tauri
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ver = "${{ github.ref_name }}".TrimStart("v")
+          $name = "tumbler-cli-$ver-windows-x64"
+          New-Item -ItemType Directory -Force -Path "$name/resources" | Out-Null
+          Copy-Item target/release/tumbler-cli.exe "$name/"
+          foreach ($dll in "pdfium.dll", "qpdf.dll", "msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll") {
+            Copy-Item "resources/$dll" "$name/resources/"
+          }
+          Compress-Archive -Path "$name/*" -DestinationPath "$name.zip"
+          gh release upload "${{ github.ref_name }}" "$name.zip" --clobber

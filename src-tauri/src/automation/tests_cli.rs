@@ -533,3 +533,29 @@ fn mcp_serves_stdin_until_it_closes() {
     let banner = String::from_utf8(stderr.lock().unwrap().clone()).unwrap();
     assert!(banner.contains("MCP server"), "{banner}");
 }
+
+// ── __path (installer support) ───────────────────────────────────────────────
+
+#[test]
+fn hidden_path_command_adds_and_removes_its_folder() {
+    use super::user_path::{registry, tests::ScratchKey};
+    let pdfium = crate::test_pdfium();
+    let key = ScratchKey::new();
+    registry::write(&key.0, r"%SystemRoot%\tools", registry::Kind::Expand).unwrap();
+    let opts = || Options { env: CliEnv { path_key: Some(key.0.clone()), ..Default::default() }, ..Default::default() };
+    let dir = r"C:\Users\someone\AppData\Local\Tumbler";
+
+    let r = cli_with(pdfium.get(), &["__path", "add", dir], opts());
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(r.json()["changed"], true);
+    assert_eq!(registry::read(&key.0).unwrap().unwrap().0, format!(r"%SystemRoot%\tools;{dir}"));
+    assert_eq!(cli_with(pdfium.get(), &["__path", "add", dir], opts()).json()["changed"], false);
+
+    let r = cli_with(pdfium.get(), &["__path", "remove", dir], opts());
+    assert_eq!(r.json()["changed"], true);
+    assert_eq!(registry::read(&key.0).unwrap().unwrap().0, r"%SystemRoot%\tools");
+
+    assert_eq!(cli_with(pdfium.get(), &["__path", "add", "relative"], opts()).code, 2);
+    assert_eq!(cli_with(pdfium.get(), &["__path", "toggle", dir], opts()).code, 2);
+    assert!(!cli(pdfium.get(), &["--help"]).stdout.contains("__path"), "installer plumbing stays out of --help");
+}
