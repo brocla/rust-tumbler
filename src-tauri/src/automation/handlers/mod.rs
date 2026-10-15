@@ -3,18 +3,63 @@
 //! shapes the JSON result.
 
 pub(super) mod document;
+pub(super) mod linearize;
+pub(super) mod margins;
+pub(super) mod metadata;
+pub(super) mod ocr;
+pub(super) mod optimize;
+pub(super) mod pages;
 pub(super) mod render;
 pub(super) mod standards;
 pub(super) mod text;
 
-use super::{Content, ToolError};
+use super::{failed, Automation, Content, ToolError};
+use crate::commands::signature::{get_signature_info_impl, SignatureStatus};
+use crate::state::lock_mutex;
 use serde::Serialize;
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 
 type ToolResult = Result<Vec<Content>, ToolError>;
 
-fn json(value: Value) -> ToolResult {
+/// How a long tool reports that it was cancelled. Cancelled edits apply
+/// nothing, so this is a failure rather than a partial result.
+const CANCELLED: &str = "cancelled: nothing was changed";
+
+fn cancelled() -> ToolError {
+    failed(CANCELLED)
+}
+
+fn reply(value: Value) -> ToolResult {
     Ok(vec![Content::Json(value)])
+}
+
+/// Whether the document carries a signature that an edit would break. The
+/// GUI asks before such an edit (confirmBreakingEdit); headless, the edit
+/// goes ahead and its result says so.
+fn is_signed(auto: &Automation, key: &str) -> Result<bool, ToolError> {
+    Ok(get_signature_info_impl(&auto.state, key.to_string())?.status != SignatureStatus::Unsigned)
+}
+
+/// The fields every editing tool reports after its edit, so a caller never
+/// has to ask again.
+fn edited(auto: &Automation, doc: u64, invalidates_signatures: bool) -> Result<Value, ToolError> {
+    let entry = auto.entry(doc)?;
+    let entry = lock_mutex(&entry)?;
+    Ok(json!({
+        "doc": doc,
+        "dirty": entry.dirty,
+        "page_count": entry.document.pages().len(),
+        "encrypted": entry.protection.is_encrypted(),
+        "invalidates_signatures": invalidates_signatures,
+    }))
+}
+
+/// Adds `extra`'s fields to the object `base`.
+fn with(mut base: Value, extra: Value) -> Value {
+    if let (Some(base), Value::Object(extra)) = (base.as_object_mut(), extra) {
+        base.extend(extra);
+    }
+    base
 }
 
 /// A GUI result type as JSON with snake_case keys. The GUI's types serialize

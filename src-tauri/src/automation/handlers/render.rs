@@ -1,12 +1,11 @@
 //! page_render.
 
-use super::{json, ToolResult};
+use super::ToolResult;
 use crate::automation::args::PageRenderArgs;
-use crate::automation::{failed, paths, Automation, Content, ToolError};
+use crate::automation::{failed, Automation, Content, ToolError};
 use crate::commands::render::render_page_rgba;
 use crate::state::lock_mutex;
 use pdfium_render::prelude::PdfPageIndex;
-use serde_json::json;
 
 const DEFAULT_DPI: f64 = 96.0;
 
@@ -38,19 +37,7 @@ pub(crate) fn page_render(auto: &mut Automation, args: PageRenderArgs) -> ToolRe
 
     let rendered = render_page_rgba(&auto.state, &key, page, width_px, true)?;
     let png = encode_png(rendered.width, rendered.height, &rendered.rgba)?;
-    match &args.out {
-        None => Ok(vec![Content::Png { data: png, width: rendered.width, height: rendered.height }]),
-        Some(out) => {
-            let target = paths::output_path(auto.root(), out)?;
-            paths::write_atomic(&target, &png)?;
-            json(json!({
-                "path": target.to_string_lossy(),
-                "width": rendered.width,
-                "height": rendered.height,
-                "bytes": png.len(),
-            }))
-        }
-    }
+    Ok(vec![Content::Png { data: png, width: rendered.width, height: rendered.height }])
 }
 
 fn encode_png(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, ToolError> {

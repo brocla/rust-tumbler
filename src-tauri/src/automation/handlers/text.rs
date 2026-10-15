@@ -1,8 +1,8 @@
-//! text_extract, text_find.
+//! text_extract, text_find, doc_export_text.
 
-use super::{json, snake_json, ToolResult};
-use crate::automation::args::{TextExtractArgs, TextFindArgs};
-use crate::automation::Automation;
+use super::{cancelled, reply, snake_json, ToolResult};
+use crate::automation::args::{DocExportTextArgs, TextExtractArgs, TextFindArgs};
+use crate::automation::{paths, Automation};
 use crate::commands::{ocr, text};
 use crate::state::lock_mutex;
 use pdfium_render::prelude::PdfPageIndex;
@@ -38,7 +38,7 @@ pub(crate) fn text_extract(auto: &mut Automation, args: TextExtractArgs) -> Tool
         };
         out.push(json!({ "page": page, "text": text, "source": source }));
     }
-    json(json!({ "pages": out }))
+    reply(json!({ "pages": out }))
 }
 
 pub(crate) fn text_find(auto: &mut Automation, args: TextFindArgs) -> ToolResult {
@@ -46,5 +46,25 @@ pub(crate) fn text_find(auto: &mut Automation, args: TextFindArgs) -> ToolResult
     let results =
         text::search_document_impl(&auto.state, key, args.query.clone(), args.match_case, args.whole_word, args.regex)?;
     let total: usize = results.iter().map(|r| r.matches.len()).sum();
-    json(json!({ "query": args.query, "total": total, "results": snake_json(&results)? }))
+    reply(json!({ "query": args.query, "total": total, "results": snake_json(&results)? }))
+}
+
+pub(crate) fn doc_export_text(auto: &mut Automation, args: DocExportTextArgs) -> ToolResult {
+    let key = auto.key(args.doc)?;
+    let target = paths::output_path(auto.root(), &args.path)?.to_string_lossy().into_owned();
+    let progress = auto.progress();
+    let report = text::export_text_impl(
+        |done, total| progress(done, total),
+        auto.entry(args.doc)?,
+        key,
+        target.clone(),
+        args.use_ocr,
+        auto.state.ocr_engine.clone(),
+        auto.state.ocr_cache_handle(),
+        auto.cancel_token(),
+    )?;
+    if report.cancelled {
+        return Err(cancelled());
+    }
+    reply(json!({ "doc": args.doc, "path": target, "pages": report.pages, "ocr_pages": report.ocr_pages }))
 }

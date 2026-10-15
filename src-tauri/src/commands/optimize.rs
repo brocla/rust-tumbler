@@ -694,8 +694,8 @@ const MIN_REENCODE_WIN: f32 = 0.90;
 /// Settings for the image step.
 #[derive(Clone, Copy)]
 pub(crate) struct ImageOptions {
-    target_dpi: f32,
-    jpeg_quality: u8,
+    pub(crate) target_dpi: f32,
+    pub(crate) jpeg_quality: u8,
     /// Re-encode images that are already at or below `target_dpi`, keeping
     /// their pixel dimensions — the only way to reach the encoder for a file
     /// that is sensibly sized but wastefully encoded. Off by default: it is
@@ -704,7 +704,7 @@ pub(crate) struct ImageOptions {
     /// Limited to images already stored as JPEG. Re-encoding a losslessly
     /// stored image (line art, screenshots) as JPEG is a different trade-off
     /// with a much worse failure mode, and isn't offered here.
-    reencode_at_target: bool,
+    pub(crate) reencode_at_target: bool,
 }
 
 /// What the image step did, beyond the bytes it saved.

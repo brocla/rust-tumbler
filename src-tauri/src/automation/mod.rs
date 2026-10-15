@@ -17,6 +17,8 @@ mod handlers;
 mod paths;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_edit;
 mod tools;
 
 pub use tools::{tools, ToolDef};
@@ -25,7 +27,12 @@ use crate::state::{lock_mutex, AppState, DocEntry};
 use pdfium_render::prelude::Pdfium;
 use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
+
+/// Progress for a long tool: `(done, total)`, such as pages OCR'd so far. The
+/// MCP server turns it into `notifications/progress`; the CLI prints it.
+pub type Progress = Arc<dyn Fn(u32, u32) + Send + Sync>;
 
 /// How many documents a session holds open at once. Each keeps its bytes, a
 /// pdfium document and a page cache in memory, so a long MCP session that
@@ -41,13 +48,16 @@ pub struct Automation {
     pub(crate) state: AppState,
     root: Option<PathBuf>,
     next_doc: u64,
+    /// For the call in progress (see [`Automation::call_with`]).
+    progress: Progress,
+    cancel: Arc<AtomicBool>,
 }
 
 impl Automation {
     /// A session over `state`. Tests build one with fake OCR and linearizer
     /// (`AppState::with_ocr_engine`, `with_linearizer`).
     pub(crate) fn new(state: AppState) -> Self {
-        Self { state, root: None, next_doc: 1 }
+        Self { state, root: None, next_doc: 1, progress: no_progress(), cancel: Arc::default() }
     }
 
     /// The production session: the Windows OCR engine and qpdf.
@@ -72,10 +82,45 @@ impl Automation {
 
     /// Runs the tool `name` with JSON `args`, an object (`null` means none).
     pub fn call(&mut self, name: &str, args: &Value) -> Result<Vec<Content>, ToolError> {
+        self.call_with(name, args, no_progress(), Arc::default())
+    }
+
+    /// [`Self::call`], reporting progress for the long tools (OCR,
+    /// compression, Expand Margins, text export) and stopping when `cancel` is
+    /// set. A cancelled edit changes nothing and fails with "cancelled".
+    pub fn call_with(
+        &mut self,
+        name: &str,
+        args: &Value,
+        progress: Progress,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<Vec<Content>, ToolError> {
         let empty = Value::Object(Map::new());
         let args = if args.is_null() { &empty } else { args };
         let def = tools::find(name).ok_or_else(|| ToolError::UnknownTool(name.to_string()))?;
-        def.run(self, args)
+        self.progress = progress;
+        self.cancel = cancel;
+        let result = def.run(self, args);
+        self.progress = no_progress();
+        self.cancel = Arc::default();
+        result
+    }
+
+    /// Writes `bytes` that a front door produces on the session's behalf,
+    /// such as the CLI saving a page_render image: confined to the root like a
+    /// tool's own output, and atomic. Returns where the file went.
+    pub fn write_output(&self, path: &str, bytes: &[u8]) -> Result<PathBuf, ToolError> {
+        let target = paths::output_path(self.root(), path)?;
+        paths::write_atomic(&target, bytes)?;
+        Ok(target)
+    }
+
+    pub(crate) fn progress(&self) -> Progress {
+        self.progress.clone()
+    }
+
+    pub(crate) fn cancel_token(&self) -> Arc<AtomicBool> {
+        self.cancel.clone()
     }
 
     /// The `AppState` key of an open document.
@@ -139,6 +184,10 @@ impl Automation {
         ids.sort_unstable();
         Ok(ids)
     }
+}
+
+fn no_progress() -> Progress {
+    Arc::new(|_, _| {})
 }
 
 /// One piece of a tool's result.

@@ -1,6 +1,6 @@
 //! doc_open, doc_list, doc_info, doc_close, doc_save.
 
-use super::{json, snake_json, ToolResult};
+use super::{reply, snake_json, ToolResult};
 use crate::automation::args::{DocArgs, DocCloseArgs, DocOpenArgs, DocSaveArgs, NoArgs};
 use crate::automation::{failed, paths, Automation, ToolError};
 use crate::commands::{conformance, forms, metadata, ocr, save, signature, text};
@@ -26,12 +26,12 @@ pub(crate) fn doc_open(auto: &mut Automation, args: DocOpenArgs) -> ToolResult {
     auto.state.insert_document(id.to_string(), entry)?;
     let mut summary = summary(auto, id)?;
     summary["pages"] = page_sizes(auto, id)?;
-    json(summary)
+    reply(summary)
 }
 
 pub(crate) fn doc_list(auto: &mut Automation, _: NoArgs) -> ToolResult {
     let documents = auto.doc_ids()?.into_iter().map(|id| summary(auto, id)).collect::<Result<Vec<_>, _>>()?;
-    json(json!({ "documents": documents }))
+    reply(json!({ "documents": documents }))
 }
 
 pub(crate) fn doc_info(auto: &mut Automation, args: DocArgs) -> ToolResult {
@@ -46,7 +46,7 @@ pub(crate) fn doc_info(auto: &mut Automation, args: DocArgs) -> ToolResult {
     let (without_text, ocr_only) = text_coverage(auto, args.doc)?;
     info["pages_without_text"] = json!(without_text);
     info["pages_ocr_only"] = json!(ocr_only);
-    json(info)
+    reply(info)
 }
 
 pub(crate) fn doc_close(auto: &mut Automation, args: DocCloseArgs) -> ToolResult {
@@ -64,7 +64,7 @@ pub(crate) fn doc_close(auto: &mut Automation, args: DocCloseArgs) -> ToolResult
     // What the GUI's close_document does.
     auto.state.clear_ocr_cache_for_doc(&key);
     auto.state.remove_document(&key)?;
-    json(json!({ "closed": args.doc }))
+    reply(json!({ "closed": args.doc }))
 }
 
 pub(crate) fn doc_save(auto: &mut Automation, args: DocSaveArgs) -> ToolResult {
@@ -82,7 +82,7 @@ pub(crate) fn doc_save(auto: &mut Automation, args: DocSaveArgs) -> ToolResult {
         }
     };
     let bytes = std::fs::metadata(&path).map_err(|e| failed(format!("{path}: {e}")))?.len();
-    json(json!({ "doc": args.doc, "path": path, "bytes": bytes, "dirty": false }))
+    reply(json!({ "doc": args.doc, "path": path, "bytes": bytes, "dirty": false }))
 }
 
 /// The fields every document listing shares.

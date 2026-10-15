@@ -16,7 +16,7 @@ use std::sync::Arc;
 // ── Fakes for the injected dependencies ──────────────────────────────────────
 
 /// Recognizes a fixed list of words on every page.
-struct FakeOcr(Vec<OcrWord>);
+pub(super) struct FakeOcr(pub(super) Vec<OcrWord>);
 
 impl OcrEngine for FakeOcr {
     fn recognize(&self, _rgba: &[u8], _w: u32, _h: u32) -> Result<Vec<OcrWord>, AppError> {
@@ -25,7 +25,7 @@ impl OcrEngine for FakeOcr {
 }
 
 /// Copies the source unchanged, standing in for qpdf.
-struct FakeLinearizer;
+pub(super) struct FakeLinearizer;
 
 impl Linearizer for FakeLinearizer {
     fn linearize(&self, src: &Path, dest: &Path) -> Result<(), AppError> {
@@ -33,24 +33,24 @@ impl Linearizer for FakeLinearizer {
     }
 }
 
-fn word(text: &str, x: f32, y: f32) -> OcrWord {
+pub(super) fn word(text: &str, x: f32, y: f32) -> OcrWord {
     OcrWord { text: text.to_string(), rect: TextRect { x, y, width: 30.0, height: 10.0 } }
 }
 
 /// A session over `pdfium` with fake OCR and linearizer, no root.
-fn session(pdfium: &'static Pdfium) -> Automation {
+pub(super) fn session(pdfium: &'static Pdfium) -> Automation {
     let state = AppState::new(pdfium, None)
         .with_ocr_engine(Arc::new(FakeOcr(vec![word("Scanned", 10.0, 150.0)])))
         .with_linearizer(Arc::new(FakeLinearizer));
     Automation::new(state)
 }
 
-fn rooted(pdfium: &'static Pdfium, root: &Path) -> Automation {
+pub(super) fn rooted(pdfium: &'static Pdfium, root: &Path) -> Automation {
     session(pdfium).with_root(root).expect("root")
 }
 
 /// The single JSON result of a call that must succeed.
-fn ok(auto: &mut Automation, tool: &str, args: Value) -> Value {
+pub(super) fn ok(auto: &mut Automation, tool: &str, args: Value) -> Value {
     match auto.call(tool, &args) {
         Ok(content) => match content.as_slice() {
             [Content::Json(v)] => v.clone(),
@@ -60,43 +60,43 @@ fn ok(auto: &mut Automation, tool: &str, args: Value) -> Value {
     }
 }
 
-fn failed_with(auto: &mut Automation, tool: &str, args: Value) -> String {
+pub(super) fn failed_with(auto: &mut Automation, tool: &str, args: Value) -> String {
     match auto.call(tool, &args) {
         Err(ToolError::Failed(m)) => m,
         other => panic!("{tool} {args}: expected Failed, got {other:?}"),
     }
 }
 
-fn invalid(auto: &mut Automation, tool: &str, args: Value) -> String {
+pub(super) fn invalid(auto: &mut Automation, tool: &str, args: Value) -> String {
     match auto.call(tool, &args) {
         Err(ToolError::InvalidArgs(m)) => m,
         other => panic!("{tool} {args}: expected InvalidArgs, got {other:?}"),
     }
 }
 
-fn fixture_copy(dir: &TempDir, name: &str) -> PathBuf {
+pub(super) fn fixture_copy(dir: &TempDir, name: &str) -> PathBuf {
     let p = dir.0.join(name);
     std::fs::copy(crate::fixture_path(), &p).expect("copy fixture");
     p
 }
 
-fn s(p: &Path) -> String {
+pub(super) fn s(p: &Path) -> String {
     p.to_string_lossy().into_owned()
 }
 
 /// Opens `path` and returns its doc id.
-fn open(auto: &mut Automation, path: &Path) -> u64 {
+pub(super) fn open(auto: &mut Automation, path: &Path) -> u64 {
     ok(auto, "doc_open", json!({ "path": s(path) }))["doc"].as_u64().expect("doc id")
 }
 
-fn buffer_and_dirty(auto: &Automation, doc: u64) -> (Vec<u8>, bool) {
+pub(super) fn buffer_and_dirty(auto: &Automation, doc: u64) -> (Vec<u8>, bool) {
     let entry = auto.state.get_document(&doc.to_string()).expect("doc");
     let entry = entry.lock().expect("lock");
     (entry.buffer.clone(), entry.dirty)
 }
 
 /// Marks a document dirty without a v1 edit tool: re-applies its own bytes.
-fn make_dirty(auto: &Automation, doc: u64) {
+pub(super) fn make_dirty(auto: &Automation, doc: u64) {
     let (bytes, _) = buffer_and_dirty(auto, doc);
     auto.state.set_buffer_and_refresh(&doc.to_string(), bytes).expect("refresh");
 }
@@ -158,6 +158,9 @@ fn read_only_samples() -> Vec<(&'static str, Value)> {
         ("text_find", json!({ "doc": 1, "query": "Fixture" })),
         ("sign_list", json!({ "doc": 1 })),
         ("doc_conformance", json!({ "doc": 1 })),
+        ("ocr_status", json!({})),
+        ("doc_audit_images", json!({ "doc": 1 })),
+        ("margins_analyze", json!({ "doc": 1 })),
     ]
 }
 
@@ -444,7 +447,7 @@ fn doc_save_as_refuses_a_file_open_as_another_document() {
 
 // ── page_render ──────────────────────────────────────────────────────────────
 
-fn png_size(data: &[u8]) -> (u32, u32) {
+pub(super) fn png_size(data: &[u8]) -> (u32, u32) {
     let img = image::load_from_memory_with_format(data, image::ImageFormat::Png).expect("valid PNG");
     (img.width(), img.height())
 }
@@ -479,19 +482,24 @@ fn page_render_validates_page_and_dpi() {
     invalid(&mut auto, "page_render", json!({ "doc": doc, "page": 1, "dpi": 0 }));
 }
 
+/// page_render returns the image only: writing it is the caller's business
+/// (the CLI's `render --out`), through `write_output`, which is confined and
+/// atomic. A read-only tool with a file argument could overwrite any file in
+/// the root without the prompt a destructive tool gets.
 #[test]
-fn page_render_writes_a_file_when_asked() {
+fn page_render_has_no_file_output_and_write_output_is_confined() {
     let pdfium = crate::test_pdfium();
     let root = TempDir::new("render");
     let mut auto = rooted(pdfium.get(), root.path());
     fixture_copy(&root, "a.pdf");
     ok(&mut auto, "doc_open", json!({ "path": "a.pdf" }));
-    let r = ok(&mut auto, "page_render", json!({ "doc": 1, "page": 1, "dpi": 72, "out": "p1.png" }));
-    let out = root.0.join("p1.png");
-    assert_eq!(r["path"], s(&out));
-    assert_eq!((r["width"].clone(), r["height"].clone()), (json!(200), json!(200)));
-    assert_eq!(png_size(&std::fs::read(&out).unwrap()), (200, 200));
-    failed_with(&mut auto, "page_render", json!({ "doc": 1, "page": 1, "out": r"..\p1.png" }));
+    let m = invalid(&mut auto, "page_render", json!({ "doc": 1, "page": 1, "out": "p1.png" }));
+    assert!(m.contains("`out`"), "{m}");
+
+    let written = auto.write_output("p1.png", b"png bytes").expect("write");
+    assert_eq!(written, root.0.join("p1.png"));
+    assert_eq!(std::fs::read(&written).unwrap(), b"png bytes");
+    assert!(matches!(auto.write_output(r"..\p1.png", b"x"), Err(ToolError::Failed(_))));
 }
 
 /// Page sizes are in render space: on a /Rotate 90 page the width and height
@@ -616,8 +624,11 @@ fn schemas_carry_bounds_and_optional_arguments() {
     assert_eq!(render["properties"]["page"]["minimum"], 1);
     assert_eq!(render["required"], json!(["doc", "page"]));
     assert!(render["properties"]["dpi"].get("default").is_none(), "no default: null");
-    let out = render["properties"]["out"]["description"].as_str().unwrap();
-    assert!(!out.contains('\n'), "wrapped doc comment kept its line break: {out:?}");
+    // doc_save's path has a doc comment wrapped over two lines.
+    let save = &tools::find("doc_save").unwrap().input_schema;
+    let path = save["properties"]["path"]["description"].as_str().unwrap();
+    assert!(path.contains("Omit to overwrite"), "{path:?}");
+    assert!(!path.contains('\n'), "wrapped doc comment kept its line break: {path:?}");
 
     let extract = &tools::find("text_extract").unwrap().input_schema;
     assert_eq!(extract["properties"]["pages"]["type"], "array");

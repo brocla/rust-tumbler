@@ -8,7 +8,7 @@
 //! [`check_args`] before the handler runs.
 
 use super::args::*;
-use super::handlers::{document, render, standards, text};
+use super::handlers::{document, linearize, margins, metadata, ocr, optimize, pages, render, standards, text};
 use super::{Automation, Content, ToolError};
 use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
@@ -206,8 +206,8 @@ fn table() -> Vec<ToolDef> {
             "page_render",
             "Render a page",
             "Render one page to a PNG image, 96 dpi by default and at most 600, with annotations \
-             and form values drawn. Without out the image is returned; with out it is written \
-             to that file and its path and size are returned. The document is not changed.",
+             and form values drawn. The image is returned; nothing is written. The document is \
+             not changed.",
             render::page_render,
         )
         .read_only()
@@ -234,6 +234,139 @@ fn table() -> Vec<ToolDef> {
         )
         .read_only()
         .commands(&["search_document"]),
+        tool::<DocExportTextArgs>(
+            "doc_export_text",
+            "Export text to a file",
+            "Write every page's text to a .txt file, each page under a \"--- Page N ---\" heading. \
+             Pages without a text layer use this session's OCR text, or, with use_ocr, are \
+             recognized now (slow; reports progress). An existing file at path is replaced. The \
+             document is not changed.",
+            text::doc_export_text,
+        )
+        .destructive()
+        .commands(&["export_text"]),
+        // ── Pages ───────────────────────────────────────────────────────────
+        tool::<PageDeleteArgs>(
+            "page_delete",
+            "Delete pages",
+            "Delete pages from the in-memory document; call doc_save to write it. At least one \
+             page must remain.",
+            pages::page_delete,
+        )
+        .destructive()
+        .commands(&["delete_pages"]),
+        tool::<PageRotateArgs>(
+            "page_rotate",
+            "Rotate pages",
+            "Turn pages by a multiple of 90 degrees, added to their current rotation, in the \
+             in-memory document; call doc_save to write it. Page sizes and text rectangles \
+             follow the new orientation.",
+            pages::page_rotate,
+        )
+        .commands(&["rotate_pages"]),
+        tool::<PageReorderArgs>(
+            "page_reorder",
+            "Reorder pages",
+            "Put the pages in a new order, given as the complete list of current page numbers, \
+             in the in-memory document; call doc_save to write it.",
+            pages::page_reorder,
+        )
+        .commands(&["reorder_pages"]),
+        tool::<PageInsertFileArgs>(
+            "page_insert_file",
+            "Insert pages from a file",
+            "Insert every page of another PDF file into the in-memory document, after a given \
+             page (0 for the front; default the end); call doc_save to write it. Combining \
+             several files is doc_open on the first, then this once per other file. The source \
+             must not be password-protected, and cannot be the document itself.",
+            pages::page_insert_file,
+        )
+        .commands(&["merge_document"]),
+        tool::<DocSplitArgs>(
+            "doc_split",
+            "Split into files",
+            "Write ranges of pages to new PDF files in out_dir: every N pages (default 1), or the \
+             ranges given. Files are named after the document, such as report-3.pdf or \
+             report-1-4.pdf. Fails, writing nothing, if any of them already exists. The new \
+             files are not password-protected even when the document is. The document itself \
+             is not changed.",
+            pages::doc_split,
+        )
+        .commands(&["split_document"]),
+        // ── Metadata and security ───────────────────────────────────────────
+        tool::<DocSetInfoArgs>(
+            "doc_set_info",
+            "Set metadata",
+            "Change the document's Title, Author, Subject, Keywords or Creator in the in-memory \
+             document; fields not given keep their values, and \"\" clears one. Call doc_save to \
+             write it. Producer and the dates are set by doc_save.",
+            metadata::doc_set_info,
+        )
+        .commands(&["set_metadata"]),
+        tool::<DocProtectArgs>(
+            "doc_protect",
+            "Set a password",
+            "Protect the document with a password (AES-256), or change its password. Takes \
+             effect at the next doc_save, which then writes an encrypted file that needs the \
+             password to open. The in-memory document stays editable.",
+            metadata::doc_protect,
+        )
+        .commands(&["set_password"]),
+        tool::<DocArgs>(
+            "doc_unprotect",
+            "Remove the password",
+            "Remove a password-protected document's password. Takes effect at the next doc_save, \
+             which then writes a file anyone can open.",
+            metadata::doc_unprotect,
+        )
+        .destructive()
+        .commands(&["remove_password"]),
+        // ── OCR ─────────────────────────────────────────────────────────────
+        tool::<NoArgs>(
+            "ocr_status",
+            "Check OCR",
+            "Whether text recognition is available: it needs a Windows OCR language pack. When \
+             it is not, message says why.",
+            ocr::ocr_status,
+        )
+        .read_only(),
+        tool::<OcrRecognizeArgs>(
+            "ocr_recognize",
+            "Recognize text (OCR)",
+            "Recognize the text on scanned pages (those without a text layer, or every page \
+             with force) and, by default, embed it as an invisible text layer in the in-memory \
+             document, so the pages become searchable and keep their text when saved; call \
+             doc_save to write it. With embed false, the text is only kept for this session's \
+             text_find and text_extract. A forced page that already has a text layer keeps it \
+             in the file; the OCR text is preferred for it only in this session. Slow (about a \
+             second a page); reports progress. Fails if ocr_status reports OCR unavailable.",
+            ocr::ocr_recognize,
+        )
+        .commands(&["ocr_document", "ocr_page", "add_text_layer"]),
+        // ── Compression ─────────────────────────────────────────────────────
+        tool::<DocArgs>(
+            "doc_audit_images",
+            "List images",
+            "Every image in the document: the pages it is drawn on, pixel size, stored size, \
+             encoding, color space, the resolution it is displayed at, and estimated JPEG \
+             quality. Useful before doc_optimize, to see where the bytes are.",
+            optimize::doc_audit_images,
+        )
+        .read_only()
+        .commands(&["inspect_images"]),
+        tool::<DocOptimizeArgs>(
+            "doc_optimize",
+            "Reduce file size",
+            "Run compression steps on the in-memory document; call doc_save to write it. By \
+             default the four lossless steps run; recompress_images (lossy: downsamples and \
+             re-encodes images as JPEG) runs only when listed. strip_extras removes XMP \
+             metadata, page thumbnails, JavaScript and embedded files. Reports each step's size \
+             before and after, and breaks_conformance lists declared PDF/A or PDF/X claims the \
+             result no longer meets. Reports progress.",
+            optimize::doc_optimize,
+        )
+        .destructive()
+        .commands(&["run_optimization_steps"]),
         // ── Signatures and standards ────────────────────────────────────────
         tool::<DocArgs>(
             "sign_list",
@@ -255,8 +388,74 @@ fn table() -> Vec<ToolDef> {
         )
         .read_only()
         .commands(&["get_conformance"]),
+        // ── Tumbler-only ────────────────────────────────────────────────────
+        tool::<DocLinearizeArgs>(
+            "doc_linearize",
+            "Save a linearized copy",
+            "Write a linearized (Fast Web View) copy of the document, with its in-memory edits, \
+             to path, so a browser can show the first page before the whole file arrives. The \
+             document itself is not changed and stays attached to its own file. The copy is not \
+             password-protected even when the document is. path is replaced if it exists, and \
+             cannot be the document's own file.",
+            linearize::doc_linearize,
+        )
+        .destructive()
+        .commands(&["export_linearized_copy"]),
+        tool::<MarginsArgs>(
+            "margins_analyze",
+            "Measure margins",
+            "Find each page's ink bounding box (where anything is drawn), in points, and the \
+             uniform scale margins_expand would apply with this padding: the largest that fits \
+             every page's content. scale is null when no page has content. Reports progress. \
+             The document is not changed.",
+            margins::margins_analyze,
+        )
+        .read_only()
+        .commands(&["analyze_margins"]),
+        tool::<MarginsArgs>(
+            "margins_expand",
+            "Expand content to fill pages",
+            "Scale every page's content up by one uniform factor, the largest that fits all \
+             pages with the given padding, so wide margins shrink, in the in-memory document; \
+             call doc_save to write it. Annotations move with the content. Fails if no page has \
+             content. Reports progress.",
+            margins::margins_expand,
+        )
+        .commands(&["expand_margins"]),
     ]
 }
+
+/// GUI commands with no tool, and why. A coverage test fails when a new
+/// `#[tauri::command]` is neither automated by a tool (its `commands`) nor
+/// listed here. Only that test reads it.
+#[cfg(test)]
+pub(crate) const NOT_AUTOMATED: &[(&str, &str)] = &[
+    ("canonicalize_path", "GUI plumbing: tools canonicalize the paths they are given"),
+    ("document_has_form", "v1.1 (form tools); doc_info already reports has_form"),
+    ("get_form_fields", "v1.1: form_fields"),
+    ("set_form_field_value", "v1.1: form_fill"),
+    ("clear_form", "v1.1: form_reset"),
+    ("reset_form_via_button", "a form button's reset action; after v1.1"),
+    ("set_signature_strokes", "drawing into a signature field; after v1.1"),
+    ("find_redaction_matches", "v1.1: redact_find"),
+    ("find_redaction_metadata_matches", "v1.1: redact_find"),
+    ("apply_redactions", "v1.1: redact_apply"),
+    ("save_redacted_copy", "v1.1: redact_apply"),
+    ("render_redacted_page", "GUI preview of a staged redaction; redact_apply writes directly"),
+    ("discard_redaction", "GUI preview of a staged redaction; redact_apply writes directly"),
+    ("read_typewriter", "v1.1: typewriter_list"),
+    ("apply_typewriter", "v1.1: typewriter_set"),
+    ("apply_ink", "v1.1: ink_add"),
+    ("cancel_ocr", "replaced by MCP notifications/cancelled and Ctrl+C"),
+    ("cancel_compress", "replaced by MCP notifications/cancelled and Ctrl+C"),
+    ("cancel_margins", "replaced by MCP notifications/cancelled and Ctrl+C"),
+    ("cancel_redact", "replaced by MCP notifications/cancelled and Ctrl+C"),
+    ("print_document", "printing is deferred to a version after v1.1"),
+    ("cancel_print", "printing is deferred to a version after v1.1"),
+    ("take_startup_file", "GUI plumbing: the file-association launch path"),
+    ("get_accent_color", "GUI plumbing: the Windows accent color"),
+    ("get_app_version", "GUI plumbing: the CLI has tumbler-cli --version"),
+];
 
 /// Checks `args` against `def`'s schema: an object; no unknown or missing
 /// arguments; each top-level argument of the declared JSON type and within
