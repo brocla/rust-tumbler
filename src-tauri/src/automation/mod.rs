@@ -15,6 +15,7 @@
 mod args;
 pub mod cli;
 mod handlers;
+pub mod mcp;
 mod paths;
 #[cfg(test)]
 mod tests;
@@ -22,6 +23,8 @@ mod tests;
 mod tests_cli;
 #[cfg(test)]
 mod tests_edit;
+#[cfg(test)]
+mod tests_mcp;
 mod tools;
 
 pub use tools::{tools, ToolDef};

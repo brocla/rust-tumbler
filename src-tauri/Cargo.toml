@@ -75,6 +75,8 @@ schemars = "1.2.1"
 # Argument parsing for tumbler-cli. Held at 4.5: 4.6's derive brings in a second
 # `syn` (3.x). No default features, so no color support and its console crates.
 clap = { version = "~4.5", default-features = false, features = ["std", "derive", "help", "usage", "error-context"] }
+# Images in MCP tool results (tumbler-cli mcp). Already in the tree via Tauri.
+base64 = "0.22.1"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.61", features = [

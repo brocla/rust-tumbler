@@ -1,5 +1,5 @@
-//! `tumbler-cli`'s command line: `tools`, `run`, `run --script`, and the
-//! friendly subcommands (`info`, `text`, `edit`, ...).
+//! `tumbler-cli`'s command line: `tools`, `run`, `run --script`, `mcp`, and
+//! the friendly subcommands (`info`, `text`, `edit`, ...).
 //!
 //! Every friendly command is a short sequence of tool calls through the same
 //! table as `run` and the MCP server, never separate logic, so it cannot drift
@@ -103,6 +103,15 @@ enum Command {
         out: Option<String>,
         #[command(flatten)]
         common: Common,
+    },
+    /// Serve the tools to an agent over MCP (stdin/stdout) until stdin closes.
+    #[command(long_about = "Serve the tools to an agent over the Model Context Protocol, on         stdin/stdout, until stdin closes. Opens no network port.
+
+        --root is required: every path the agent reads or writes must be inside that folder.")]
+    Mcp {
+        /// The folder every path must be inside (required).
+        #[arg(long, value_name = "DIR", required = true)]
+        root: PathBuf,
     },
     /// Print a PDF's summary (doc_info) as JSON.
     Info {
@@ -338,8 +347,11 @@ impl Ctx {
         if let Command::Tools { json } = command {
             return self.tools(json);
         }
+        if let Command::Mcp { root } = command {
+            return self.mcp(&root, session);
+        }
         let common = match &command {
-            Command::Tools { .. } => unreachable!("handled above"),
+            Command::Tools { .. } | Command::Mcp { .. } => unreachable!("handled above"),
             Command::Run { common, .. }
             | Command::Info { common, .. }
             | Command::Text { common, .. }
@@ -360,7 +372,7 @@ impl Ctx {
         }
         let mut s = Session { ctx: self, auto, password };
         match command {
-            Command::Tools { .. } => unreachable!("handled above"),
+            Command::Tools { .. } | Command::Mcp { .. } => unreachable!("handled above"),
             Command::Run { tool, args, script, out, .. } => match script {
                 Some(script) => s.run_script(&script),
                 None => {
@@ -558,6 +570,21 @@ impl Ctx {
         }
         text.push_str("\n`tumbler-cli tools --json` gives each tool's description and argument schema.\n");
         self.print_text(&text)
+    }
+
+    fn mcp(&mut self, root: &std::path::Path, session: impl FnOnce() -> Result<Automation, String>) -> Outcome {
+        let auto = session()
+            .map_err(Stop::Failed)?
+            .with_root(root)
+            .map_err(|e| Stop::Usage(format!("--root {}: {e}", root.display())))?;
+        let root = auto.root().map(|r| r.display().to_string()).unwrap_or_default();
+        let _ = writeln!(
+            lock(&self.io.stderr),
+            "tumbler-cli: MCP server on stdin/stdout (protocol {}), paths confined to {root}; close stdin to stop",
+            super::mcp::PROTOCOL_VERSIONS[0]
+        );
+        let stdin = std::mem::replace(&mut self.io.stdin, Box::new(std::io::empty()));
+        super::mcp::serve(auto, stdin, self.io.stdout.clone()).map_err(|e| Stop::Failed(format!("MCP server: {e}")))
     }
 
     /// The password for protected inputs: --password-file, else the

@@ -501,3 +501,35 @@ fn a_closed_stdout_pipe_exits_0() {
     });
     assert_eq!(code, 0);
 }
+
+// ── mcp ──────────────────────────────────────────────────────────────────────
+
+#[test]
+fn mcp_requires_root() {
+    let pdfium = crate::test_pdfium();
+    let r = cli(pdfium.get(), &["mcp"]);
+    assert_eq!(r.code, 2);
+    assert!(r.stderr.contains("--root"), "{}", r.stderr);
+}
+
+#[test]
+fn mcp_serves_stdin_until_it_closes() {
+    let pdfium = crate::test_pdfium();
+    let root = TempDir::new("cli");
+    let stdout = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let stderr = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let input = format!("{}\n", json!({ "jsonrpc": "2.0", "id": 1, "method": "ping" }));
+    let io = Io {
+        stdin: Box::new(std::io::Cursor::new(input.into_bytes())),
+        stdout: stdout.clone() as SharedWriter,
+        stderr: stderr.clone() as SharedWriter,
+        stderr_is_terminal: false,
+    };
+    let argv = vec!["tumbler-cli".into(), "mcp".into(), "--root".into(), root.0.clone().into_os_string()];
+    let code = main_with(argv, CliEnv::default(), io, Arc::default(), || Ok(session(pdfium.get())));
+    assert_eq!(code, 0);
+    let out: Value = serde_json::from_slice(&stdout.lock().unwrap()).expect("one JSON line");
+    assert_eq!((out["id"].clone(), out["result"].clone()), (json!(1), json!({})));
+    let banner = String::from_utf8(stderr.lock().unwrap().clone()).unwrap();
+    assert!(banner.contains("MCP server"), "{banner}");
+}
