@@ -29,7 +29,7 @@ fn render_page_impl(
     page: u32,
     width: u32,
 ) -> Result<tauri::ipc::Response, AppError> {
-    let rendered = render_page_rgba(state, &doc_id, page, width)?;
+    let rendered = render_page_rgba(state, &doc_id, page, width, false)?;
     Ok(tauri::ipc::Response::new(rendered.rgba))
 }
 
@@ -43,11 +43,15 @@ pub(crate) struct RenderedPage {
 /// Renders a page (1-based) at a target width, without the IPC response
 /// wrapper — the frontend learns the height from the page size it already
 /// has, but the CLI's `page_render` needs it alongside the pixels.
+///
+/// `annotations` draws annotation appearances. The viewer passes `false` (see
+/// below); the CLI passes `true`, since it has no overlays to draw them.
 pub(crate) fn render_page_rgba(
     state: &AppState,
     doc_id: &str,
     page: u32,
     width: u32,
+    annotations: bool,
 ) -> Result<RenderedPage, AppError> {
     let entry = state.get_document(doc_id)?;
     let mut entry = lock_mutex(&entry)?;
@@ -60,8 +64,8 @@ pub(crate) fn render_page_rgba(
     // every zoom change.
     let pdf_page = entry.page(page.saturating_sub(1) as PdfPageIndex)?;
 
-    // Render the page content and form-field values, but NOT annotation
-    // appearances. Tumbler draws its own interactive overlays on top — text
+    // The viewer renders the page content and form-field values, but NOT
+    // annotation appearances. Tumbler draws its own interactive overlays on top — text
     // selection, form controls, and typewriter notes (issue #99). Typewriter
     // notes are stored as FreeText annotations so they print and open correctly
     // in other readers; letting pdfium paint that appearance here too would
@@ -71,7 +75,7 @@ pub(crate) fn render_page_rgba(
     // shown in the viewer, though it still prints and appears in other readers.
     let config = PdfRenderConfig::new()
         .set_target_width(width as Pixels)
-        .render_annotations(false);
+        .render_annotations(annotations);
 
     let bitmap = pdf_page
         .render_with_config(&config)
@@ -136,7 +140,7 @@ mod tests {
         let state = AppState::new(pdfium.get(), None);
         open_fixture(&state, "doc1");
 
-        let page = render_page_rgba(&state, "doc1", 1, 100).expect("render");
+        let page = render_page_rgba(&state, "doc1", 1, 100, false).expect("render");
         assert_eq!((page.width, page.height), (100, 100));
         assert_eq!(page.rgba.len(), 100 * 100 * 4);
     }

@@ -38,8 +38,9 @@ libloading = "0.7"
 lopdf = { version = "0.43", default-features = false, features = ["chrono", "jiff", "rayon"] }
 regex = "1"
 thiserror = "2"
-# Image decode/resize/JPEG re-encode for the image-recompression step.
-image = { version = "0.25", default-features = false, features = ["jpeg"] }
+# Image decode/resize/JPEG re-encode for the image-recompression step; PNG
+# encode for the CLI's page_render.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 # zlib inflate for the FlateDecode raw-raster path (decompressed_content()
 # deliberately refuses Image XObjects, so we inflate those ourselves).
 flate2 = "1"
@@ -67,6 +68,10 @@ time = "0.3"
 sha1 = "0.10"
 sha2 = "0.10"
 hex = "0.4.3"
+# JSON Schemas for the CLI/MCP tool arguments, derived from the argument
+# structs so schema and parser cannot drift. Held at the version Tauri already
+# brings in, so adding it changed nothing else in the lockfile.
+schemars = "1.2.1"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.61", features = [

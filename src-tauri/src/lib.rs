@@ -1,3 +1,4 @@
+pub mod automation;
 mod commands;
 mod error;
 mod state;
