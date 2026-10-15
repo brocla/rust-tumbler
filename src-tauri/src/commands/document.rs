@@ -41,7 +41,7 @@ pub fn open_document(
     open_document_impl(&state, path, password).map_err(String::from)
 }
 
-fn open_document_impl(
+pub(crate) fn open_document_impl(
     state: &AppState,
     path: String,
     password: Option<String>,

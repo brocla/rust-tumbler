@@ -192,7 +192,7 @@ fn detect_page(document: &PdfDocument, index: u32) -> Result<PageMargins, AppErr
 /// Scans every page for its ink bounding box, reporting progress and honoring
 /// the cancel token. Locks the document only per page so other tabs stay
 /// responsive.
-fn analyze_margins_impl(
+pub(crate) fn analyze_margins_impl(
     emit_progress: &impl Fn(u32, u32),
     entry: &Arc<Mutex<DocEntry>>,
     cancel: &AtomicBool,

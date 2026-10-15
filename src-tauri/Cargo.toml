@@ -6,10 +6,19 @@ name = "tumbler"
 version = "2.15.3"
 license = "MIT"
 edition = "2021"
+# Two binaries live in this package; the GUI stays what `cargo run` and
+# `tauri dev` start.
+default-run = "tumbler"
 
 [lib]
 name = "tumbler_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
+
+# The command line and MCP server (doc/cli-plan.html). A console program,
+# unlike the GUI, which has no stdin/stdout in release builds.
+[[bin]]
+name = "tumbler-cli"
+path = "src/bin/tumbler-cli.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

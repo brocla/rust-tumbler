@@ -29,7 +29,27 @@ fn render_page_impl(
     page: u32,
     width: u32,
 ) -> Result<tauri::ipc::Response, AppError> {
-    let entry = state.get_document(&doc_id)?;
+    let rendered = render_page_rgba(state, &doc_id, page, width)?;
+    Ok(tauri::ipc::Response::new(rendered.rgba))
+}
+
+/// A rendered page: RGBA pixels, row-major, `width * height * 4` bytes.
+pub(crate) struct RenderedPage {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+}
+
+/// Renders a page (1-based) at a target width, without the IPC response
+/// wrapper — the frontend learns the height from the page size it already
+/// has, but the CLI's `page_render` needs it alongside the pixels.
+pub(crate) fn render_page_rgba(
+    state: &AppState,
+    doc_id: &str,
+    page: u32,
+    width: u32,
+) -> Result<RenderedPage, AppError> {
+    let entry = state.get_document(doc_id)?;
     let mut entry = lock_mutex(&entry)?;
 
     // Via the entry's page cache, not `document.pages().get(..)`: pdfium
@@ -57,9 +77,11 @@ fn render_page_impl(
         .render_with_config(&config)
         .map_err(|e| AppError::pdfium(format!("Failed to render page {page}"), e))?;
 
-    let rgba_bytes = bitmap.as_rgba_bytes();
-
-    Ok(tauri::ipc::Response::new(rgba_bytes))
+    Ok(RenderedPage {
+        width: bitmap.width() as u32,
+        height: bitmap.height() as u32,
+        rgba: bitmap.as_rgba_bytes(),
+    })
 }
 
 #[cfg(test)]
@@ -104,6 +126,19 @@ mod tests {
 
         let response = render_page_impl(&state, "doc1".to_string(), 1, 100).expect("render");
         assert_eq!(raw_body_len(response), 100 * 100 * 4);
+    }
+
+    /// The pixels-and-size split the CLI's `page_render` uses: same bitmap as
+    /// the IPC path, with its dimensions reported alongside.
+    #[test]
+    fn render_page_rgba_reports_size_with_pixels() {
+        let pdfium = crate::test_pdfium();
+        let state = AppState::new(pdfium.get(), None);
+        open_fixture(&state, "doc1");
+
+        let page = render_page_rgba(&state, "doc1", 1, 100).expect("render");
+        assert_eq!((page.width, page.height), (100, 100));
+        assert_eq!(page.rgba.len(), 100 * 100 * 4);
     }
 
     #[test]

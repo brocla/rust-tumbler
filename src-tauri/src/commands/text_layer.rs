@@ -471,7 +471,7 @@ pub async fn add_text_layer(
 /// invisible layer), returning the result plus the edited document bytes —
 /// `None` when no page needed a layer (or the run was cancelled), in which
 /// case the document is left untouched.
-fn add_text_layer_impl(
+pub(crate) fn add_text_layer_impl(
     emit_progress: impl Fn(u32, u32),
     entry: Arc<Mutex<DocEntry>>,
     doc_id: String,

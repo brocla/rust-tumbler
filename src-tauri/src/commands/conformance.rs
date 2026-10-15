@@ -34,7 +34,7 @@ pub fn get_conformance(
     get_conformance_impl(&state, doc_id).map_err(String::from)
 }
 
-fn get_conformance_impl(state: &AppState, doc_id: String) -> Result<ConformanceClaims, AppError> {
+pub(crate) fn get_conformance_impl(state: &AppState, doc_id: String) -> Result<ConformanceClaims, AppError> {
     // Read the in-memory buffer, not the file on disk: with non-destructive
     // editing (issue #31) the buffer is the authoritative document state.
     let entry = state.get_document(&doc_id)?;

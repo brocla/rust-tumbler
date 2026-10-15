@@ -787,7 +787,7 @@ pub fn read_typewriter_annots(buffer: &[u8]) -> Result<Vec<TypewriterAnnot>, App
 
 // ── Commands ─────────────────────────────────────────────────────────────────
 
-fn apply_typewriter_impl(
+pub(crate) fn apply_typewriter_impl(
     state: &AppState,
     doc_id: String,
     annots: Vec<TypewriterAnnot>,

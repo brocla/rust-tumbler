@@ -294,7 +294,7 @@ pub fn set_signature_strokes(
 // Discovery
 // ---------------------------------------------------------------------------
 
-fn get_form_fields_impl(
+pub(crate) fn get_form_fields_impl(
     state: &AppState,
     doc_id: String,
     page: u32,
@@ -603,7 +603,7 @@ fn classify(
 // Writing a value
 // ---------------------------------------------------------------------------
 
-fn set_form_field_value_impl(
+pub(crate) fn set_form_field_value_impl(
     state: &AppState,
     doc_id: String,
     field_id: String,
@@ -737,13 +737,13 @@ fn signature_appearance_stream(strokes: &[Vec<[f32; 2]>], w: f32, h: f32) -> Str
 
 /// Which fields a reset touches.
 #[derive(Debug)]
-enum ResetScope {
+pub(crate) enum ResetScope {
     All,
     Only(Vec<String>),
     Except(Vec<String>),
 }
 
-fn document_has_form_impl(state: &AppState, doc_id: String) -> Result<bool, AppError> {
+pub(crate) fn document_has_form_impl(state: &AppState, doc_id: String) -> Result<bool, AppError> {
     let buffer = {
         let entry = state.get_document(&doc_id)?;
         let entry = lock_mutex(&entry)?;
@@ -817,7 +817,7 @@ fn reset_scope_for_button(
     })
 }
 
-fn reset_scope_impl(state: &AppState, doc_id: String, scope: ResetScope) -> Result<(), AppError> {
+pub(crate) fn reset_scope_impl(state: &AppState, doc_id: String, scope: ResetScope) -> Result<(), AppError> {
     let buffer = {
         let entry = state.get_document(&doc_id)?;
         let entry = lock_mutex(&entry)?;

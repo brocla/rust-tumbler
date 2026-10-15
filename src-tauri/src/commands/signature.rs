@@ -87,7 +87,7 @@ pub fn get_signature_info(
     get_signature_info_impl(&state, doc_id).map_err(String::from)
 }
 
-fn get_signature_info_impl(state: &AppState, doc_id: String) -> Result<SignatureInfo, AppError> {
+pub(crate) fn get_signature_info_impl(state: &AppState, doc_id: String) -> Result<SignatureInfo, AppError> {
     // Verify the in-memory buffer, not the file on disk: with non-destructive
     // editing (issue #31) an unsaved edit must already report as breaking the
     // signature before the user saves.

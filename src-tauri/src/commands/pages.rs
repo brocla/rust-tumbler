@@ -104,7 +104,7 @@ pub fn delete_pages(
     Ok(info)
 }
 
-fn delete_pages_impl(
+pub(crate) fn delete_pages_impl(
     state: &AppState,
     doc_id: String,
     page_numbers: Vec<u32>,
@@ -244,7 +244,7 @@ pub fn reorder_pages(
     Ok(info)
 }
 
-fn reorder_pages_impl(
+pub(crate) fn reorder_pages_impl(
     state: &AppState,
     doc_id: String,
     new_order: Vec<u32>,
@@ -328,7 +328,7 @@ pub fn merge_document(
     Ok(info)
 }
 
-fn merge_document_impl(
+pub(crate) fn merge_document_impl(
     state: &AppState,
     doc_id: String,
     source_path: String,
@@ -403,7 +403,7 @@ pub fn split_document(
     split_document_impl(&state, doc_id, first_page, last_page, dest_path).map_err(String::from)
 }
 
-fn split_document_impl(
+pub(crate) fn split_document_impl(
     state: &AppState,
     doc_id: String,
     first_page: u32,

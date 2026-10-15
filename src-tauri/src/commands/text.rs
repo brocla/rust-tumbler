@@ -669,7 +669,7 @@ pub async fn page_text_coverage(
         .map_err(String::from)
 }
 
-fn page_text_coverage_impl(
+pub(crate) fn page_text_coverage_impl(
     entry: Arc<Mutex<DocEntry>>,
     doc_id: String,
     cache: OcrCache,
@@ -734,7 +734,7 @@ pub async fn export_text(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn export_text_impl(
+pub(crate) fn export_text_impl(
     emit_progress: impl Fn(u32, u32),
     entry: Arc<Mutex<DocEntry>>,
     doc_id: String,

@@ -33,11 +33,14 @@ jobs:
 
       - name: Download pdfium.dll
         # The real pdfium runtime is not checked into the repo. Fetch the
-        # win-x64 build so the installers ship a working PDF engine.
+        # win-x64 build so the installers ship a working PDF engine. Pinned to
+        # the build development and CI test against (ci.yml pins the same
+        # tag), not releases/latest, so an installer never ships an engine
+        # nothing was tested on. Bump the three together.
         working-directory: src-tauri
         run: |
           New-Item -ItemType Directory -Force -Path resources | Out-Null
-          $url = "https://github.com/bblanchon/pdfium-binaries/releases/latest/download/pdfium-win-x64.tgz"
+          $url = "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/7881/pdfium-win-x64.tgz"
           Invoke-WebRequest -Uri $url -OutFile pdfium.tgz
           tar -xzf pdfium.tgz bin/pdfium.dll
           Copy-Item bin/pdfium.dll resources/pdfium.dll -Force

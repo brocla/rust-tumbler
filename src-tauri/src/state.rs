@@ -418,6 +418,14 @@ impl AppState {
         Ok(())
     }
 
+    /// The ids of every open document, sorted. The GUI tracks its tabs itself;
+    /// this serves the CLI's `doc_list`.
+    pub fn document_ids(&self) -> Result<Vec<String>, AppError> {
+        let mut ids: Vec<String> = lock_mutex(&self.documents)?.keys().cloned().collect();
+        ids.sort();
+        Ok(ids)
+    }
+
     /// Stages (or replaces) the redacted copy for a document.
     pub fn set_pending_redaction(
         &self,
@@ -618,6 +626,24 @@ mod tests {
 
         state.remove_document("doc1").expect("remove");
         assert!(matches!(state.get_document("doc1"), Err(AppError::NotFound(_))));
+    }
+
+    /// `document_ids` lists every open document, sorted, and tracks removal.
+    #[test]
+    fn document_ids_lists_open_documents_sorted() {
+        let pdfium = crate::test_pdfium();
+        let state = AppState::new(pdfium.get(), None);
+        assert!(state.document_ids().expect("ids").is_empty());
+
+        let file_path = crate::fixture_path().to_string_lossy().into_owned();
+        for id in ["b", "a"] {
+            let entry = DocEntry::load(pdfium.get(), &file_path, None).expect("load pdf");
+            state.insert_document(id.to_string(), entry).expect("insert");
+        }
+        assert_eq!(state.document_ids().expect("ids"), ["a", "b"]);
+
+        state.remove_document("a").expect("remove");
+        assert_eq!(state.document_ids().expect("ids"), ["b"]);
     }
 
     /// The password prompt flow (issue #12) rests on two pdfium facts: an

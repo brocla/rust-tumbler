@@ -621,7 +621,7 @@ pub struct ImageInfo {
 
 /// Describe every image in the document. Read-only, and deliberately cheap: it
 /// reads stream dictionaries and JPEG headers but never decodes pixels.
-fn inspect_images_impl(pdf_bytes: &[u8]) -> Result<Vec<ImageInfo>, AppError> {
+pub(crate) fn inspect_images_impl(pdf_bytes: &[u8]) -> Result<Vec<ImageInfo>, AppError> {
     let doc = Document::load_mem(pdf_bytes)
         .map_err(|e| AppError::lopdf("Failed to parse PDF for image inspection", e))?;
 
@@ -693,7 +693,7 @@ const MIN_REENCODE_WIN: f32 = 0.90;
 
 /// Settings for the image step.
 #[derive(Clone, Copy)]
-struct ImageOptions {
+pub(crate) struct ImageOptions {
     target_dpi: f32,
     jpeg_quality: u8,
     /// Re-encode images that are already at or below `target_dpi`, keeping
@@ -1059,7 +1059,7 @@ pub async fn run_optimization_steps(
 /// output bytes (`None` if cancelled). Pure with respect to `AppState` so it
 /// can run inside `spawn_blocking`.
 #[allow(clippy::type_complexity)]
-fn run_optimization_steps_impl(
+pub(crate) fn run_optimization_steps_impl(
     emit: &dyn Fn(CompressProgress),
     pdf_bytes: &[u8],
     steps: Vec<StepId>,

@@ -1074,7 +1074,7 @@ pub fn find_redaction_matches(
         .map_err(String::from)
 }
 
-fn find_redaction_matches_impl(
+pub(crate) fn find_redaction_matches_impl(
     state: &AppState,
     doc_id: String,
     query: String,
@@ -1210,7 +1210,7 @@ pub fn save_redacted_copy(
     save_redacted_copy_impl(&state, &doc_id, &dest_path).map_err(String::from)
 }
 
-fn save_redacted_copy_impl(
+pub(crate) fn save_redacted_copy_impl(
     state: &AppState,
     doc_id: &str,
     dest_path: &str,

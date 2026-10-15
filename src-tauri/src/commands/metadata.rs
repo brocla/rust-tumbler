@@ -36,7 +36,7 @@ pub fn get_metadata(
     get_metadata_impl(&state, doc_id).map_err(String::from)
 }
 
-fn get_metadata_impl(state: &AppState, doc_id: String) -> Result<DocumentMetadata, AppError> {
+pub(crate) fn get_metadata_impl(state: &AppState, doc_id: String) -> Result<DocumentMetadata, AppError> {
     let entry = state.get_document(&doc_id)?;
     let entry = lock_mutex(&entry)?;
 
@@ -69,7 +69,7 @@ pub fn find_redaction_metadata_matches(
     find_redaction_metadata_matches_impl(&state, doc_id, queries).map_err(String::from)
 }
 
-fn find_redaction_metadata_matches_impl(
+pub(crate) fn find_redaction_metadata_matches_impl(
     state: &AppState,
     doc_id: String,
     queries: Vec<String>,
@@ -180,7 +180,7 @@ pub fn set_metadata(
     Ok(result)
 }
 
-fn set_metadata_impl(
+pub(crate) fn set_metadata_impl(
     state: &AppState,
     doc_id: String,
     metadata: MetadataUpdate,
