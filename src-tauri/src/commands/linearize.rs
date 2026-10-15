@@ -346,8 +346,14 @@ mod tests {
     use super::*;
     use crate::state::DocEntry;
 
+    /// A path in the temp folder, in canonical form, because that is what the
+    /// app stores: the frontend canonicalizes a path before opening it. On CI
+    /// runners `TEMP` is an 8.3 short path (`C:\Users\RUNNER~1\...`), so a raw
+    /// one never matches the canonicalized destination the open-elsewhere
+    /// check compares against.
     fn tmp_path(name: &str) -> String {
-        std::env::temp_dir().join(name).to_string_lossy().into_owned()
+        let dir = dunce::canonicalize(std::env::temp_dir()).expect("canonical temp dir");
+        dir.join(name).to_string_lossy().into_owned()
     }
 
     fn state_with_stub_linearizer(pdfium: &'static pdfium_render::prelude::Pdfium) -> AppState {
