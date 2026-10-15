@@ -19,7 +19,7 @@ pub(crate) fn doc_open(auto: &mut Automation, args: DocOpenArgs) -> ToolResult {
     let entry = DocEntry::load(auto.state.pdfium, &path, args.password.as_deref()).map_err(|e| match e {
         AppError::PasswordRequired => failed(format!("{path} is password-protected: pass its password")),
         AppError::WrongPassword => failed(format!("wrong password for {path}")),
-        other => failed(other),
+        other => failed(format!("{path}: {other}")),
     })?;
     // Only once the file has opened, so a failed open uses up no id.
     let id = auto.issue_doc_id()?;

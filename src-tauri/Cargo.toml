@@ -72,6 +72,9 @@ hex = "0.4.3"
 # structs so schema and parser cannot drift. Held at the version Tauri already
 # brings in, so adding it changed nothing else in the lockfile.
 schemars = "1.2.1"
+# Argument parsing for tumbler-cli. Held at 4.5: 4.6's derive brings in a second
+# `syn` (3.x). No default features, so no color support and its console crates.
+clap = { version = "~4.5", default-features = false, features = ["std", "derive", "help", "usage", "error-context"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.61", features = [
@@ -81,6 +84,8 @@ windows = { version = "0.61", features = [
     "Win32_Security_Cryptography",
     "Win32_Storage_Xps",
     "Win32_System_Com",
+    # Ctrl+C cancellation in tumbler-cli (SetConsoleCtrlHandler)
+    "Win32_System_Console",
     "Win32_System_LibraryLoader",
     "Win32_System_Memory",
     "Win32_System_Registry",

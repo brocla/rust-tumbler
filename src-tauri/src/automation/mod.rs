@@ -13,10 +13,13 @@
 //! - Edits apply to the in-memory document; only `doc_save` writes it.
 
 mod args;
+pub mod cli;
 mod handlers;
 mod paths;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_cli;
 #[cfg(test)]
 mod tests_edit;
 mod tools;

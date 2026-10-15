@@ -648,3 +648,14 @@ fn type_errors_name_the_argument() {
     let m = invalid(&mut auto, "text_extract", json!({ "doc": 1, "pages": [1, 0] }));
     assert!(m.contains("`pages`"), "{m}");
 }
+
+/// A file that isn't a PDF fails with an error naming it.
+#[test]
+fn doc_open_names_a_file_that_is_not_a_pdf() {
+    let pdfium = crate::test_pdfium();
+    let dir = TempDir::new("open");
+    let png = dir.file("picture.png", b"\x89PNG not a pdf");
+    let mut auto = session(pdfium.get());
+    let m = failed_with(&mut auto, "doc_open", json!({ "path": s(&png) }));
+    assert!(m.contains("picture.png"), "{m}");
+}
